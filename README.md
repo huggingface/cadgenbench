@@ -12,14 +12,11 @@ the same `output.step` submission contract apply to both.
 
 This repository contains:
 
-- The **benchmark**: fixtures (`data/inputs/` + `data/gt/`), the
-  scoring metrics, and the report tools.
+- The **benchmark**: scoring metrics + report tools. Fixtures (inputs +
+  ground truth) are hosted as HF dataset repos and resolved at runtime;
+  see [Dataset](#dataset).
 - A **reference baseline**: an iterative LLM agent that writes
   build123d Python, validates its STEP output, and loops until done.
-
-The dataset will eventually live in a sibling HF dataset repo
-(`<org>/cadgenbench-data`); for v1 the seven fixtures live in `data/`
-inside this repo.
 
 ## Installation
 
@@ -43,7 +40,15 @@ pip install -e ".[baseline,dev]"
 # step, not per-env.
 playwright install chromium
 
-# 4. (only if you'll run the baseline) provider API keys
+# 4. Point cadgenbench at the fixture datasets on the Hub. The
+# ground-truth repo is private, so an HF_TOKEN with read access is
+# required (https://huggingface.co/settings/tokens). cadgenbench
+# snapshot-downloads each repo on first use and caches it under
+# ~/.cache/huggingface/hub/.
+export CADGENBENCH_DATA_REPO=HuggingAI4Engineering/cadgenbench-data
+export CADGENBENCH_DATA_GT_REPO=HuggingAI4Engineering/cadgenbench-data-gt
+
+# 5. (only if you'll run the baseline) provider API keys
 cp .env.example .env   # then fill in ANTHROPIC_API_KEY / OPENAI_API_KEY / ...
 ```
 
@@ -58,17 +63,17 @@ cadgenbench --help
 pytest tests/ -q
 ```
 
-All `cadgenbench` commands must be run from the repo root (the
-directory that contains `data/`). `cgb` is a shorter alias for the
-same entry point.
+`cgb` is a shorter alias for the same entry point.
 
 ## Quick start: evaluate a candidate
 
 The benchmark scores per-fixture STEP outputs from any generator
 (LLM agent, script, manual modelling) against the ground truth.
 
-1. For every fixture name in `data/inputs/`, produce an `output.step`
-   file and place it under
+1. For every fixture in `cadgenbench-data` (list them with
+   `python -c "from cadgenbench.common.paths import data_inputs_dir;
+   print(*sorted(p.name for p in data_inputs_dir().iterdir() if p.is_dir()), sep='\n')"`),
+   produce an `output.step` file and place it under
    `results/<your_run_name>/<fixture_name>/output.step`.
 
 2. Score:
@@ -176,11 +181,16 @@ deep dives.
 
 ## Dataset
 
-For v1, the fixtures (mating-jig parts plus a derived editing-task variant)
-live under `data/` in this repo. A separate HF dataset repo
-(`<org>/cadgenbench-data`) is planned; once it exists the file-system
-loader will be swapped for `datasets.load_dataset(...)` and `data/`
-will be removed from this repo's history.
+Fixtures live in two HF dataset repos:
+
+- [`HuggingAI4Engineering/cadgenbench-data`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data) — inputs (descriptions, optional input STEPs and renders) for every fixture.
+- [`HuggingAI4Engineering/cadgenbench-data-gt`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data-gt) — ground truth (`ground_truth.step`, optional jig sub-volumes, renders). **Private**; reading requires an `HF_TOKEN`.
+
+`cadgenbench.common.paths.data_inputs_dir()` and `data_gt_dir()` resolve
+each repo via `huggingface_hub.snapshot_download` when the
+`CADGENBENCH_DATA_REPO` / `CADGENBENCH_DATA_GT_REPO` env vars are set
+(see [Installation](#installation)). Snapshots cache under
+`~/.cache/huggingface/hub/`; subsequent calls only HEAD-check the Hub.
 
 See [docs/benchmark/authoring.md](docs/benchmark/authoring.md) for the
 fixture schema and [docs/benchmark/submission.md](docs/benchmark/submission.md)
