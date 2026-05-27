@@ -52,20 +52,6 @@ cgb = "cadgenbench.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cadgenbench"]
-# Defensive: holding folder is outside src/ already; keep it out of the wheel
-# in case someone adds a wildcard include later.
-exclude = ["_to_move_to_dataset_repo"]
-
-# Bundle the fixtures + ground-truth into the wheel so a pip-only
-# install (e.g. inside an HF Space) ships everything cadgenbench
-# evaluate needs without a separate data-download step. Resolved by
-# cadgenbench.common.paths.data_dir() as the third-priority fallback;
-# the env var override + CWD/data still win when present, so in-repo
-# dev keeps working unchanged. When `cadgenbench-data` lands as its
-# own HF dataset, this `force-include` can go away (see
-# space-setup/migration.md).
-[tool.hatch.build.targets.wheel.force-include]
-"data" = "cadgenbench/_data"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,13 +1,9 @@
 """Resolve the cadgenbench fixture inputs + ground-truth directories.
 
-Single source of truth for "where are the fixtures", so the rest of
-the codebase stays agnostic to whether they live in-tree (dev), bundled
-in the wheel (pip-installed Space), or downloaded from a Hub dataset
-repo (the long-run target).
-
-There are two helpers callers use: :func:`data_inputs_dir` (fixture
-inputs: ``description.yaml``, ``input.png``, optional ``input.step``)
-and :func:`data_gt_dir` (ground truth: ``ground_truth.step``, optional
+Single source of truth for "where are the fixtures". Two helpers
+callers use: :func:`data_inputs_dir` (fixture inputs:
+``description.yaml``, ``input.png``, optional ``input.step``) and
+:func:`data_gt_dir` (ground truth: ``ground_truth.step``, optional
 sub-volume jig STEPs, optional renders).
 
 Each helper independently resolves through this order, first match wins:
@@ -18,24 +14,22 @@ Each helper independently resolves through this order, first match wins:
    the local snapshot directory; the snapshot root *is* the fixtures
    root (each top-level entry is a fixture directory). Private repos
    need ``HF_TOKEN`` in the environment; ``snapshot_download`` picks
-   it up automatically. This is the production path for the
-   leaderboard Space.
-2. **Explicit dir override** (``$CADGENBENCH_DATA_DIR``). Same shape
-   as the in-repo ``data/`` tree (i.e. has ``inputs/`` + ``gt/``
-   subdirectories). Useful for tests, CI, or pinning to a local
-   snapshot.
-3. **Current-working-directory ``./data/``**. The legacy in-repo dev
-   workflow.
-4. **Wheel-bundled ``<package>/_data/``**. Shipped via
-   ``[tool.hatch.build.targets.wheel.force-include]`` in
-   ``pyproject.toml``. Lets a pip-only install (e.g. an HF Space)
-   work out of the box without configuring any env vars.
+   it up automatically. This is the production path for both the
+   leaderboard Space and local dev.
+2. **Explicit dir override** (``$CADGENBENCH_DATA_DIR``). Pointer to
+   a local dir laid out like the legacy in-repo tree (``inputs/`` +
+   ``gt/`` subdirectories). Useful for tests, CI, or pinning to a
+   local snapshot.
+3. **Current-working-directory ``./data/``**. Backward compat path
+   for users who manually drop a ``data/`` dir into their CWD; the
+   in-repo ``cadgenbench/data/`` was removed once the Hub datasets
+   came online.
 
 The Hub branch is independent per helper because inputs and ground
-truth live in two separate dataset repos (public-at-launch vs
-permanently-private). Branches 2-4 share :func:`data_dir`, which
+truth live in two separate dataset repos (one public-at-launch, one
+permanently-private). Branches 2-3 share :func:`data_dir`, which
 returns the local parent containing both ``inputs/`` and ``gt/``
-subdirectories; it's only meaningful in the local/bundled modes.
+subdirectories; it's only meaningful when neither Hub env var is set.
 """
 from __future__ import annotations
 
@@ -53,15 +47,16 @@ _ENV_DATA_GT_REPO = "CADGENBENCH_DATA_GT_REPO"
 def data_dir() -> Path:
     """Resolve the local fixtures parent dir (with ``inputs/`` + ``gt/``).
 
-    Tries ``$CADGENBENCH_DATA_DIR`` -> ``./data/`` (CWD) -> bundled
-    ``<package>/_data/``, in that order. Does NOT consult the Hub
-    branch -- when inputs and ground truth live in separate Hub repos
-    there's no single parent dir; callers should use
-    :func:`data_inputs_dir` and :func:`data_gt_dir` directly.
+    Tries ``$CADGENBENCH_DATA_DIR`` then ``./data/`` (CWD). Does NOT
+    consult the Hub branch -- when inputs and ground truth live in
+    separate Hub repos there's no single parent dir; callers should
+    use :func:`data_inputs_dir` and :func:`data_gt_dir` directly.
 
     Raises:
-        FileNotFoundError: if none of the three local candidates contain
-            ``inputs/`` or ``gt/`` subdirectories.
+        FileNotFoundError: when neither candidate contains ``inputs/``
+            or ``gt/`` subdirectories. The Hub-dataset path
+            (``$CADGENBENCH_DATA_REPO`` / ``$CADGENBENCH_DATA_GT_REPO``)
+            is the recommended dev workflow.
     """
     env = os.environ.get(_ENV_DATA_DIR)
     if env:
@@ -76,16 +71,12 @@ def data_dir() -> Path:
     if (cwd_candidate / "inputs").is_dir() or (cwd_candidate / "gt").is_dir():
         return cwd_candidate
 
-    bundled = Path(__file__).resolve().parent.parent / "_data"
-    if (bundled / "inputs").is_dir() or (bundled / "gt").is_dir():
-        return bundled
-
     raise FileNotFoundError(
         "Could not locate a local cadgenbench data directory. Tried "
-        f"${_ENV_DATA_DIR}, ./data/ (CWD), and the bundled "
-        f"<package>/_data/. To use a Hub-hosted dataset instead, set "
-        f"${_ENV_DATA_REPO} (for inputs) and/or ${_ENV_DATA_GT_REPO} "
-        "(for ground truth)."
+        f"${_ENV_DATA_DIR} and ./data/ (CWD). To use the Hub-hosted "
+        f"datasets instead (recommended), set ${_ENV_DATA_REPO} "
+        f"(inputs) and/or ${_ENV_DATA_GT_REPO} (ground truth, requires "
+        "HF_TOKEN with read access)."
     )
 
 
