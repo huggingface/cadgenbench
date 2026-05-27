@@ -1,0 +1,68 @@
+# CADGenBench: a benchmark for LLM-driven CAD generation
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cadgenbench"
+version = "0.1.0"
+description = "CADGenBench: a benchmark for AI-driven CAD generation"
+requires-python = ">=3.12"
+dependencies = [
+    # BREP / STEP authoring + reading. Pulls cadquery-ocp (OCP) as a
+    # transitive dep; manylinux + macOS wheels both exist on PyPI as of
+    # build123d 0.10 / cadquery-ocp 7.9, so the entire stack installs via
+    # pip with no conda-forge detour.
+    "build123d>=0.10.0",
+    # CAD geometry + mesh utilities (shared by the benchmark and the baseline)
+    "trimesh",
+    "manifold3d",
+    "numpy",
+    "scipy",
+    "Pillow",
+    "pyyaml",
+    # Headless STEP -> PNG renderer (used by both eval reports and the
+    # baseline's per-turn visual feedback to the LLM).
+    "tcv-screenshots",
+]
+
+[project.optional-dependencies]
+baseline = [
+    # The reference baseline agent talks to LLM providers via LiteLLM and
+    # loads API keys from .env via python-dotenv. Not needed for evaluating
+    # candidate submissions produced by some other generator.
+    "litellm",
+    "python-dotenv",
+]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[project.scripts]
+cadgenbench = "cadgenbench.cli:main"
+cgb = "cadgenbench.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cadgenbench"]
+# Defensive: holding folder is outside src/ already; keep it out of the wheel
+# in case someone adds a wildcard include later.
+exclude = ["_to_move_to_dataset_repo"]
+
+# Bundle the fixtures + ground-truth into the wheel so a pip-only
+# install (e.g. inside an HF Space) ships everything cadgenbench
+# evaluate needs without a separate data-download step. Resolved by
+# cadgenbench.common.paths.data_dir() as the third-priority fallback;
+# the env var override + CWD/data still win when present, so in-repo
+# dev keeps working unchanged. When `cadgenbench-data` lands as its
+# own HF dataset, this `force-include` can go away (see
+# space-setup/migration.md).
+[tool.hatch.build.targets.wheel.force-include]
+"data" = "cadgenbench/_data"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+filterwarnings = [
+    "ignore::DeprecationWarning:ezdxf",
+]

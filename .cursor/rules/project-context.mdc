@@ -1,0 +1,84 @@
+# CADGenBench: project context
+
+## what this is
+A benchmark for **LLM-driven CAD generation**: given a textual or
+visual description of a mechanical part, how well does an LLM produce
+a valid, geometrically correct 3D model? The repo contains the
+benchmark fixtures + scoring code AND a reference baseline (an
+iterative LLM agent that writes build123d Python).
+
+This repo does NOT generate the dataset itself in the long run. A
+sibling HF dataset repo (`<org>/cadgenbench-data`) is planned; until
+it exists the fixtures live under `data/` here. The set is still
+shifting (parts get added, removed, or replaced as authoring catches
+issues), so do not hardcode the count anywhere; treat `data/inputs/`
+as the source of truth.
+
+## scope (what to ship in v1)
+- A small set of fixtures (mating-jig parts plus derived editing-task
+  fixtures) under `data/inputs/` (public) + `data/gt/` (release TBD).
+- Four metric axes: validity (gate), shape similarity, interface
+  match, topology match. Combined as **CAD Score** = mean of
+  applicable components, hard-zeroed by validity failure.
+- One CLI entry point: `cadgenbench` (alias `cgb`) with subcommands
+  `evaluate`, `baseline run`, `baseline compare-llms`, `report single`,
+  `report compare`.
+- One baseline: iterative build123d agent (no other strategies, no
+  multi-library helper agents).
+
+## critical design principles
+- **CAD geometry is always loaded from BREP**, never from a
+  pre-tessellated mesh. Measurements (volume, bbox, topology counts)
+  come from OCCT on the BREP. Triangulation is only for the renderer
+  and for mesh-pipeline sanity checks.
+- **The evaluator takes a STEP file and returns a metrics dict.** It
+  does not know which code (LLM, script, human) produced the geometry.
+  This is what makes the benchmark generator-agnostic.
+- **The LLM layer is model-agnostic.** All LLM calls go through
+  LiteLLM. No Anthropic / OpenAI / Gemini SDK imports in core modules.
+- **Keep it simple.** No abstractions until a second implementation
+  demands one. Drop dead options aggressively (we already dropped the
+  multi-strategy dispatcher, the multi-library helper agents, and the
+  metadata-side-metric path because none of them had a real consumer).
+
+## key libraries
+| concern | library | notes |
+|---|---|---|
+| CAD geometry | build123d | Python wrapper over OCCT; pip-installable via the cadquery-ocp wheel |
+| OCCT bindings | OCP | ships with build123d |
+| Mesh / boolean ops | trimesh, manifold3d | mesh-side validity + interface IoU |
+| LLM routing | LiteLLM | unified API across providers |
+| Headless render | tcv-screenshots | OCCT-accurate via three-cad-viewer + Chromium |
+| Config / yaml | PyYAML | fixture descriptions, AgentConfig defaults |
+
+## repo layout (high level)
+```
+src/cadgenbench/        package source
+  cli.py                unified `cadgenbench` entry
+  common/               shared between eval and baseline
+  eval/                 metrics, alignment, reports
+  baseline/             reference LLM agent
+data/                   benchmark fixtures (inputs + gt)
+tests/                  pytest, mirrors src/cadgenbench/
+docs/                   metric specs + benchmark authoring guides
+_to_move_to_dataset_repo/   sanity-check scripts slated to move to
+                            the cadgenbench-data HF dataset repo
+```
+
+## what was removed (don't re-introduce)
+Earlier iterations of this codebase tried to be many things at once;
+most got cut. If you see references to any of these in old git
+history, they are intentionally gone and should not come back without
+explicit discussion:
+- Browser-based opencascade.js WASM viewer + FastAPI/WebSocket server.
+- Multi-strategy agent dispatcher (only one strategy ever existed).
+- Multi-library cheat sheets (bd_warehouse, py_gearworks,
+  gridfinity_build123d). The baseline uses build123d only.
+- Free-text `--task` invocation of the baseline (no fixture).
+- DINOv1 visual-similarity metric (a deleted `_render.py` under the
+  old validator path).
+- `gt_metadata` / `metadata_metrics` (weight-error side metric).
+- Per-fixture `ground_truth.glb` previews.
+- `gitpython` "commit per successful iteration" memory model.
+- `docs/architecture.md`, `docs/agent_v0.md`, `docs/tasks/`,
+  `docs/dataset_research/`, `docs/metrics_bundle.*`.

@@ -1,0 +1,17 @@
+# Enforce LF line endings for all text files (HF / Unix standard).
+# Applies to checkouts on every platform; CRLF in working trees gets
+# normalized to LF in the repository.
+* text=auto eol=lf
+
+# Common binary file types -- never touch line endings on these.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.webp binary
+*.pdf  binary
+*.docx binary
+*.glb  binary
+*.stl  binary
+*.mp4  binary
+*.zip  binary

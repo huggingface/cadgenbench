@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.venv/
+
+# Local env
+.env
+.DS_Store
+
+# Generated CAD artifacts (allowlist dataset + test fixtures below).
+# The catch-all `!tests/**/*.step` covers shared fixtures under
+# tests/fixtures/, per-bucket fixtures under tests/eval/fixtures/, etc.
+# Editing-task fixtures ship a starting STEP under data/inputs/<fixture>/.
+*.step
+*.stl
+!data/gt/**/*.step
+!data/inputs/**/*.step
+!tests/**/*.step
+
+# Generated viewer renders (regenerable; not source-of-truth)
+tests/viewer/debug_renders/
+tests/fixtures/jig_metric/**/*.png
+
+# Run outputs and reports (regenerable)
+results/
+reports/
+benchmark_*.html
+results_*.html
+compare_*.html
+
+# Debug outputs (regenerable via in-module helpers, e.g.
+# cadgenbench.eval.feature_edges.write_feature_edge_overlay_png).
+outputs/

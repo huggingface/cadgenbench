@@ -1,0 +1,13 @@
+description: >
+  Edit the supplied part: double the diameter of the central through-hole
+  from 10 mm to 20 mm. Keep all other dimensions of the plate identical
+  (60 x 40 x 8 mm bounding box, hole centred at the origin, through the
+  full plate thickness along Z).
+
+task_type: editing
+input_files:
+  - input.step
+  - input.png
+
+input_type: text+image+step
+category: cat3-interface-jig

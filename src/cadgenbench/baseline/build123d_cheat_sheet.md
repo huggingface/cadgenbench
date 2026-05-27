@@ -1,0 +1,225 @@
+# build123d
+
+Python-based parametric BREP CAD framework built on the OpenCascade kernel. This is the core geometry engine, all other libraries build on top of it.
+
+**Default units: millimeters (mm).**  All dimensions are in mm unless explicitly converted with `Unit` (e.g. `1 * IN`, `1 * FT`).
+
+## Key concepts
+
+- **Builder pattern**: `BuildPart`, `BuildSketch`, `BuildLine` context managers for 3D, 2D, 1D construction
+- **Mode**: `Mode.ADD` (default), `Mode.SUBTRACT`, `Mode.INTERSECT` control boolean ops inside builders
+- **Align**: `Align.CENTER`, `Align.MIN`, `Align.MAX` for positioning primitives
+- **Locations**: `Locations`, `GridLocations`, `PolarLocations` for placing features at multiple positions
+- **Export**: `export_step()`, `export_stl()` as standalone functions (not methods on parts)
+
+## 3D primitives (inside BuildPart)
+
+```python
+from build123d import *
+
+Box(width, height, depth)
+Cylinder(radius, height)
+Sphere(radius)
+Cone(bottom_radius, top_radius, height)
+Torus(major_radius, minor_radius)
+Wedge(dx, dy, dz, xmin, zmin, xmax, zmax)
+```
+
+## 2D sketches (inside BuildSketch)
+
+```python
+Circle(radius)
+Rectangle(width, height)
+RegularPolygon(radius, side_count)
+Text("label", font_size=12)
+```
+
+## Operations
+
+```python
+extrude(amount=50)                    # sketch → solid
+extrude(amount=50, taper=10)          # tapered extrusion
+revolve(axis=Axis.Z)                  # sketch → solid of revolution
+loft()                                # between multiple sketches at different planes
+sweep()                               # profile along a path
+fillet(edges, radius=5)               # round edges
+chamfer(edges, length=3)              # bevel edges
+offset(amount=-5)                     # shell (hollow out)
+split(bisect_by=Plane.XY, keep=Keep.TOP)
+mirror(about=Plane.YZ)
+```
+
+## Holes
+
+```python
+Hole(radius, depth=None)              # simple through/blind hole
+CounterBoreHole(radius, counter_bore_radius, counter_bore_depth, depth)
+CounterSinkHole(radius, counter_sink_radius, depth)
+```
+
+## Positioning features
+
+```python
+with Locations((x1, y1), (x2, y2)):           # explicit positions
+    Hole(radius=5, depth=10)
+
+with GridLocations(x_spacing, y_spacing, x_count, y_count):
+    Cylinder(radius=3, height=5, mode=Mode.SUBTRACT)
+
+with PolarLocations(radius, count):           # bolt circle
+    Hole(radius=4, depth=10)
+```
+
+## Planes and offsets
+
+```python
+Plane.XY                    # default horizontal plane
+Plane.XZ                    # vertical front plane
+Plane.YZ                    # vertical side plane
+Plane.XY.offset(50)         # horizontal plane shifted up 50mm
+```
+
+## Lines (inside BuildLine)
+
+```python
+Line((x1, y1), (x2, y2))
+Polyline((x1,y1), (x2,y2), (x3,y3))
+TangentArc(start, end, tangent=direction)
+Helix(pitch, height, radius)
+```
+
+## Import / export
+
+```python
+export_step(part, "output.step")
+export_stl(part, "output.stl", tolerance=0.01)
+imported = import_step("input.step")
+```
+
+## All available classes
+
+### Builders (context managers)
+| Class | Purpose |
+|---|---|
+| `BuildPart()` | 3D solid construction |
+| `BuildSketch(plane)` | 2D sketch on a plane (default: `Plane.XY`) |
+| `BuildLine()` | 1D curve/path construction |
+
+### 3D primitives (inside BuildPart)
+| Class | Key parameters |
+|---|---|
+| `Box` | `width, height, depth` |
+| `Cylinder` | `radius, height` |
+| `Sphere` | `radius` |
+| `Cone` | `bottom_radius, top_radius, height` |
+| `Torus` | `major_radius, minor_radius` |
+| `Wedge` | `dx, dy, dz, xmin, zmin, xmax, zmax` |
+| `Hole` | `radius, depth` (through hole if depth=None) |
+| `CounterBoreHole` | `radius, counter_bore_radius, counter_bore_depth, depth` |
+| `CounterSinkHole` | `radius, counter_sink_radius, depth` |
+
+### 2D sketch objects (inside BuildSketch)
+| Class | Key parameters |
+|---|---|
+| `Circle` | `radius` |
+| `Ellipse` | `x_radius, y_radius` |
+| `Rectangle` | `width, height` |
+| `RectangleRounded` | `width, height, radius` |
+| `RegularPolygon` | `radius, side_count` |
+| `SlotArc` | `arc, height` |
+| `SlotCenterToCenter` | `center_separation, height` |
+| `SlotOverall` | `width, height` |
+| `Text` | `txt, font_size` |
+| `Trapezoid` | `width, height, left_side_angle, right_side_angle` |
+| `Triangle` | various constructors |
+
+### 1D line/curve objects (inside BuildLine)
+| Class | Key parameters |
+|---|---|
+| `Line` | `start, end` |
+| `Polyline` | `*points` |
+| `Arc` | `start, end, radius` |
+| `TangentArc` | `start, end, tangent` |
+| `Spline` | `*points, tangents` |
+| `Helix` | `pitch, height, radius` |
+| `CenterArc` | `center, radius, start_angle, arc_size` |
+| `RadiusArc` | `start, end, radius` |
+| `SagittaArc` | `start, end, sagitta` |
+| `ThreePointArc` | `p1, p2, p3` |
+| `Bezier` | `*points` |
+
+### Operations (functions, not classes)
+| Function | Purpose |
+|---|---|
+| `extrude(amount, taper, both)` | Sketch → solid |
+| `revolve(axis, revolution_arc)` | Sketch → solid of revolution |
+| `loft(ruled)` | Connect sketches at different planes |
+| `sweep(path, multisection)` | Sweep profile along path |
+| `fillet(edges, radius)` | Round edges |
+| `chamfer(edges, length)` | Bevel edges |
+| `offset(amount)` | Shell / offset faces |
+| `split(bisect_by, keep)` | Split with plane |
+| `mirror(about)` | Mirror geometry |
+| `add(obj)` | Add imported geometry to builder |
+| `make_face()` | Convert closed edges to a face |
+
+### Location helpers (context managers)
+| Class | Purpose |
+|---|---|
+| `Locations(*points)` | Place at explicit positions |
+| `GridLocations(x_spacing, y_spacing, x_count, y_count)` | Rectangular grid |
+| `PolarLocations(radius, count, start_angle, angular_range)` | Circular pattern |
+| `HexLocations(apothem, x_count, y_count)` | Hexagonal grid |
+
+### Planes and axes
+| Name | Description |
+|---|---|
+| `Plane.XY`, `Plane.XZ`, `Plane.YZ` | Standard planes |
+| `Plane.XY.offset(d)` | Plane shifted by `d` mm |
+| `Axis.X`, `Axis.Y`, `Axis.Z` | Standard axes |
+
+### Enums
+| Enum | Values |
+|---|---|
+| `Mode` | `ADD`, `SUBTRACT`, `INTERSECT`, `REPLACE`, `PRIVATE` |
+| `Align` | `MIN`, `CENTER`, `MAX` |
+| `Keep` | `TOP`, `BOTTOM`, `BOTH` |
+| `Unit` | `MM`, `CM`, `M`, `IN`, `FT` |
+
+### Import / export functions
+| Function | Purpose |
+|---|---|
+| `export_step(obj, path, unit)` | Export to STEP |
+| `export_stl(obj, path, tolerance, angular_tolerance)` | Export to STL |
+| `export_svg(obj, path)` | Export to SVG |
+| `import_step(path)` | Import STEP file |
+| `import_stl(path)` | Import STL mesh as solid |
+| `import_svg(path)` | Import SVG paths |
+
+### Part properties
+| Property | Description |
+|---|---|
+| `.volume` | Part volume |
+| `.area` | Surface area |
+| `.bounding_box()` | Bounding box (`.min`, `.max`, `.size`) |
+| `.edges()` | All edges (filterable with `.filter_by(Axis.Z)`) |
+| `.faces()` | All faces |
+| `.center()` | Center of mass |
+
+## Complete example: bracket with mounting holes
+
+```python
+from build123d import *
+
+with BuildPart() as bracket:
+    Box(80, 60, 10)
+    with BuildSketch(Plane.XY.offset(10)) as rib_profile:
+        Rectangle(10, 60)
+    extrude(amount=30)
+    fillet(bracket.edges().filter_by(Axis.Z), radius=3)
+    with Locations((0, 0, 10)):
+        with GridLocations(50, 40, 2, 2):
+            Hole(radius=3, depth=10)
+
+export_step(bracket.part, "bracket.step")
+```

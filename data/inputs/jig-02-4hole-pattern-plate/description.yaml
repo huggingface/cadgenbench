@@ -1,0 +1,10 @@
+description: >
+  Reproduce the part as accurately as possible from the input image.
+  The finished part fits within an overall bounding box of approximately
+  100 x 60 x 8 mm.
+
+input_files:
+  - input.png
+
+input_type: text+image
+category: cat3-interface-jig
