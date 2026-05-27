@@ -138,6 +138,24 @@ def analyze_step(step_path: str | Path) -> ValidityResult:
     return ValidityResult(validation=validation, measurements=measurements)
 
 
+def parse_step(step_path: str | Path) -> None:
+    """Cheap check that a file can be loaded as STEP geometry.
+
+    Runs only the STEP reader (``build123d.import_step``), no BRepCheck,
+    no watertight test, no mesh tessellation. Used by upstream callers
+    (e.g. the leaderboard's submit handler) that want to reject
+    non-STEP / corrupted uploads at request time but leave the full
+    validity gate to a downstream evaluator. A file that parses here
+    can still be reported as invalid by :func:`analyze_step`; that's
+    the per-fixture validity signal, distinct from "is this even STEP".
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        RuntimeError: If the file is not loadable STEP geometry.
+    """
+    _load_step_wrapped(step_path)
+
+
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@ Covers:
   - :func:`validate_step`, validity only (is_valid, is_watertight, errors).
   - :func:`analyze_step`, validity + measurements bundled into
     :class:`ValidityResult` from a single STEP load.
+  - :func:`parse_step`, parseability gate only (no BRepCheck, no mesh).
 
 Measurements alone are covered in ``tests/geometry/test_measurement.py``.
 """
@@ -15,6 +16,7 @@ from cadgenbench.common.validity import (
     ValidationResult,
     ValidityResult,
     analyze_step,
+    parse_step,
     validate_step,
 )
 from cadgenbench.common.measurements import Measurements
@@ -147,3 +149,39 @@ class TestAnalyzeStep:
     def test_missing_file(self) -> None:
         with pytest.raises(FileNotFoundError):
             analyze_step("/nonexistent/path.step")
+
+
+class TestParseStep:
+    """``parse_step`` is the cheap-load gate: parseable yes/no, no validity."""
+
+    def test_valid_step_does_not_raise(self) -> None:
+        parse_step(FIXTURES_DIR / "box.step")
+
+    def test_parseable_but_invalid_step_does_not_raise(self) -> None:
+        """Files that parse but fail the validity gate must still pass.
+
+        Surfacing per-fixture validity is :func:`analyze_step`'s job, not
+        :func:`parse_step`'s, so an open-shell STEP is "parseable" here
+        even though it isn't watertight.
+        """
+        parse_step(FIXTURES_DIR / "open_shell.step")
+
+    def test_missing_file(self) -> None:
+        with pytest.raises(FileNotFoundError):
+            parse_step("/nonexistent/path.step")
+
+    def test_corrupted_file(self, tmp_path: Path) -> None:
+        bad = tmp_path / "bad.step"
+        bad.write_text("this is not a STEP file")
+        with pytest.raises(RuntimeError):
+            parse_step(bad)
+
+    def test_empty_file(self, tmp_path: Path) -> None:
+        empty = tmp_path / "empty.step"
+        empty.write_bytes(b"")
+        with pytest.raises(RuntimeError):
+            parse_step(empty)
+
+    def test_returns_none(self) -> None:
+        """``parse_step`` is a gate; its successful return value is None."""
+        assert parse_step(FIXTURES_DIR / "box.step") is None
