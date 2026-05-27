@@ -24,6 +24,13 @@ dependencies = [
     # Headless STEP -> PNG renderer (used by both eval reports and the
     # baseline's per-turn visual feedback to the LLM).
     "tcv-screenshots",
+    # Used by cadgenbench.common.paths to optionally snapshot-download
+    # the fixture inputs + GT from HF dataset repos (when
+    # $CADGENBENCH_DATA_REPO / $CADGENBENCH_DATA_GT_REPO are set).
+    # No-op for pip-installed users who rely on the wheel-bundled
+    # `_data/` fallback; cost is one small extra wheel + zero network
+    # work at import time (snapshot_download is lazy-imported).
+    "huggingface_hub",
 ]
 
 [project.optional-dependencies]

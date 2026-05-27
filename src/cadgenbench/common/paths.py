@@ -1,47 +1,75 @@
-"""Resolve the cadgenbench fixtures + ground-truth directory.
+"""Resolve the cadgenbench fixture inputs + ground-truth directories.
 
-Single source of truth for "where is ``data/``", so the rest of the
-codebase stays agnostic to whether the fixtures live in-tree (dev
-workflow), bundled in the installed wheel (e.g. an HF Space pip-install),
-or downloaded from an HF dataset repo (future, see
-``space-setup/migration.md``).
+Single source of truth for "where are the fixtures", so the rest of
+the codebase stays agnostic to whether they live in-tree (dev), bundled
+in the wheel (pip-installed Space), or downloaded from a Hub dataset
+repo (the long-run target).
 
-Resolution order, first match wins:
+There are two helpers callers use: :func:`data_inputs_dir` (fixture
+inputs: ``description.yaml``, ``input.png``, optional ``input.step``)
+and :func:`data_gt_dir` (ground truth: ``ground_truth.step``, optional
+sub-volume jig STEPs, optional renders).
 
-1. ``$CADGENBENCH_DATA_DIR`` env var - explicit override. Useful for
-   tests, CI, and configuring a custom location once
-   ``cadgenbench-data`` is downloaded from the Hub.
-2. ``./data/`` relative to the current working directory - in-repo dev
-   workflow; backwards-compatible with how every CLI was wired before
-   this helper existed.
-3. ``<package>/_data/`` - the copy bundled into the wheel by
+Each helper independently resolves through this order, first match wins:
+
+1. **Hub dataset repo** (``$CADGENBENCH_DATA_REPO`` for inputs,
+   ``$CADGENBENCH_DATA_GT_REPO`` for ground truth). When set, the
+   helper calls :func:`huggingface_hub.snapshot_download` and returns
+   the local snapshot directory; the snapshot root *is* the fixtures
+   root (each top-level entry is a fixture directory). Private repos
+   need ``HF_TOKEN`` in the environment; ``snapshot_download`` picks
+   it up automatically. This is the production path for the
+   leaderboard Space.
+2. **Explicit dir override** (``$CADGENBENCH_DATA_DIR``). Same shape
+   as the in-repo ``data/`` tree (i.e. has ``inputs/`` + ``gt/``
+   subdirectories). Useful for tests, CI, or pinning to a local
+   snapshot.
+3. **Current-working-directory ``./data/``**. The legacy in-repo dev
+   workflow.
+4. **Wheel-bundled ``<package>/_data/``**. Shipped via
    ``[tool.hatch.build.targets.wheel.force-include]`` in
-   ``pyproject.toml``. Lets ``pip install cadgenbench`` carry the
-   fixtures along with the code, so an HF Space or any other
-   installed-only consumer works out of the box without a separate
-   data download step.
+   ``pyproject.toml``. Lets a pip-only install (e.g. an HF Space)
+   work out of the box without configuring any env vars.
 
-A future fourth branch will pull from a Hub dataset repo when
-``$CADGENBENCH_DATA_REPO`` is set; that lands when
-``cadgenbench-data`` exists as its own HF dataset.
+The Hub branch is independent per helper because inputs and ground
+truth live in two separate dataset repos (public-at-launch vs
+permanently-private). Branches 2-4 share :func:`data_dir`, which
+returns the local parent containing both ``inputs/`` and ``gt/``
+subdirectories; it's only meaningful in the local/bundled modes.
 """
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
-_ENV_VAR = "CADGENBENCH_DATA_DIR"
+logger = logging.getLogger(__name__)
+
+_ENV_DATA_DIR = "CADGENBENCH_DATA_DIR"
+_ENV_DATA_REPO = "CADGENBENCH_DATA_REPO"
+_ENV_DATA_GT_REPO = "CADGENBENCH_DATA_GT_REPO"
 
 
 def data_dir() -> Path:
-    """Resolve the canonical ``data/`` directory. Raises if not found."""
-    env = os.environ.get(_ENV_VAR)
+    """Resolve the local fixtures parent dir (with ``inputs/`` + ``gt/``).
+
+    Tries ``$CADGENBENCH_DATA_DIR`` -> ``./data/`` (CWD) -> bundled
+    ``<package>/_data/``, in that order. Does NOT consult the Hub
+    branch -- when inputs and ground truth live in separate Hub repos
+    there's no single parent dir; callers should use
+    :func:`data_inputs_dir` and :func:`data_gt_dir` directly.
+
+    Raises:
+        FileNotFoundError: if none of the three local candidates contain
+            ``inputs/`` or ``gt/`` subdirectories.
+    """
+    env = os.environ.get(_ENV_DATA_DIR)
     if env:
         p = Path(env).expanduser()
         if (p / "inputs").is_dir() or (p / "gt").is_dir():
             return p
         raise FileNotFoundError(
-            f"{_ENV_VAR}={env!r} but neither {p}/inputs nor {p}/gt exists."
+            f"{_ENV_DATA_DIR}={env!r} but neither {p}/inputs nor {p}/gt exists."
         )
 
     cwd_candidate = Path.cwd() / "data"
@@ -53,20 +81,53 @@ def data_dir() -> Path:
         return bundled
 
     raise FileNotFoundError(
-        "Could not locate cadgenbench data directory. Tried "
-        f"${_ENV_VAR}, ./data/ (CWD), and the bundled <package>/_data/. "
-        "If you installed cadgenbench from a wheel, make sure the wheel "
-        "was built with `force-include` for `data/` (see pyproject.toml). "
-        "If you cloned the source, run cadgenbench commands from the "
-        "repo root."
+        "Could not locate a local cadgenbench data directory. Tried "
+        f"${_ENV_DATA_DIR}, ./data/ (CWD), and the bundled "
+        f"<package>/_data/. To use a Hub-hosted dataset instead, set "
+        f"${_ENV_DATA_REPO} (for inputs) and/or ${_ENV_DATA_GT_REPO} "
+        "(for ground truth)."
     )
 
 
 def data_inputs_dir() -> Path:
-    """Resolve ``data/inputs/`` (where fixture description.yaml live)."""
+    """Resolve the fixture inputs directory.
+
+    See module docstring for the full resolution order. Returns a
+    directory whose immediate children are fixture directories
+    (each containing ``description.yaml`` + ``input.png`` etc.).
+    """
+    repo = os.environ.get(_ENV_DATA_REPO)
+    if repo:
+        return _snapshot_dataset(repo)
     return data_dir() / "inputs"
 
 
 def data_gt_dir() -> Path:
-    """Resolve ``data/gt/`` (where ground-truth STEPs + sub-volumes live)."""
+    """Resolve the ground-truth directory.
+
+    See module docstring for the full resolution order. Returns a
+    directory whose immediate children are fixture directories
+    (each containing ``ground_truth.step`` + optional sub-volumes
+    + renders).
+
+    The Hub branch downloads a private dataset repo; the caller must
+    have ``HF_TOKEN`` set with read access.
+    """
+    repo = os.environ.get(_ENV_DATA_GT_REPO)
+    if repo:
+        return _snapshot_dataset(repo)
     return data_dir() / "gt"
+
+
+def _snapshot_dataset(repo_id: str) -> Path:
+    """Snapshot-download a dataset repo and return the local cache path.
+
+    Lazy-imports ``huggingface_hub`` so the dependency only loads when
+    a caller explicitly opts into the Hub branch via an env var.
+    Subsequent calls for the same repo are fast: snapshot_download
+    checks revisions against the local cache.
+    """
+    from huggingface_hub import snapshot_download
+
+    logger.info("Resolving cadgenbench dataset from Hub: %s", repo_id)
+    return Path(snapshot_download(repo_id=repo_id, repo_type="dataset"))
