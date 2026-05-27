@@ -211,10 +211,12 @@ for examples.
 Run before declaring a GT ready:
 
 ```bash
-# NOTE: sanity-check scripts have moved to _to_move_to_dataset_repo/
-# and will live in the cadgenbench-data HF dataset repo once it exists.
-python _to_move_to_dataset_repo/sanity_check_gt.py --all       # all fixtures
-python _to_move_to_dataset_repo/sanity_check_gt.py <fixture>   # one fixture
+# sanity_check_gt.py ships in the cadgenbench-data-gt dataset alongside
+# the GT files. Resolve its path via the same helper that loads GT and
+# run it directly:
+GT=$(python -c 'from cadgenbench.common.paths import data_gt_dir; print(data_gt_dir())')
+python "$GT/sanity_check_gt.py" --all       # all fixtures
+python "$GT/sanity_check_gt.py" <fixture>   # one fixture
 ```
 
 The script walks each fixture and asserts all of the following.
@@ -276,7 +278,7 @@ Two real labelling patterns require non-strict versions of these rules:
 
 ## Code pointers
 
-- Sanity checker: [`_to_move_to_dataset_repo/sanity_check_gt.py`](../../_to_move_to_dataset_repo/sanity_check_gt.py) (slated to move to the `cadgenbench-data` dataset repo)
+- Sanity checker: `sanity_check_gt.py` lives in the [`cadgenbench-data-gt`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data-gt) dataset alongside the GT files (private; access via `HF_TOKEN`).
 - Mesh tessellation: [`src/cadgenbench/common/mesh.py`](../../src/cadgenbench/common/mesh.py)
 - Mesh Booleans: [`src/cadgenbench/eval/booleans.py`](../../src/cadgenbench/eval/booleans.py)
 - Sub-volume discovery + IoU: [`src/cadgenbench/eval/interface_match.py`](../../src/cadgenbench/eval/interface_match.py)

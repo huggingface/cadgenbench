@@ -58,12 +58,16 @@ src/cadgenbench/        package source
   common/               shared between eval and baseline
   eval/                 metrics, alignment, reports
   baseline/             reference LLM agent
-data/                   benchmark fixtures (inputs + gt)
 tests/                  pytest, mirrors src/cadgenbench/
 docs/                   metric specs + benchmark authoring guides
-_to_move_to_dataset_repo/   sanity-check scripts slated to move to
-                            the cadgenbench-data HF dataset repo
 ```
+
+Fixtures (inputs + ground truth) and authoring/submitter sanity scripts
+live in two HF dataset repos
+([`cadgenbench-data`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data),
+[`cadgenbench-data-gt`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data-gt)),
+resolved at runtime by `cadgenbench.common.paths`. See the top-level
+README for env-var setup.
 
 ## what was removed (don't re-introduce)
 Earlier iterations of this codebase tried to be many things at once;

@@ -214,5 +214,5 @@ for the full composition rule.
 ## Code pointers
 
 - Gate implementation: [`src/cadgenbench/common/validity.py`](../../src/cadgenbench/common/validity.py)
-- Local self-check: [`_to_move_to_dataset_repo/sanity_check_submission.py`](../../_to_move_to_dataset_repo/sanity_check_submission.py) (slated to move to the `cadgenbench-data` dataset repo)
+- Local self-check: `sanity_check_submission.py` lives in the [`cadgenbench-data`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data) dataset alongside the fixture inputs. Snapshot-downloaded by `cadgenbench.common.paths.data_inputs_dir()`; run it from that snapshot path against your candidate STEP.
 - Orchestrator that grades you: [`src/cadgenbench/eval/evaluate.py`](../../src/cadgenbench/eval/evaluate.py)

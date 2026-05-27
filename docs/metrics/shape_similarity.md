@@ -74,9 +74,9 @@ For each side (candidate and GT):
 
 Then compute symmetric Chamfer F1 between the candidate and GT sample arrays with hit threshold $\tau = 0.01 \cdot \mathrm{diag}(\mathrm{bbox}_{\text{GT}})$ (the same 1 %-of-diagonal convention as `shape_point_cloud_f1`). If both arrays are empty (e.g. a sphere vs a sphere) the score is 1; if one is empty, the score is 0.
 
-**Illustration.** Candidate vs GT under a small rigid misalignment (a few degrees rotation + a few mm offset on the longest axis), showing Symmetric Chamfer F1 behaviour on a real part. The image below is a **placeholder** (uses one of the stub jig fixtures' renders, not the actual scenario described); it will be regenerated against the real benchmark dataset, see `space-setup/migration.md`.
+**Illustration.** Candidate vs GT under a small rigid misalignment, showing Symmetric Chamfer F1 behaviour on a real part.
 
-![Feature-edge overlay, iso view (placeholder)](./illustrations/example_1_shape/feature_edge_overlay_iso.png)
+![Feature-edge overlay, iso view](./illustrations/example_1_shape/feature_edge_overlay_iso.png)
 
 - **Green**: feature-edge sample matched within $\tau$ on the other side.
 - **Blue**: GT feature edge with no candidate match within $\tau$ (a real feature the candidate is missing).
