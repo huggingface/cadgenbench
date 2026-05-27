@@ -1,18 +1,27 @@
 # CADGenBench: project context
 
 ## what this is
-A benchmark for **LLM-driven CAD generation**: given a textual or
-visual description of a mechanical part, how well does an LLM produce
-a valid, geometrically correct 3D model? The repo contains the
-benchmark fixtures + scoring code AND a reference baseline (an
-iterative LLM agent that writes build123d Python).
+A benchmark for **AI-driven CAD generation and editing**: given a
+textual or visual description of a mechanical part (or an existing
+STEP file plus an edit request), how well does a system produce a
+valid, geometrically correct 3D model? The benchmark is
+**system-agnostic** — a submission can come from an agent, a script,
+or a human in a CAD tool; the contract is just `output.step` per
+fixture. The repo contains the scoring engine + docs + a reference
+baseline (an iterative LLM agent that writes build123d Python). Eval
+itself runs on the leaderboard Space
+(`HuggingAI4Engineering/cadgenbench-leaderboard`) — the GT is private,
+so the Space is the only consumer.
 
-This repo does NOT generate the dataset itself in the long run. A
-sibling HF dataset repo (`<org>/cadgenbench-data`) is planned; until
-it exists the fixtures live under `data/` here. The set is still
-shifting (parts get added, removed, or replaced as authoring catches
-issues), so do not hardcode the count anywhere; treat `data/inputs/`
-as the source of truth.
+Fixtures live in two HF dataset repos
+([`cadgenbench-data`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data)
+public,
+[`cadgenbench-data-gt`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data-gt)
+private) — resolved at runtime by `cadgenbench.common.paths`. There is
+no `data/` directory in this repo any more. The set is still shifting
+(parts get added, removed, or replaced as authoring catches issues),
+so do not hardcode fixture names or counts anywhere; treat the inputs
+dataset as the source of truth.
 
 ## scope (what to ship in v1)
 - A small set of fixtures (mating-jig parts plus derived editing-task

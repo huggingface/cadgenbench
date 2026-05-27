@@ -19,7 +19,7 @@ def main(argv: list[str] | None = None) -> int:
     """Entry point used by ``project.scripts.cadgenbench``."""
     parser = argparse.ArgumentParser(
         prog="cadgenbench",
-        description="CADGenBench: benchmark for LLM-driven CAD generation.",
+        description="CADGenBench: benchmark for AI-driven CAD generation and editing.",
     )
     subparsers = parser.add_subparsers(dest="command")
 

@@ -1,171 +1,67 @@
 # CADGenBench
 
-A benchmark for **LLM-driven CAD work**: how well do today's LLMs
-either (a) turn a textual or visual description of a mechanical part
-into a valid, geometrically correct 3D model, or (b) take an existing
-STEP file and apply a requested edit to it?
+A benchmark for **AI-driven CAD generation and editing**: how well does
+a system either (a) turn a textual or visual description of a mechanical
+part into a valid, geometrically correct 3D model, or (b) take an
+existing STEP file and apply a requested edit to it?
 
-The two task types are declared per fixture in
-`data/inputs/<fixture>/description.yaml` via the `task_type` field
-(`generation` or `editing`). The same agent, the same metrics, and
+The benchmark is **system-agnostic** — a submission can come from an
+agent, a hand-written script, a manually-authored CAD file, or anything
+else that produces valid STEP geometry. Each fixture declares its type
+(`generation` or `editing`) in `description.yaml`; the same metrics and
 the same `output.step` submission contract apply to both.
 
-This repository contains:
+**Submit and view the leaderboard:**
+[`HuggingAI4Engineering/cadgenbench-leaderboard`](https://huggingface.co/spaces/HuggingAI4Engineering/cadgenbench-leaderboard).
 
-- The **benchmark**: scoring metrics + report tools. Fixtures (inputs +
-  ground truth) are hosted as HF dataset repos and resolved at runtime;
-  see [Dataset](#dataset).
-- A **reference baseline**: an iterative LLM agent that writes
-  build123d Python, validates its STEP output, and loops until done.
+## What this repo contains
 
-## Installation
+This GitHub repo is the **source code behind the benchmark**. It is
+*not* something you need to install to participate. Three things live
+here:
 
-CADGenBench targets Python 3.12 and installs entirely via pip. Use any
-environment isolation tool you like (`python -m venv`, `uv venv`,
-`conda create`, `pyenv`, ...); cadgenbench has no opinion.
+- **Scoring engine** (`src/cadgenbench/eval/`) — the CAD Score pipeline
+  the leaderboard Space runs server-side against your submitted STEP
+  files.
+- **Docs** (`docs/`) — metric definitions, the submission contract,
+  and the fixture-authoring guide.
+- **Reference baseline** (`src/cadgenbench/baseline/`) — an optional
+  worked example of producing submission-shaped output from a fixture
+  description (iteratively writes [`build123d`](https://github.com/gumyr/build123d)
+  Python, validates the STEP, loops until done).
 
-```bash
-# 1. Create a Python 3.12 environment your favourite way, e.g.:
-python -m venv .venv && source .venv/bin/activate
-# or:  uv venv && source .venv/bin/activate
-# or:  conda create -n cadgenbench python=3.12 && conda activate cadgenbench
+Evaluation itself happens on the Space: ground truth is held privately
+in [`cadgenbench-data-gt`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data-gt)
+and the Space is the only consumer.
 
-# 2. Editable install with the baseline + dev extras
-pip install -e ".[baseline,dev]"
+## How to submit
 
-# 3. One-time download of the headless Chromium that powers STEP -> PNG
-# rendering (used by `cadgenbench report` and the baseline's per-turn
-# visual feedback). Cached under ~/Library/Caches/ms-playwright/ on macOS
-# or ~/.cache/ms-playwright/ on Linux, so this is a per-machine setup
-# step, not per-env.
-playwright install chromium
+Full contract — zip layout, `meta.json` fields, validity gate, optional
+canonical pose — is at
+[`docs/benchmark/submission.md`](docs/benchmark/submission.md). In
+short:
 
-# 4. Point cadgenbench at the fixture datasets on the Hub. The
-# ground-truth repo is private, so an HF_TOKEN with read access is
-# required (https://huggingface.co/settings/tokens). cadgenbench
-# snapshot-downloads each repo on first use and caches it under
-# ~/.cache/huggingface/hub/.
-export CADGENBENCH_DATA_REPO=HuggingAI4Engineering/cadgenbench-data
-export CADGENBENCH_DATA_GT_REPO=HuggingAI4Engineering/cadgenbench-data-gt
+1. For each fixture in
+   [`cadgenbench-data`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data),
+   produce an `output.step`. Any tool works.
+2. Zip them as `submission.zip` with one folder per fixture plus a
+   small `meta.json` at the root.
+3. Upload via the **Submit** tab on the
+   [leaderboard Space](https://huggingface.co/spaces/HuggingAI4Engineering/cadgenbench-leaderboard).
 
-# 5. (only if you'll run the baseline) provider API keys
-cp .env.example .env   # then fill in ANTHROPIC_API_KEY / OPENAI_API_KEY / ...
-```
+The Space validates the zip, runs the eval, publishes a row to the
+leaderboard, and writes a self-contained per-submission HTML report
+that you can link to or download.
 
-`build123d` (and its `cadquery-ocp` BREP kernel) installs via pip on all
-major platforms — manylinux + macOS arm64 + macOS x86_64 + Windows wheels
-all live on PyPI. No conda detour required.
-
-Verify:
-
-```bash
-cadgenbench --help
-pytest tests/ -q
-```
-
-`cgb` is a shorter alias for the same entry point.
-
-## Quick start: evaluate a candidate
-
-The benchmark scores per-fixture STEP outputs from any generator
-(LLM agent, script, manual modelling) against the ground truth.
-
-1. For every fixture in `cadgenbench-data` (list them with
-   `python -c "from cadgenbench.common.paths import data_inputs_dir;
-   print(*sorted(p.name for p in data_inputs_dir().iterdir() if p.is_dir()), sep='\n')"`),
-   produce an `output.step` file and place it under
-   `results/<your_run_name>/<fixture_name>/output.step`.
-
-2. Score:
-
-   ```bash
-   cadgenbench evaluate results/<your_run_name>/
-   ```
-
-   This aligns each candidate to the ground truth, computes the four
-   metric axes (validity, shape similarity, interface match,
-   topology match), writes a per-fixture `result.json` carrying the
-   per-fixture `status` (`valid` / `invalid` / `missing`) + `cad_score`,
-   and rolls everything up into a single `run_summary.json` at the run
-   root with `aggregate_score`, `validity_rate`, and
-   `score_by_task_type` (one entry per task type, e.g. `generation`
-   and `editing`).
-
-3. Inspect:
-
-   ```bash
-   cadgenbench report single results/<your_run_name>/
-   # writes results_<timestamp>.html, self-contained, opens in any browser
-   ```
-
-4. Compare against another run:
-
-   ```bash
-   cadgenbench report compare results/run_a/ results/run_b/ \
-       --label "Run A" --label "Run B"
-   ```
-
-See [docs/benchmark/submission.md](docs/benchmark/submission.md) for the
-exact submission contract (validity gate, canonical pose, file naming).
-
-## Reference baseline
-
-The repository ships a reference baseline: an LLM agent that writes
-build123d Python in a loop until it produces a valid STEP. Use it to
-sanity-check the install, as a worked example end-to-end, or as a
-starting point for your own generator.
-
-```bash
-# Generation: single fixture, single model
-cadgenbench baseline run jig-01-single-hole-plate \
-    --model anthropic/claude-opus-4-7
-
-# Editing: same CLI, just point at an editing fixture. The agent
-# finds input.step in its work dir, modifies it, exports output.step.
-cadgenbench baseline run jig-01-edit-double-hole \
-    --model anthropic/claude-opus-4-7
-
-# All fixtures (mix of generation + editing), in parallel
-cadgenbench baseline run --all --parallel 4 \
-    --model anthropic/claude-opus-4-7
-
-# Compare the default trio (Claude Opus 4.7, Gemini 3.1 Pro, GPT-5.5)
-# on every fixture in one command. Writes compare_<timestamp>.html.
-cadgenbench baseline compare-llms --all --parallel 4
-
-# ...or pick your own LLMs explicitly:
-cadgenbench baseline compare-llms --all \
-    --models anthropic/claude-sonnet-4-6 openai/gpt-5.5 \
-    --label "Sonnet 4.6" --label "GPT-5.5"
-```
-
-The default trio for `compare-llms` is the current flagship from each
-of Anthropic, Google, and OpenAI as of May 2026
-(`anthropic/claude-opus-4-7`, `gemini/gemini-3.1-pro-preview`,
-`openai/gpt-5.5`). Override with `--models` to compare a different
-set. Provider-specific quirks (e.g. GPT-5 family rejecting
-`temperature != 1`) are handled automatically by the LLM client.
-
-Each run lands at `results/<timestamp>_<model_slug>/`; the `evaluate`
-and `report` commands above work on it the same way as on a
-hand-produced run directory.
-
-## Commands
-
-```
-cadgenbench evaluate <run_dir> [--force]
-cadgenbench baseline run [fixtures...] [--all] [--model M] ...
-cadgenbench baseline compare-llms [fixtures...] --models M1 M2 ... [--label L ...] [-o out.html]
-cadgenbench report single <run_dir> [-o out.html]
-cadgenbench report compare <run_dir>... [-o out.html] [--label L ...]
-```
-
-Each subcommand prints its full flag list with `--help`.
+A `sanity_check_submission.py` script shipped alongside the fixtures in
+`cadgenbench-data` lets you exercise the same validity gate locally
+before uploading — see
+[`docs/benchmark/submission.md#self-check-before-submitting`](docs/benchmark/submission.md#self-check-before-submitting).
 
 ## Metrics
 
-The benchmark scores a candidate STEP against a ground-truth STEP along
-four orthogonal axes:
+The Space scores each candidate STEP against ground truth on four
+orthogonal axes:
 
 | Metric | What it captures |
 |---|---|
@@ -175,26 +71,79 @@ four orthogonal axes:
 | **Topology match** | Betti numbers (b0, b1, b2) of the tessellated boundary. |
 
 The **CAD Score** is the arithmetic mean of every applicable component
-score, gated by validity. See [docs/metrics.md](docs/metrics.md) for the
-full specification and [docs/metrics/](docs/metrics/) for the per-axis
-deep dives.
+score, gated by validity. See [`docs/metrics.md`](docs/metrics.md) for
+the full specification and [`docs/metrics/`](docs/metrics/) for the
+per-axis deep dives.
+
+## Reference baseline (optional)
+
+The reference baseline is an iterative agent that writes `build123d`
+Python in a loop until it produces a valid STEP. Use it to see what an
+end-to-end run looks like, or as a starting point for your own
+generator. It targets Python 3.12 and installs entirely via pip.
+
+```bash
+# 1. Python 3.12 env (any tool: venv, uv, conda, ...)
+python -m venv .venv && source .venv/bin/activate
+
+# 2. Editable install with the baseline + dev extras
+pip install -e ".[baseline,dev]"
+
+# 3. One-time: headless Chromium for per-turn visual feedback to the
+# agent. Cached per machine.
+playwright install chromium
+
+# 4. Provider API keys for whichever model(s) you plan to run
+cp .env.example .env   # then fill in ANTHROPIC_API_KEY / OPENAI_API_KEY / ...
+
+# 5. Point at the fixture datasets on the Hub. The ground-truth repo
+# is private; an HF_TOKEN (https://huggingface.co/settings/tokens) with
+# read access on cadgenbench-data-gt is required. cadgenbench
+# snapshot-downloads each repo on first use and caches under
+# ~/.cache/huggingface/hub/.
+export CADGENBENCH_DATA_REPO=HuggingAI4Engineering/cadgenbench-data
+export CADGENBENCH_DATA_GT_REPO=HuggingAI4Engineering/cadgenbench-data-gt
+```
+
+Verify:
+
+```bash
+cadgenbench --help
+pytest tests/ -q
+```
+
+`cgb` is a shorter alias.
+
+Run on one fixture, or in parallel on all of them:
+
+```bash
+# Single fixture
+cadgenbench baseline run jig-01-single-hole-plate \
+    --model anthropic/claude-opus-4-7
+
+# All fixtures, in parallel
+cadgenbench baseline run --all --parallel 4 \
+    --model anthropic/claude-opus-4-7
+```
+
+Output lands at `results/<timestamp>_<model_slug>/<fixture>/output.step`,
+ready to zip and submit on the Space. `cadgenbench baseline --help`
+lists the full flag set.
 
 ## Dataset
 
 Fixtures live in two HF dataset repos:
 
-- [`HuggingAI4Engineering/cadgenbench-data`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data) — inputs (descriptions, optional input STEPs and renders) for every fixture.
-- [`HuggingAI4Engineering/cadgenbench-data-gt`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data-gt) — ground truth (`ground_truth.step`, optional jig sub-volumes, renders). **Private**; reading requires an `HF_TOKEN`.
+- [`HuggingAI4Engineering/cadgenbench-data`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data)
+  — **public**; inputs (descriptions, optional input STEPs and renders)
+  for every fixture, plus the `sanity_check_submission.py` helper.
+- [`HuggingAI4Engineering/cadgenbench-data-gt`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data-gt)
+  — **private**; ground truth (`ground_truth.step`, optional jig
+  sub-volumes, renders). Only the leaderboard Space reads from it.
+  Keeping GT private makes the Space's eval the source of truth.
 
-`cadgenbench.common.paths.data_inputs_dir()` and `data_gt_dir()` resolve
-each repo via `huggingface_hub.snapshot_download` when the
-`CADGENBENCH_DATA_REPO` / `CADGENBENCH_DATA_GT_REPO` env vars are set
-(see [Installation](#installation)). Snapshots cache under
-`~/.cache/huggingface/hub/`; subsequent calls only HEAD-check the Hub.
-
-See [docs/benchmark/authoring.md](docs/benchmark/authoring.md) for the
-fixture schema and [docs/benchmark/submission.md](docs/benchmark/submission.md)
-for what a candidate submission must look like.
+See [`docs/benchmark/authoring.md`](docs/benchmark/authoring.md) for
+the fixture schema.
 
 ## License
 
