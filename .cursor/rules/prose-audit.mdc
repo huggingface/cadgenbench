@@ -1,0 +1,72 @@
+# CADGenBench: prose audit
+
+Auditable rules for prose on public-facing surfaces (READMEs,
+`docs/`, dataset cards, Space app text). Process docs under
+`space-setup/` are exempt.
+
+Style basics (em-dashes, AI tells, lowercase) live in
+[style.mdc](./style.mdc), not duplicated here.
+
+## adhere to HF benchmark conventions
+- Default to the shape established by other HF benchmark surfaces.
+  When something isn't otherwise pinned, do what they do.
+- Reference Spaces and repos:
+  - [adyen/DABstep](https://huggingface.co/spaces/adyen/DABstep)
+    (leaderboard Space text, validation guidelines)
+  - [Open LLM Leaderboard](https://huggingface.co/spaces/open-llm-leaderboard/open_llm_leaderboard)
+    (About / FAQ tone)
+  - [huggingface/lighteval](https://github.com/huggingface/lighteval),
+    [bigcode-project/bigcodebench](https://github.com/bigcode-project/bigcodebench)
+    (benchmark README + docs/ layout)
+- Short, concise, no fluff, user-friendly: document what the typical
+  visitor of each repo / dataset / Space will do, and nothing extra.
+- Order sections so the most common task scans first. Code repo:
+  install + run, then internals. Dataset card: load + columns, then
+  provenance. Space: submit + browse, then About / FAQ.
+- Cut hedging, throat-clearing, bullet lists that exist to look
+  thorough, repeated bold/italic emphasis, paragraphs that restate
+  the section heading.
+
+## describe what is, not what was
+- Public surfaces describe the current contract. No change-log
+  framing, no apology framing, no "previously / we used to" prose.
+- Greppable tells (case-insensitive):
+  `previously`, `used to`, `historically`, `originally`, `formerly`,
+  `in the past`, `no longer`, `we now`, `we've moved`,
+  `migrated from`, `removed`, `dropped`, `deprecated`.
+- Release-history files (`CHANGELOG.md`, release notes) are exempt.
+  Everything else: rewrite to describe the current state.
+
+## don't define by absence
+- Describe what something is, not what it isn't.
+- Greppable tells (case-insensitive):
+  `no separate`, `no need to`, `there is no`, `there's no`,
+  `you don't have to`, `without having to`, `unlike`.
+- Rewrite to the positive form. "Submissions land via the form" beats
+  "no separate submission API to fill in".
+
+## no false contrast
+- "X not Y" / "X rather than Y" is only legitimate when Y is a real
+  alternative a reader would genuinely consider (e.g. "the eval runs
+  on the Space, not locally"). If Y is a strawman or an internal
+  historical choice, cut the contrast and state the positive.
+- Greppable tells (manual triage, many legitimate hits):
+  ` not `, `rather than`, `instead of`, `as opposed to`.
+
+## scope
+- In scope:
+  `cadgenbench/README.md`, `cadgenbench/docs/**/*.md`,
+  `AI4Engineering/**/*.py` user-facing strings,
+  `AI4Engineering/README.md`, dataset-card READMEs in
+  `cadgenbench-data/`, `cadgenbench-data-gt/`,
+  `cadgenbench-submissions/`.
+- Out of scope:
+  `space-setup/**` (process docs), `CHANGELOG.md`, release notes,
+  test fixtures, code comments explaining historical decisions.
+
+## audit recipe
+- Run each greppable pattern above against the in-scope paths.
+- For each hit: rewrite to a positive present-tense statement of the
+  current contract, or confirm the contrast is genuinely useful to
+  the reader. False-contrast hits are the largest bucket; most
+  legitimate ` not ` uses survive review.
