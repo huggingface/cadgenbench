@@ -125,10 +125,32 @@ def evaluate_result(
         result_json.write_text(json.dumps(data, indent=2))
         return {}
 
+    # --- CAD validity (raw candidate; runs BEFORE alignment / shape_similarity
+    # / interface / topology). An invalid candidate (non-watertight, mesh
+    # non-manifold, BRepCheck errors, etc.) is a *score signal*, not an
+    # eval-pipeline failure: it lands as status=invalid + cad_score=0 and
+    # the run continues. The downstream metric modules tessellate the
+    # candidate and would crash on the same non-manifold geometry, so we
+    # short-circuit here both to avoid the crash and to keep
+    # ``evaluate_result`` exit-clean: per-fixture validity failures
+    # never bubble out to the caller.
+    validation_dict = _validation_dict(raw_candidate)
+    if not validation_dict.get("is_valid"):
+        prior = _read_json(result_json)
+        data = {
+            "status": STATUS_INVALID,
+            "cad_score": 0.0,
+            "validation": validation_dict,
+        }
+        if "alignment" in prior:
+            data["alignment"] = prior["alignment"]
+        result_json.write_text(json.dumps(data, indent=2))
+        return {}
+
     prior = _read_json(result_json)
     # Carry over only the alignment cache; drop any stale agent metadata or
     # previously-computed metrics so we never publish stale evaluator output.
-    data: dict = {}
+    data = {}
     if "alignment" in prior:
         data["alignment"] = prior["alignment"]
 
@@ -149,9 +171,6 @@ def evaluate_result(
     )
     scores = comparison.scores
 
-    # --- CAD validity (raw candidate) ---------------------------------------
-    validation_dict = _validation_dict(raw_candidate)
-
     # --- Interface match (aligned candidate; only when jig files exist) -----
     interface_metrics = _interface_metrics_dict(
         aligned_step,
@@ -170,9 +189,7 @@ def evaluate_result(
         raw_candidate, gt_step, validation_dict,
     )
 
-    data["status"] = (
-        STATUS_VALID if validation_dict.get("is_valid") else STATUS_INVALID
-    )
+    data["status"] = STATUS_VALID
     data["validation"] = validation_dict
     data["gt_metrics"] = scores
     data["shape_diagnostics"] = comparison.diagnostics
