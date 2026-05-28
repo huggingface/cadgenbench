@@ -1,9 +1,6 @@
 # Benchmark submission requirements
 
-What an agent / model / human contributor needs to produce to be scored
-by the CAD Score pipeline. Sister document to
-[`authoring.md`](authoring.md), which covers what a *benchmark labeller*
-needs to produce on the ground-truth side.
+What you need to produce to be scored by the CAD Score pipeline.
 
 For the scoring math itself see [`docs/metrics.md`](../metrics.md) and
 the per-metric deep dives under [`docs/metrics/`](../metrics/).
@@ -24,8 +21,7 @@ The submission contract is **task-agnostic**: a fixture with
 the same `output.step`. For editing fixtures the agent additionally
 finds the starting STEP (typically `input.step`) already present in
 its working directory, but the file it writes back is still just
-`output.step`. See [`authoring.md`](authoring.md) for the fixture
-schema.
+`output.step`.
 
 ## What the grader writes back
 
@@ -140,12 +136,14 @@ boundary, which are only well-defined on a closed orientable manifold.
 
 ### Self-check before submitting
 
-To verify your output passes the gate locally:
+To verify your output passes the gate locally, run the
+`sanity_check_submission.py` script shipped in the
+[`cadgenbench-data`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data)
+dataset against your candidate STEP:
 
 ```bash
-# Sanity scripts live under _to_move_to_dataset_repo/ until the
-# cadgenbench-data HF dataset repo is created (they'll move there).
-python _to_move_to_dataset_repo/sanity_check_submission.py path/to/output.step
+DATA=$(python -c 'from cadgenbench.common.paths import data_inputs_dir; print(data_inputs_dir())')
+python "$DATA/sanity_check_submission.py" path/to/output.step
 ```
 
 Exits non-zero on any validity failure and prints the specific reason
@@ -168,12 +166,11 @@ canonical pose the benchmark GT uses:
    $X$, mid along $Y$, shortest along $Z$.
 3. **Natural mounting / reference face down**, if the part has one,
    place it on the $z = -L_z/2$ plane with its outward normal along
-   $-Z$. Parts without an obvious reference face: rules 1–2 suffice.
+   $-Z$. Parts without an obvious reference face: rules 1-2 suffice.
 
-These rules are **required for benchmark GT** (see
-[`authoring.md`](authoring.md)) but only **recommended** for
-candidates. Following them is the easiest way to keep alignment RMSE
-low on symmetric parts.
+These rules are **recommended** for candidates, not enforced.
+Following them is the easiest way to keep alignment RMSE low on
+symmetric parts.
 
 ## What gets scored
 
@@ -191,28 +188,7 @@ are applicable to the fixture (Interface Match drops out when the
 fixture has no labelled sub-volumes). See [`metrics.md`](../metrics.md)
 for the full composition rule.
 
-## Frequently confused things
-
-- **You do not provide sub-volumes.** Sub-volumes (`jig_*.step`) live
-  *only* on the GT side. They describe what regions of space the
-  candidate must fill or leave empty. They're created by benchmark
-  labellers, scored against your single `output.step`.
-- **You are not graded on STEP authoring style.** Number of BREP
-  faces, feature tree depth, parametric vs explicit, none of that
-  matters as long as the geometry passes validity. Two STEP files of
-  the same shape score the same.
-- **`output.step` must live at the fixture-dir root, exactly that
-  path: `results/<run_name>/<fixture_name>/output.step`.** The grader
-  reads only that file - it has no concept of "turns", "iterations",
-  or any internal structure your generator may use under the fixture
-  dir (those are debug artefacts and ignored). Multiple files at
-  sibling paths won't be picked up.
-- **`output.step` must contain a single solid (or compound of solids).**
-  Anything that isn't loadable by build123d / OCC is a load failure →
-  validity = False → score 0.
-
 ## Code pointers
 
-- Gate implementation: [`src/cadgenbench/common/validity.py`](../../src/cadgenbench/common/validity.py)
-- Local self-check: `sanity_check_submission.py` lives in the [`cadgenbench-data`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data) dataset alongside the fixture inputs. Snapshot-downloaded by `cadgenbench.common.paths.data_inputs_dir()`; run it from that snapshot path against your candidate STEP.
-- Orchestrator that grades you: [`src/cadgenbench/eval/evaluate.py`](../../src/cadgenbench/eval/evaluate.py)
+- Validity gate: [`src/cadgenbench/common/validity.py`](../../src/cadgenbench/common/validity.py)
+- Grading orchestrator: [`src/cadgenbench/eval/evaluate.py`](../../src/cadgenbench/eval/evaluate.py)

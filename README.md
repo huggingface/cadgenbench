@@ -5,11 +5,11 @@ a system either (a) turn a textual or visual description of a mechanical
 part into a valid, geometrically correct 3D model, or (b) take an
 existing STEP file and apply a requested edit to it?
 
-The benchmark is **system-agnostic** — a submission can come from an
-agent, a hand-written script, a manually-authored CAD file, or anything
-else that produces valid STEP geometry. Each fixture declares its type
-(`generation` or `editing`) in `description.yaml`; the same metrics and
-the same `output.step` submission contract apply to both.
+The benchmark targets AI models. It makes no assumption about the
+CAD environment (`build123d`, Autodesk Fusion, OnShape, ...): a
+submission is just a STEP file per fixture. Each fixture declares its
+type (`generation` or `editing`) in `description.yaml`; the same
+metrics and the same `output.step` contract apply to both.
 
 **Submit and view the leaderboard:**
 [`HuggingAI4Engineering/cadgenbench-leaderboard`](https://huggingface.co/spaces/HuggingAI4Engineering/cadgenbench-leaderboard).
@@ -20,12 +20,11 @@ This GitHub repo is the **source code behind the benchmark**. It is
 *not* something you need to install to participate. Three things live
 here:
 
-- **Scoring engine** (`src/cadgenbench/eval/`) — the CAD Score pipeline
+- **Scoring engine** (`src/cadgenbench/eval/`): the CAD Score pipeline
   the leaderboard Space runs server-side against your submitted STEP
   files.
-- **Docs** (`docs/`) — metric definitions, the submission contract,
-  and the fixture-authoring guide.
-- **Reference baseline** (`src/cadgenbench/baseline/`) — an optional
+- **Docs** (`docs/`): metric definitions and the submission contract.
+- **Reference baseline** (`src/cadgenbench/baseline/`): an optional
   worked example of producing submission-shaped output from a fixture
   description (iteratively writes [`build123d`](https://github.com/gumyr/build123d)
   Python, validates the STEP, loops until done).
@@ -36,8 +35,8 @@ and the Space is the only consumer.
 
 ## How to submit
 
-Full contract — zip layout, `meta.json` fields, validity gate, optional
-canonical pose — is at
+Full contract (zip layout, `meta.json` fields, validity gate, optional
+canonical pose) is at
 [`docs/benchmark/submission.md`](docs/benchmark/submission.md). In
 short:
 
@@ -55,7 +54,7 @@ that you can link to or download.
 
 A `sanity_check_submission.py` script shipped alongside the fixtures in
 `cadgenbench-data` lets you exercise the same validity gate locally
-before uploading — see
+before uploading; see
 [`docs/benchmark/submission.md#self-check-before-submitting`](docs/benchmark/submission.md#self-check-before-submitting).
 
 ## Metrics
@@ -134,16 +133,14 @@ lists the full flag set.
 
 Fixtures live in two HF dataset repos:
 
-- [`HuggingAI4Engineering/cadgenbench-data`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data)
-  — **public**; inputs (descriptions, optional input STEPs and renders)
+- [`HuggingAI4Engineering/cadgenbench-data`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data):
+  **public**; inputs (descriptions, optional input STEPs and renders)
   for every fixture, plus the `sanity_check_submission.py` helper.
-- [`HuggingAI4Engineering/cadgenbench-data-gt`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data-gt)
-  — **private**; ground truth (`ground_truth.step`, optional jig
-  sub-volumes, renders). Only the leaderboard Space reads from it.
+- [`HuggingAI4Engineering/cadgenbench-data-gt`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data-gt):
+  **private**; ground truth (`ground_truth.step`, optional jig
+  sub-volumes, renders) and the labeller-facing `AUTHORING.md` /
+  sanity-check scripts. Only the leaderboard Space reads from it.
   Keeping GT private makes the Space's eval the source of truth.
-
-See [`docs/benchmark/authoring.md`](docs/benchmark/authoring.md) for
-the fixture schema.
 
 ## License
 

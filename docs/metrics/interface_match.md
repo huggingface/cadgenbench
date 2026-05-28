@@ -121,11 +121,11 @@ For each mating group independently:
 
 ## Labeller brief
 
-Short version of what a labeller delivers. The full canonical contract (file names, canonical pose, sanity-check tooling) lives in [`docs/benchmark/authoring.md`](../benchmark/authoring.md); this section is the metric-specific subset for readers who jump in here first.
+Short version of what a labeller delivers. The full canonical contract (file names, canonical pose, sanity-check tooling) lives in `AUTHORING.md` in the [`cadgenbench-data-gt`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data-gt) dataset alongside the GT artefacts; this section is the metric-specific subset for readers who jump in here first.
 
 For each part the labeller delivers:
 
-1. `ground_truth.step`: the ground-truth part, in canonical pose (see [`authoring.md`](../benchmark/authoring.md) § *Canonical pose*).
+1. `ground_truth.step`: the ground-truth part, in canonical pose (bbox centroid at the origin, bbox extents ordered $L_x \ge L_y \ge L_z$; see `AUTHORING.md` § *Canonical pose* in [`cadgenbench-data-gt`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data-gt)).
 2. For every mating group, one or more sub-volume STEP files named `jig_<group_id>__<index>__<fit_type>.step`, with:
    - `group_id` a 1-indexed integer. Sub-volumes sharing the same `group_id` must move together rigidly during pose search.
    - `index` a 1-indexed integer within that group.

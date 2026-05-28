@@ -68,7 +68,7 @@ src/cadgenbench/        package source
   eval/                 metrics, alignment, reports
   baseline/             reference LLM agent
 tests/                  pytest, mirrors src/cadgenbench/
-docs/                   metric specs + benchmark authoring guides
+docs/                   metric specs + submission contract
 ```
 
 Fixtures (inputs + ground truth) and authoring/submitter sanity scripts
