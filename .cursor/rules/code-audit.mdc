@@ -1,0 +1,103 @@
+# CADGenBench: code audit
+
+Pre-launch checklist for shipped code paths. Run before announcing
+the leaderboard publicly.
+
+Style basics (Python 3.12+, type hints, sync only, no fallbacks,
+no silent exception swallowing) live in [style.mdc](./style.mdc).
+
+## adhere to HF benchmark conventions
+- Default to the shape established by other HF benchmark code repos.
+  When something isn't otherwise pinned, do what they do.
+- Reference repos:
+  - [huggingface/lighteval](https://github.com/huggingface/lighteval),
+    [bigcode-project/bigcodebench](https://github.com/bigcode-project/bigcodebench)
+    (eval package layout, CLI shape)
+  - [adyen/DABstep](https://huggingface.co/spaces/adyen/DABstep/tree/main)
+    (leaderboard Space code, submit flow, dataset reader)
+  - [huggingface/datasets](https://github.com/huggingface/datasets)
+    (Apache-2.0 LICENSE + pyproject conventions)
+
+## no leftover code
+- No `print(` for diagnostics on shipped paths. CLI user-facing
+  output stays; ad-hoc traces go.
+- No commented-out blocks of code. Delete or extract.
+- No unreferenced functions, classes, or modules. If nothing
+  imports it and no CLI invokes it, delete it.
+- No dead imports.
+- No leftover `XXX`, `HACK`, or `DEBUG` markers. Resolve them or
+  open an issue.
+- Greppable tells:
+  - `print(`, `breakpoint(`, `pdb.set_trace`, `# XXX`, `# HACK`,
+    `# DEBUG`.
+  - `ruff check --select F401,F811,F841` for unused imports,
+    redefinitions, and locals.
+  - `vulture src/ AI4Engineering/` for unreferenced symbols (manual
+    triage; vulture is heuristic).
+
+## no overengineering
+- Match the surface area of comparable HF benchmarks. Lighteval and
+  bigcodebench are the size targets; do not exceed without reason.
+- Drop abstractions that have a single consumer: factories with one
+  implementation, registries with one entry, base classes with one
+  subclass, config systems for two flags.
+- Drop dependencies that replace fewer than ~50 lines of correct
+  code (see [style.mdc](./style.mdc)).
+- Manual review: walk `src/` and ask "would lighteval do this?" for
+  each module. If the answer is "no, they'd inline it", inline it.
+
+## no pre-launch TODOs
+- Any `TODO` or `FIXME` referencing "before launch", "before
+  release", "before announcing", "pre-launch", or "pre-release"
+  must be actioned or downgraded to a tracked post-launch item.
+- Greppable:
+  `rg -n -i '(TODO|FIXME).*(before|pre.?launch|pre.?release|announce)'`
+
+## no hardcoded org / paths / secrets
+- Org slug `HuggingAI4Engineering` comes from env (e.g.
+  `CADGENBENCH_HF_ORG`); no literal in code paths.
+- No API keys, tokens, or webhook URLs in source. Secrets via env.
+- No absolute filesystem paths (`/Users/`, `/home/`, `C:\`). Use
+  `Path(__file__)` or env-driven paths.
+- Greppable (each should return zero hits in scope):
+  - `rg -n 'HuggingAI4Engineering'`
+  - `rg -n '/Users/|/home/|C:\\\\'`
+  - `rg -n '(sk-|hf_|ghp_|xox[baprs]-)[A-Za-z0-9_-]{20,}'`
+
+## license metadata matches LICENSE
+- `cadgenbench/pyproject.toml`: `license = "Apache-2.0"` and
+  `license-files = ["LICENSE"]` (PEP 639).
+- `cadgenbench/LICENSE` is the full Apache-2.0 text.
+- Cross-check: `rg -n '^license' cadgenbench/pyproject.toml` and
+  `rg -n 'Apache License' cadgenbench/LICENSE` both return the
+  expected lines.
+
+## license headers on source files
+- Every `.py` file under `cadgenbench/src/`, `cadgenbench/cli.py`,
+  and `AI4Engineering/` starts with the standard Apache-2.0 header
+  (`Copyright 2026 Hugging Face` plus the boilerplate). Matches
+  `huggingface/datasets`, `lighteval`, `bigcodebench`.
+- Greppable check (run from each repo root):
+  `for f in $(git ls-files '*.py'); do head -15 "$f" | rg -q 'Apache License' || echo "missing: $f"; done`
+
+## tests pass
+- `pytest -q` clean across `cadgenbench/tests/`. The renderer-
+  dependent suite (`tests/common/test_viewer.py`, baseline
+  end-to-end) needs a local run; everything else runs in the
+  sandbox.
+
+## scope
+- In scope:
+  `cadgenbench/src/**/*.py`, `cadgenbench/cli.py`,
+  `AI4Engineering/**/*.py`, sibling scripts in
+  `cadgenbench-data{,-gt}/**/*.py`,
+  `cadgenbench-submissions/**/*.py`.
+- Out of scope:
+  `cadgenbench/tests/**` (debug prints + TODOs allowed; tests
+  must still pass per the section above),
+  `space-setup/**`.
+
+## audit recipe
+- Run each greppable pattern above against the in-scope paths.
+- For each hit: fix, delete, or document why it survives (env-var
+  contract, intentional CLI output, etc.).
