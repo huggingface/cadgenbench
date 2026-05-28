@@ -6,6 +6,8 @@ build-backend = "hatchling.build"
 name = "cadgenbench"
 version = "0.1.0"
 description = "CADGenBench: a benchmark for AI-driven CAD generation"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     # BREP / STEP authoring + reading. Pulls cadquery-ocp (OCP) as a
