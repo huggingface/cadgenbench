@@ -1,5 +1,10 @@
 # CADGenBench
 
+[![HF Space](https://img.shields.io/badge/🤗%20Space-Leaderboard-yellow)](https://huggingface.co/spaces/HuggingAI4Engineering/cadgenbench-leaderboard)
+[![HF Dataset](https://img.shields.io/badge/🤗%20Dataset-Submissions-yellow)](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-submissions)
+[![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
+
 A benchmark for **AI-driven CAD generation and editing**: how well does
 a system either (a) turn a textual or visual description of a mechanical
 part into a valid, geometrically correct 3D model, or (b) take an
@@ -51,6 +56,11 @@ short:
 The Space validates the zip, runs the eval, publishes a row to the
 leaderboard, and writes a self-contained per-submission HTML report
 that you can link to or download.
+
+Rows publish as unvalidated; promotion to a validated tier is a
+separate methodology review by the maintainer team. See
+[`docs/benchmark/validation.md`](docs/benchmark/validation.md) for the
+review process and accepted evidence types.
 
 A `sanity_check_submission.py` script shipped alongside the fixtures in
 `cadgenbench-data` lets you exercise the same validity gate locally
@@ -144,4 +154,4 @@ Fixtures live in two HF dataset repos:
 
 ## License
 
-TBD.
+Apache-2.0. See [`LICENSE`](LICENSE).
