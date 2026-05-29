@@ -28,7 +28,7 @@ def _ensure_fixture() -> None:
 
 
 class TestRenderStep:
-    """Single-file rendering (require Playwright + Chromium)."""
+    """Single-file rendering (in-process via VTK / PyVista)."""
 
     def test_default_views_returns_four_images(self) -> None:
         images = render_step(BOX_STEP)
@@ -59,7 +59,7 @@ class TestRenderStep:
 
 
 class TestRenderSteps:
-    """Batch rendering, one Chromium launch for multiple files."""
+    """Batch rendering across multiple files."""
 
     def test_batch_single_file(self) -> None:
         results = render_steps([BOX_STEP], views=["iso"])

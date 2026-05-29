@@ -57,7 +57,7 @@ dataset as the source of truth.
 | OCCT bindings | OCP | ships with build123d |
 | Mesh / boolean ops | trimesh, manifold3d | mesh-side validity + interface IoU |
 | LLM routing | LiteLLM | unified API across providers |
-| Headless render | tcv-screenshots | OCCT-accurate via three-cad-viewer + Chromium |
+| Headless render | pyvista (VTK) | mesh-based; in-process; auto GPU OpenGL when present, software OpenGL otherwise |
 | Config / yaml | PyYAML | fixture descriptions, AgentConfig defaults |
 
 ## repo layout (high level)

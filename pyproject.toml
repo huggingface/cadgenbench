@@ -23,8 +23,10 @@ dependencies = [
     "Pillow",
     "pyyaml",
     # Headless STEP -> PNG renderer (used by both eval reports and the
-    # baseline's per-turn visual feedback to the LLM).
-    "tcv-screenshots",
+    # baseline's per-turn visual feedback to the LLM). PyVista wraps VTK,
+    # which auto-uses GPU OpenGL when present and software OpenGL (Mesa
+    # / EGL swrast) on CPU-only hosts. No subprocess, no Chromium.
+    "pyvista",
     # Used by cadgenbench.common.paths to optionally snapshot-download
     # the fixture inputs + GT from HF dataset repos (when
     # $CADGENBENCH_DATA_REPO / $CADGENBENCH_DATA_GT_REPO are set).

@@ -37,7 +37,7 @@ import numpy as np
 
 from cadgenbench.common.validity import ValidationResult, analyze_step
 from cadgenbench.common.measurements import Measurements
-from cadgenbench.common.viewer import DEFAULT_VIEWS as RENDER_VIEWS
+from cadgenbench.common.viewer import DEFAULT_VIEWS as RENDER_VIEWS, render_mesh
 
 logger = logging.getLogger(__name__)
 
@@ -334,11 +334,6 @@ def compare_step_files(
     cand_renders = Path(candidate_renders_dir) if candidate_renders_dir else None
     gt_renders = Path(gt_renders_dir) if gt_renders_dir else None
 
-    if cand_renders is not None:
-        _ensure_renders(step_for_metrics, cand_renders)
-    if gt_renders is not None:
-        _ensure_renders(gt_step, gt_renders)
-
     cand_analysis = analyze_step(step_for_metrics)
     gt_analysis = analyze_step(gt_step)
 
@@ -365,6 +360,14 @@ def compare_step_files(
         renders_dir=gt_renders,
         linear_deflection_mm=shared_deflection,
     )
+
+    # Render after building the contexts so we reuse the welded mesh
+    # the metric path is about to compute anyway, halving the BREP
+    # tessellation work on the eval hot path.
+    if cand_renders is not None:
+        _ensure_renders(ctx_candidate, cand_renders)
+    if gt_renders is not None:
+        _ensure_renders(ctx_gt, gt_renders)
 
     scores: dict[str, float | None] = compute_metrics(ctx_candidate, ctx_gt, metrics=metrics)
 
@@ -629,15 +632,21 @@ def _feature_edge_f1_stats(
     }
 
 
-def _ensure_renders(step_path: Path, renders_dir: Path) -> None:
-    """Render *step_path* into *renders_dir* for any missing canonical views."""
+def _ensure_renders(ctx: MetricContext, renders_dir: Path) -> None:
+    """Write canonical-view PNGs for *ctx* into *renders_dir*.
+
+    Reuses the welded mesh already cached on the context (computed at
+    the shared GT-derived deflection) so we never tessellate twice for
+    the same fixture.
+    """
     renders_dir.mkdir(parents=True, exist_ok=True)
     missing = [v for v in RENDER_VIEWS if not (renders_dir / f"{v}.png").exists()]
     if not missing:
         return
-
-    from cadgenbench.common.viewer import render_step
-
-    images = render_step(str(step_path), views=missing)
-    for img in images:
+    mesh = ctx.get_mesh()
+    if mesh is None:
+        raise RuntimeError(
+            f"Cannot render {ctx.step_path}: tessellation produced no mesh.",
+        )
+    for img in render_mesh(mesh, views=missing):
         (renders_dir / f"{img.name}.png").write_bytes(img.data)

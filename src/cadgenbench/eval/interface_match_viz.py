@@ -20,8 +20,7 @@ without thinking about fit_type. For ``correct.step`` the disagreement
 volume is ≈ 0 and no yellow appears.
 
 Rendering goes through :func:`cadgenbench.common.viewer.render_overlay`,
-which means Chromium / three-cad-viewer. Cannot run inside the Cursor
-sandbox; run locally.
+in-process via VTK; safe to call from any host.
 """
 from __future__ import annotations
 

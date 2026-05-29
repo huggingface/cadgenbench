@@ -114,21 +114,22 @@
 - If the user prefers to own fetches entirely, defer to them and document the exact URLs
   and expected paths in chat; no staging directory in this repo.
 
-## headless Chromium / Playwright: you cannot run it
-- **The renderer (`cadgenbench.common.viewer.render_step`) and anything
-  that calls it cannot run from inside the Cursor sandbox.** Chromium
-  spawns but its remote-debugging IPC pipe is blocked, so the call
-  hangs forever. Running with `required_permissions: ["all"]` doesn't
-  help: outside the sandbox the Playwright browser-path env points at
-  a sandbox-only cache and the binary isn't found.
-- Tests / commands known to be affected: `tests/common/test_viewer.py`
-  (anything that touches `render_step`), `cadgenbench baseline run`
-  end-to-end against a real fixture, and any `cadgenbench evaluate`
-  invocation that needs to render fresh PNGs for a candidate.
-- **Do not** try to run these and wait, kill leftover Chromium
-  processes, or burn time investigating. **Ask the user to run them**
-  with a single copy-paste command (e.g.
-  `pytest tests/common/test_viewer.py -q`), state what you expect,
-  and continue with whatever you can validate locally. The unit tests
-  on validity / similarity / interface_match / topo_match / agent /
-  measurements / mesh run in seconds and never touch the renderer.
+## VTK renderer: needs an OpenGL context
+- **The renderer (`cadgenbench.common.viewer.render_step` and friends)
+  needs a real OpenGL context to draw, which the Cursor sandbox does
+  not provide.** Running it inside the sandbox prints
+  `vtkCocoaRenderWindow ... GLEW could not be initialized` (macOS) or
+  segfaults (Linux). Re-running the same command with
+  `required_permissions: ["all"]` is fine: the macOS Cocoa GL backend
+  works outside the sandbox, and on Linux Docker hosts the Mesa /
+  EGL software backend kicks in.
+- Tests / commands affected: `tests/common/test_viewer.py`,
+  anything that calls `render_step` / `render_steps` / `render_overlay`
+  / `render_mesh`, `cadgenbench evaluate` over fresh fixtures, and
+  `cadgenbench baseline run` end-to-end.
+- Default to running these unsandboxed yourself; only ask the user to
+  run them locally if the unsandboxed run also fails (e.g. macOS
+  permission prompts you cannot answer). The validity / similarity /
+  interface_match / topo_match / agent / measurements / mesh unit
+  tests run in seconds and never touch the renderer, so keep them in
+  the regular sandboxed loop.

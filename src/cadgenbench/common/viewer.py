@@ -1,32 +1,99 @@
-"""Headless STEP renderer using tcv-screenshots.
+"""Headless STEP renderer using VTK via PyVista.
 
-Renders STEP files from multiple camera angles and returns PNG images.
-Uses three-cad-viewer via headless Chromium (Playwright), same renderer
-as the ocp-vscode CAD viewer.
+Tessellates the STEP file with :func:`cadgenbench.common.mesh.tessellate_step`,
+hands the welded triangle mesh to a :class:`pyvista.Plotter`, draws
+shaded triangles + dihedral-angle feature edges, and returns PNG bytes
+per requested view. Camera presets are shared with the rest of the
+benchmark via :mod:`cadgenbench.common.camera_presets`. Projection is
+parallel (orthographic) across all views, the canonical CAD-drawing
+convention; per-view ``parallel_scale`` is fitted to the bbox projected
+onto the camera plane so wide/flat parts viewed from a side aren't
+dwarfed.
 
-Chromium is launched once per ``render_steps()`` call regardless of how
-many STEP files are rendered.  The convenience wrapper ``render_step()``
-handles the single-file case.
+In-process, no subprocesses, no Chromium. VTK picks its OpenGL backend
+at runtime:
+
+- macOS dev: Cocoa / NSOpenGL (GPU when present).
+- Linux GPU: EGL (GPU when drivers are present).
+- Linux CPU-only (HF Space cpu-upgrade and similar): EGL + Mesa
+  software rasteriser (``libglx-mesa0`` / ``libegl-mesa0``). No code
+  change required.
+
+Per-render cost on a modern macOS dev box: ~40 ms (small jig parts) to
+~350 ms (heavy NIST CTC parts) for 1024x768 PNGs, roughly two orders
+of magnitude faster than the previous Chromium / three-cad-viewer path.
 """
 from __future__ import annotations
 
-import subprocess
-import sys
-import tempfile
+import io
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-CAMERA_PRESETS: frozenset[str] = frozenset(
-    ("front", "rear", "left", "right", "top", "bottom", "iso")
+import numpy as np
+import pyvista as pv
+from PIL import Image
+
+from cadgenbench.common.camera_presets import (
+    CAMERA_PRESETS,
+    DEFAULT_VIEWS,
+    camera_placement,
+    validate_views,
+)
+from cadgenbench.common.mesh import (
+    Mesh,
+    deflection_for_bbox,
+    tessellate_step,
 )
 
-DEFAULT_VIEWS: tuple[str, ...] = ("iso", "front", "top", "right")
+# Re-exported for callers that want the canonical preset / default-view sets.
+__all__ = [
+    "CAMERA_PRESETS",
+    "DEFAULT_VIEWS",
+    "OVERLAY_PALETTE",
+    "RenderedImage",
+    "render_mesh",
+    "render_overlay",
+    "render_step",
+    "render_steps",
+]
+
+
+# ---------------------------------------------------------------------------
+# Look-and-feel constants
+# ---------------------------------------------------------------------------
+
+# Default body colour. Slightly brighter than the OCC ``Color(0.68,0.72,0.76)``
+# we used to hand to three-cad-viewer; with VTK's ambient+diffuse model the
+# OCC value lands too dark, so brighten the base RGB and let directional
+# lighting carve out the shading. Edge colour matches tcv's ``edgeColor: 0x333333``.
+DEFAULT_BODY_RGB: tuple[float, float, float] = (0.85, 0.87, 0.90)
+EDGE_RGB: tuple[float, float, float] = (0.20, 0.20, 0.20)
+BACKGROUND_RGB: tuple[float, float, float] = (1.0, 1.0, 1.0)
+
+# Dihedral threshold above which a mesh edge counts as a feature edge and
+# gets drawn. 30 deg matches :mod:`cadgenbench.eval.feature_edges` (tau_sharp).
+FEATURE_EDGE_ANGLE_DEG: float = 30.0
+EDGE_LINE_WIDTH: float = 1.5
+
+# Margin (multiplier on the projected bbox half-extent) when fitting the
+# part to the frame. > 1 leaves whitespace around the silhouette.
+FRAME_MARGIN: float = 1.10
+
+# rgba palette used by :func:`render_overlay` when no explicit colours are
+# given. Matches the previous module's palette so existing report renders
+# stay consistent.
+OVERLAY_PALETTE: tuple[tuple[float, float, float, float], ...] = (
+    (0.18, 0.45, 0.86, 1.00),  # solid blue
+    (0.90, 0.30, 0.30, 0.40),  # translucent red
+    (1.00, 0.85, 0.00, 1.00),  # solid yellow (good for highlights)
+    (0.20, 0.70, 0.30, 0.60),  # translucent green
+)
 
 
 @dataclass(frozen=True)
 class RenderedImage:
-    """One rendered view of a STEP file."""
+    """One rendered view of a STEP file or mesh."""
 
     name: str
     data: bytes
@@ -34,111 +101,135 @@ class RenderedImage:
     height: int
 
 
-def _validate_views(views: Sequence[str]) -> None:
-    unknown = set(views) - CAMERA_PRESETS
-    if unknown:
-        raise ValueError(
-            f"Unknown camera preset(s): {unknown}. "
-            f"Valid: {sorted(CAMERA_PRESETS)}"
-        )
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 
-def _build_batch_script(
-    step_paths: Sequence[Path],
-    views: Sequence[str],
-    width: int,
-    height: int,
-) -> str:
-    """Generate a single Python script that renders every STEP file.
+def render_mesh(
+    mesh: Mesh,
+    views: Sequence[str] | None = None,
+    *,
+    width: int = 1024,
+    height: int = 768,
+    body_rgb: tuple[float, float, float] = DEFAULT_BODY_RGB,
+) -> list[RenderedImage]:
+    """Render an already-tessellated :class:`Mesh` from multiple angles.
 
-    All models end up in one ``main()`` so tcv_screenshots launches
-    Chromium exactly once for the entire batch.  Output PNGs are named
-    ``{stem}__{view}.png`` to avoid collisions.
+    The eval pipeline tessellates each candidate / GT once for the
+    metric path; this entry point lets the renderer reuse that mesh
+    instead of re-tessellating from STEP.
+
+    Args:
+        mesh: Welded triangle mesh produced by
+            :func:`cadgenbench.common.mesh.tessellate_step` (or any
+            equivalent welded mesh in mm-space).
+        views: Camera preset names. Defaults to :data:`DEFAULT_VIEWS`.
+        width: Image width in pixels.
+        height: Image height in pixels.
+        body_rgb: Per-render body colour (rgb in ``[0, 1]``).
+
+    Returns:
+        One :class:`RenderedImage` per requested view, in input order.
+
+    Raises:
+        ValueError: Unknown camera preset, or empty mesh.
     """
-    import_lines = []
-    save_lines = []
+    if mesh.n_triangles == 0:
+        raise ValueError("render_mesh: mesh has zero triangles")
+    if views is None:
+        views = DEFAULT_VIEWS
+    validate_views(views)
 
-    for idx, path in enumerate(step_paths):
-        var = f"shape{idx}"
-        stem = path.stem
-        import_lines.append(
-            f"{var} = import_step({str(path)!r})\n"
-            f"{var}.color = Color(0.68, 0.72, 0.76)"
-        )
-        for view in views:
-            png_name = f"{stem}__{view}" if len(step_paths) > 1 else view
-            save_lines.append(
-                f'    save_model({var}, "{png_name}", '
-                f'{{"cadWidth": {width}, "height": {height}, '
-                f'"reset_camera": "{view}", '
-                f'"edgeColor": 0x333333}})'
-            )
-
-    imports = "\n".join(import_lines)
-    saves = "\n".join(save_lines)
-
-    return (
-        f"from build123d import import_step, Color\n"
-        f"\n"
-        f"{imports}\n"
-        f"\n"
-        f"def main():\n"
-        f"    from tcv_screenshots import save_model, get_saved_models\n"
-        f"{saves}\n"
-        f"    return get_saved_models()\n"
+    bbox_min = mesh.vertices.min(axis=0)
+    bbox_max = mesh.vertices.max(axis=0)
+    body = _mesh_to_polydata(mesh)
+    edges = body.extract_feature_edges(
+        feature_angle=FEATURE_EDGE_ANGLE_DEG,
+        boundary_edges=True,
+        feature_edges=True,
+        non_manifold_edges=False,
+        manifold_edges=False,
     )
 
-
-def _build_overlay_script(
-    step_paths: Sequence[Path],
-    colors: Sequence[tuple[float, float, float, float]],
-    views: Sequence[str],
-    width: int,
-    height: int,
-) -> str:
-    """Generate a script that renders all STEPs as one composite scene per view.
-
-    Each STEP is loaded, given its rgba color, and grouped into one
-    ``Compound``; the compound is rendered once per requested view.
-    """
-    import_lines = []
-    for idx, (path, rgba) in enumerate(zip(step_paths, colors)):
-        r, g, b, a = rgba
-        import_lines.append(
-            f"shape{idx} = import_step({str(path)!r})\n"
-            f"shape{idx}.color = Color({r}, {g}, {b}, {a})"
+    out: list[RenderedImage] = []
+    for view in views:
+        png = _render_scene(
+            shapes=[(body, body_rgb, 1.0)],
+            edge_meshes=[edges],
+            bbox_min=bbox_min,
+            bbox_max=bbox_max,
+            view=view,
+            width=width,
+            height=height,
         )
-    compound_args = ", ".join(f"shape{i}" for i in range(len(step_paths)))
-    # Notes on the viewer config:
-    #   - Skip ``"transparent": True``; the viewer auto-enables transparency
-    #     mode as soon as any shape has alpha < 1.0 (see three-cad-viewer.js,
-    #     ``if (alpha < 1.0) this.transparent = true;``).
-    #   - Force ``defaultOpacity: 1.0``. The viewer computes per-shape opacity
-    #     as ``defaultOpacity * alpha`` once it is in transparent mode, and
-    #     defaults to 0.5 -- which would also wash out our alpha=1.0 shapes
-    #     and turn a "solid" GT translucent.
-    save_lines = [
-        f'    save_model(scene, "{view}", '
-        f'{{"cadWidth": {width}, "height": {height}, '
-        f'"reset_camera": "{view}", "theme": "light", '
-        f'"edgeColor": 0x333333, "defaultOpacity": 1.0}})'
-        for view in views
-    ]
+        out.append(RenderedImage(name=view, data=png, width=width, height=height))
+    return out
 
-    imports = "\n".join(import_lines)
-    saves = "\n".join(save_lines)
-    return (
-        f"from build123d import import_step, Color, Compound\n"
-        f"\n"
-        f"{imports}\n"
-        f"\n"
-        f"scene = Compound(children=[{compound_args}])\n"
-        f"\n"
-        f"def main():\n"
-        f"    from tcv_screenshots import save_model, get_saved_models\n"
-        f"{saves}\n"
-        f"    return get_saved_models()\n"
-    )
+
+def render_step(
+    step_path: str | Path,
+    views: Sequence[str] | None = None,
+    *,
+    width: int = 1024,
+    height: int = 768,
+) -> list[RenderedImage]:
+    """Render a single STEP file from multiple camera angles.
+
+    Tessellation deflection is derived from the part's own bounding-box
+    diagonal, clamped via :func:`cadgenbench.common.mesh.deflection_for_bbox`.
+
+    Args:
+        step_path: Path to a .step / .stp file.
+        views: Camera preset names. Defaults to :data:`DEFAULT_VIEWS`.
+        width: Image width in pixels.
+        height: Image height in pixels.
+
+    Returns:
+        One :class:`RenderedImage` per requested view, in input order.
+
+    Raises:
+        FileNotFoundError: STEP file does not exist.
+        ValueError: Unknown camera preset.
+        RuntimeError: STEP file produced no geometry.
+    """
+    step_path = Path(step_path)
+    mesh = _tessellate(step_path)
+    return render_mesh(mesh, views, width=width, height=height)
+
+
+def render_steps(
+    step_paths: Sequence[str | Path],
+    views: Sequence[str] | None = None,
+    *,
+    width: int = 1024,
+    height: int = 768,
+) -> dict[str, list[RenderedImage]]:
+    """Render multiple STEP files, keyed by stem.
+
+    Each file is tessellated and rendered independently; one VTK
+    plotter per (file, view), all in-process.
+
+    Args:
+        step_paths: Paths to .step / .stp files.
+        views: Camera preset names. Defaults to :data:`DEFAULT_VIEWS`.
+        width: Image width in pixels.
+        height: Image height in pixels.
+
+    Returns:
+        ``{stem: [RenderedImage, ...]}`` for each input file.
+
+    Raises:
+        FileNotFoundError: A STEP file does not exist.
+        ValueError: ``step_paths`` is empty, or unknown camera preset.
+        RuntimeError: A STEP file produced no geometry.
+    """
+    if not step_paths:
+        raise ValueError("step_paths must not be empty")
+    paths = [Path(p) for p in step_paths]
+    return {
+        p.stem: render_step(p, views, width=width, height=height) for p in paths
+    }
 
 
 def render_overlay(
@@ -148,220 +239,202 @@ def render_overlay(
     views: Sequence[str] | None = None,
     width: int = 1024,
     height: int = 768,
-    timeout: int = 180,
 ) -> list[RenderedImage]:
     """Render several STEPs as one composite scene per view.
 
-    Each STEP is given a per-shape rgba color so different parts of the
-    scene are visually distinguishable. Used for metric-development
-    visualisation (GT + jig overlays, alignment debugging, etc.).
-
-    Args:
-        step_paths: Paths to .step / .stp files. Rendered in the order
-            given; later shapes are drawn on top of earlier ones.
-        colors: Per-shape rgba colors (each component in [0, 1]). If
-            omitted, falls back to a small built-in palette
-            (:data:`OVERLAY_PALETTE`).
-        views: Camera preset names. Defaults to ``("iso",)`` -- a single
-            iso view is typically enough for an overlay.
-        width: Image width in pixels.
-        height: Image height in pixels.
-        timeout: Max seconds for the render subprocess.
-
-    Returns:
-        One ``RenderedImage`` per requested view, in input order.
-
-    Raises:
-        FileNotFoundError: If any STEP path does not exist.
-        ValueError: If ``step_paths`` is empty, ``colors`` length mismatches,
-            or an unknown camera preset is requested.
-        RuntimeError: If the renderer subprocess fails.
-    """
-    if not step_paths:
-        raise ValueError("step_paths must not be empty")
-
-    resolved: list[Path] = []
-    for p in step_paths:
-        rp = Path(p).resolve()
-        if not rp.exists():
-            raise FileNotFoundError(f"STEP file not found: {rp}")
-        resolved.append(rp)
-
-    if colors is None:
-        colors = [OVERLAY_PALETTE[i % len(OVERLAY_PALETTE)] for i in range(len(resolved))]
-    elif len(colors) != len(resolved):
-        raise ValueError(
-            f"colors length ({len(colors)}) must match step_paths length ({len(resolved)})"
-        )
-
-    if views is None:
-        views = ("iso",)
-    _validate_views(views)
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp = Path(tmp_dir)
-        script = tmp / "_overlay.py"
-        script.write_text(
-            _build_overlay_script(resolved, colors, views, width, height)
-        )
-        out_dir = tmp / "out"
-        out_dir.mkdir()
-
-        result = subprocess.run(
-            [
-                sys.executable, "-m", "tcv_screenshots",
-                "-f", str(script),
-                "-o", str(out_dir),
-            ],
-            capture_output=True, text=True, timeout=timeout,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"tcv_screenshots failed (exit {result.returncode}):\n{result.stderr}"
-            )
-
-        images: list[RenderedImage] = []
-        for view in views:
-            png_path = out_dir / f"{view}.png"
-            if not png_path.exists():
-                available = [p.name for p in out_dir.glob("*.png")]
-                raise RuntimeError(
-                    f"Expected output '{view}.png' not found. Available: {available}"
-                )
-            data = png_path.read_bytes()
-            if not data:
-                raise RuntimeError(f"Renderer produced empty image for view '{view}'")
-            images.append(
-                RenderedImage(name=view, data=data, width=width, height=height)
-            )
-    return images
-
-
-# Default rgba palette used by render_overlay when colors are not specified.
-# Kept short and distinct; interface_match_viz overrides for its own scheme.
-OVERLAY_PALETTE: tuple[tuple[float, float, float, float], ...] = (
-    (0.18, 0.45, 0.86, 1.00),   # solid blue
-    (0.90, 0.30, 0.30, 0.40),   # translucent red
-    (1.00, 0.85, 0.00, 1.00),   # solid yellow (good for highlights)
-    (0.20, 0.70, 0.30, 0.60),   # translucent green
-)
-
-
-def render_steps(
-    step_paths: Sequence[str | Path],
-    views: Sequence[str] | None = None,
-    width: int = 1024,
-    height: int = 768,
-    timeout: int = 300,
-) -> dict[str, list[RenderedImage]]:
-    """Render multiple STEP files in a single Chromium session.
+    Each STEP is tessellated independently (its own deflection from its
+    own bbox), assigned its rgba colour, and rendered together. Used
+    for metric-development visualisation (GT + jig overlays, alignment
+    debugging, etc.). Later shapes are drawn on top of earlier ones,
+    matching the call-order convention of the previous viewer.
 
     Args:
         step_paths: Paths to .step / .stp files.
-        views: Camera preset names.  Valid values: front, rear, left, right,
-               top, bottom, iso.  Defaults to iso/front/top/right.
+        colors: Per-shape rgba (each component in ``[0, 1]``). Defaults
+            to :data:`OVERLAY_PALETTE` cycled.
+        views: Camera preset names. Defaults to ``("iso",)``, a single
+            iso view is typically enough for an overlay.
         width: Image width in pixels.
         height: Image height in pixels.
-        timeout: Max seconds for the entire batch.
 
     Returns:
-        Dict mapping each STEP file's stem name to its list of RenderedImage.
+        One :class:`RenderedImage` per requested view, in input order.
 
     Raises:
-        FileNotFoundError: If any STEP file does not exist.
-        ValueError: If an unknown camera preset is requested or paths are empty.
-        RuntimeError: If the renderer subprocess fails.
+        FileNotFoundError: A STEP file does not exist.
+        ValueError: ``step_paths`` is empty, ``colors`` length mismatch,
+            or unknown camera preset.
+        RuntimeError: A STEP file produced no geometry.
     """
     if not step_paths:
         raise ValueError("step_paths must not be empty")
-
-    resolved: list[Path] = []
-    for p in step_paths:
-        rp = Path(p).resolve()
-        if not rp.exists():
-            raise FileNotFoundError(f"STEP file not found: {rp}")
-        resolved.append(rp)
-
+    paths = [Path(p) for p in step_paths]
+    if colors is None:
+        colors = [OVERLAY_PALETTE[i % len(OVERLAY_PALETTE)] for i in range(len(paths))]
+    elif len(colors) != len(paths):
+        raise ValueError(
+            f"colors length ({len(colors)}) must match step_paths length ({len(paths)})"
+        )
     if views is None:
-        views = DEFAULT_VIEWS
-    _validate_views(views)
+        views = ("iso",)
+    validate_views(views)
 
-    multi = len(resolved) > 1
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp = Path(tmp_dir)
-
-        script = tmp / "_render.py"
-        script.write_text(
-            _build_batch_script(resolved, views, width, height)
-        )
-
-        out_dir = tmp / "out"
-        out_dir.mkdir()
-
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "tcv_screenshots",
-                "-f",
-                str(script),
-                "-o",
-                str(out_dir),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"tcv_screenshots failed (exit {result.returncode}):\n"
-                f"{result.stderr}"
+    shapes: list[tuple[pv.PolyData, tuple[float, float, float], float]] = []
+    edge_meshes: list[pv.PolyData] = []
+    bbox_min = np.array([np.inf] * 3, dtype=np.float64)
+    bbox_max = np.array([-np.inf] * 3, dtype=np.float64)
+    for path, rgba in zip(paths, colors):
+        mesh = _tessellate(path)
+        body = _mesh_to_polydata(mesh)
+        shapes.append((body, (rgba[0], rgba[1], rgba[2]), float(rgba[3])))
+        edge_meshes.append(
+            body.extract_feature_edges(
+                feature_angle=FEATURE_EDGE_ANGLE_DEG,
+                boundary_edges=True,
+                feature_edges=True,
+                non_manifold_edges=False,
+                manifold_edges=False,
             )
+        )
+        bbox_min = np.minimum(bbox_min, mesh.vertices.min(axis=0))
+        bbox_max = np.maximum(bbox_max, mesh.vertices.max(axis=0))
 
-        results: dict[str, list[RenderedImage]] = {}
-        for path in resolved:
-            stem = path.stem
-            images: list[RenderedImage] = []
-            for view in views:
-                png_name = f"{stem}__{view}" if multi else view
-                png_path = out_dir / f"{png_name}.png"
-                if not png_path.exists():
-                    available = [p.name for p in out_dir.glob("*.png")]
-                    raise RuntimeError(
-                        f"Expected output '{png_name}.png' not found. "
-                        f"Available: {available}"
-                    )
-                data = png_path.read_bytes()
-                if not data:
-                    raise RuntimeError(
-                        f"Renderer produced empty image for '{png_name}'"
-                    )
-                images.append(
-                    RenderedImage(
-                        name=view, data=data, width=width, height=height
-                    )
-                )
-            results[stem] = images
-
-    return results
+    out: list[RenderedImage] = []
+    for view in views:
+        png = _render_scene(
+            shapes=shapes,
+            edge_meshes=edge_meshes,
+            bbox_min=bbox_min,
+            bbox_max=bbox_max,
+            view=view,
+            width=width,
+            height=height,
+        )
+        out.append(RenderedImage(name=view, data=png, width=width, height=height))
+    return out
 
 
-def render_step(
-    step_path: str | Path,
-    views: Sequence[str] | None = None,
-    width: int = 1024,
-    height: int = 768,
-    timeout: int = 120,
-) -> list[RenderedImage]:
-    """Render a single STEP file from multiple angles.
+# ---------------------------------------------------------------------------
+# Internals
+# ---------------------------------------------------------------------------
 
-    Convenience wrapper around :func:`render_steps` for the single-file case.
-    See that function for full documentation.
-    """
-    step_path = Path(step_path)
-    results = render_steps(
-        [step_path], views=views, width=width, height=height, timeout=timeout
+
+def _tessellate(step_path: Path) -> Mesh:
+    """STEP -> welded triangle mesh, deflection from the part's own bbox."""
+    if not step_path.exists():
+        raise FileNotFoundError(f"STEP file not found: {step_path}")
+    from build123d import import_step
+
+    shape = import_step(str(step_path))
+    if shape is None or not shape.wrapped:
+        raise RuntimeError(f"STEP file produced no geometry: {step_path}")
+    bb = shape.bounding_box()
+    diag = float(
+        np.linalg.norm(
+            np.array([bb.max.X - bb.min.X, bb.max.Y - bb.min.Y, bb.max.Z - bb.min.Z]),
+        )
     )
-    return results[step_path.stem]
+    return tessellate_step(step_path, deflection_for_bbox(diag))
+
+
+def _mesh_to_polydata(mesh: Mesh) -> pv.PolyData:
+    """Convert a welded :class:`Mesh` to a :class:`pyvista.PolyData`."""
+    v = np.ascontiguousarray(mesh.vertices, dtype=np.float64)
+    t = np.ascontiguousarray(mesh.triangles, dtype=np.int64)
+    n = t.shape[0]
+    cells = np.empty((n, 4), dtype=np.int64)
+    cells[:, 0] = 3
+    cells[:, 1:] = t
+    return pv.PolyData(v, cells.reshape(-1))
+
+
+def _parallel_scale_for_view(
+    bbox_min: np.ndarray,
+    bbox_max: np.ndarray,
+    *,
+    eye: np.ndarray,
+    target: np.ndarray,
+    up: np.ndarray,
+    window_w: int,
+    window_h: int,
+) -> float:
+    """Half-height of the visible volume needed to fit the bbox in frame.
+
+    Projects the 8 bbox corners onto the camera's (right, up) plane and
+    picks the smallest ``parallel_scale`` that contains every corner,
+    accounting for the window aspect ratio.
+    """
+    view_dir = target - eye
+    view_dir /= max(float(np.linalg.norm(view_dir)), 1e-12)
+    up = up / max(float(np.linalg.norm(up)), 1e-12)
+    right = np.cross(view_dir, up)
+    right /= max(float(np.linalg.norm(right)), 1e-12)
+    up = np.cross(right, view_dir)
+
+    corners = np.array([
+        [bbox_min[0], bbox_min[1], bbox_min[2]],
+        [bbox_min[0], bbox_min[1], bbox_max[2]],
+        [bbox_min[0], bbox_max[1], bbox_min[2]],
+        [bbox_min[0], bbox_max[1], bbox_max[2]],
+        [bbox_max[0], bbox_min[1], bbox_min[2]],
+        [bbox_max[0], bbox_min[1], bbox_max[2]],
+        [bbox_max[0], bbox_max[1], bbox_min[2]],
+        [bbox_max[0], bbox_max[1], bbox_max[2]],
+    ], dtype=np.float64) - target
+    half_w = float(np.max(np.abs(corners @ right)))
+    half_h = float(np.max(np.abs(corners @ up)))
+    aspect = float(window_w) / float(window_h)
+    return max(half_h, half_w / aspect) * FRAME_MARGIN
+
+
+def _render_scene(
+    *,
+    shapes: list[tuple[pv.PolyData, tuple[float, float, float], float]],
+    edge_meshes: list[pv.PolyData],
+    bbox_min: np.ndarray,
+    bbox_max: np.ndarray,
+    view: str,
+    width: int,
+    height: int,
+) -> bytes:
+    """Render one frame: shaded triangles + feature-edge overlay -> PNG bytes."""
+    pl = pv.Plotter(off_screen=True, window_size=(width, height))
+    try:
+        pl.set_background(BACKGROUND_RGB)
+        for body, rgb, alpha in shapes:
+            pl.add_mesh(
+                body,
+                color=rgb,
+                opacity=alpha,
+                smooth_shading=False,
+                show_edges=False,
+                ambient=0.45,
+                diffuse=0.65,
+                specular=0.10,
+                specular_power=15,
+            )
+        for edges in edge_meshes:
+            if edges.n_points > 0:
+                pl.add_mesh(edges, color=EDGE_RGB, line_width=EDGE_LINE_WIDTH)
+
+        eye, target, up = camera_placement(view, bbox_min, bbox_max)
+        cam = pl.camera
+        cam.position = tuple(map(float, eye))
+        cam.focal_point = tuple(map(float, target))
+        cam.up = tuple(map(float, up))
+        cam.parallel_projection = True
+        cam.parallel_scale = _parallel_scale_for_view(
+            bbox_min, bbox_max,
+            eye=eye, target=target, up=up,
+            window_w=width, window_h=height,
+        )
+
+        arr = np.asarray(
+            pl.screenshot(return_img=True, transparent_background=False)
+        )
+    finally:
+        pl.close()
+
+    buf = io.BytesIO()
+    Image.fromarray(arr).save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
