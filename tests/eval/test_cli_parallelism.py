@@ -167,7 +167,17 @@ def test_parallel_dispatch_matches_sequential(
             (fixture_dir / "result.json").unlink()
     (run_dir / "run_summary.json").unlink()
 
-    monkeypatch.setattr(_cli, "ProcessPoolExecutor", ThreadPoolExecutor)
+    class _ThreadExecutorAcceptingMpContext(ThreadPoolExecutor):
+        """Thread-pool shim that accepts (and drops) the mp_context kwarg.
+
+        Production code passes ``mp_context=spawn`` to ProcessPoolExecutor
+        for VTK fork-safety; ThreadPoolExecutor doesn't take that kwarg.
+        """
+
+        def __init__(self, *args, mp_context=None, **kwargs):
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(_cli, "ProcessPoolExecutor", _ThreadExecutorAcceptingMpContext)
     monkeypatch.setattr(
         "cadgenbench.eval.evaluate.evaluate_result", _stub_evaluate_result,
     )

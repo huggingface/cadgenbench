@@ -20,10 +20,21 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import multiprocessing as mp
 import os
 import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
+
+# VTK / Mesa GL state preloaded in the parent (via the renderer's
+# pyvista import) is not fork-safe on Linux: forking once any VTK
+# module has touched a GL context preloader leaves the child with a
+# half-initialised libGL, which terminates abruptly the first time
+# the worker tries to render and surfaces as BrokenProcessPool in
+# the parent. Spawn re-imports cadgenbench in a fresh interpreter
+# per worker, no inherited state. macOS already defaults to spawn
+# since 3.8; this line is the Linux fix.
+_MP_CONTEXT = mp.get_context("spawn")
 
 DEFAULT_WORKERS = min(8, os.cpu_count() or 1)
 
@@ -180,7 +191,9 @@ def _process_run(
     if n_workers == 1:
         results = [_eval_one(w) for w in work]
     else:
-        with ProcessPoolExecutor(max_workers=n_workers) as ex:
+        with ProcessPoolExecutor(
+            max_workers=n_workers, mp_context=_MP_CONTEXT,
+        ) as ex:
             results = list(ex.map(_eval_one, work))
 
     failures = 0
