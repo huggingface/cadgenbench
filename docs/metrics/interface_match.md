@@ -38,7 +38,7 @@ test_N/
 
 Each fixture contains:
 
-1. `gt.step`: the ground-truth part. `gt.step` itself doubles as the "correct candidate" for the metric; no separate `correct.step` is required.
+1. `gt.step`: the ground-truth part. `gt.step` itself doubles as the "correct candidate" for the metric.
 2. One or more sub-volume STEP files. Each contains the solid geometry of one interface region `R`, positioned at the absolute GT-specified pose. No auxiliary files (no main jig STEP, no YAML, no parametric annotation): the STEP is the complete description.
 
 ### Filename
