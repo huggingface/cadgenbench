@@ -1,9 +1,9 @@
 # Validation
 
 Two tiers. Every submission auto-publishes as `unvalidated`. Maintainers
-promote rows to `validated` after reviewing methodology evidence. Both
-tiers stay visible on the leaderboard, sorted by `aggregate_score`
-descending. For the submission contract see
+promote rows to `validated` after reviewing methodology evidence. The
+leaderboard renders the two tiers as separate tables, both sorted by
+`aggregate_score` descending. For the submission contract see
 [`submission.md`](submission.md).
 
 ## Evidence types
@@ -29,5 +29,15 @@ Open a discussion on
 mention the `submission_id`, and link the relevant evidence. No SLA;
 maintainers also review top-scoring unvalidated rows proactively.
 
-Promotion writes `validation_status: validated`, `validation_method`,
-and `validated_at` (UTC ISO-8601) onto the row.
+## How promotion works
+
+Maintainers promote from the admin panel on the leaderboard Space: pick
+the submission, choose the `validation_method`, mark it validated. The
+row moves from the unvalidated to the validated table on the next
+refresh, and the validated table shows the accepted `validation_method`.
+Demotion reverses it and clears `validation_method`. If the Space is
+unavailable, a maintainer can edit the row in `results.jsonl` directly
+on the dataset repo instead.
+
+Promotion writes `validation_status: validated` and `validation_method`
+onto the row. No other fields change.
