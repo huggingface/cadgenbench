@@ -130,7 +130,7 @@ For each part the labeller delivers:
    - `group_id` a 1-indexed integer. Sub-volumes sharing the same `group_id` must move together rigidly during pose search.
    - `index` a 1-indexed integer within that group.
    - `fit_type` exactly `KOR` (keep-out region: candidate must be empty here) or `KIR` (keep-in region: candidate must have solid material here).
-3. All sub-volume STEP files share the ground-truth coordinate frame and are positioned at their absolute GT-specified pose. This is the *only* "rigid-body annotation"; no separate pose JSON is required, the pose lives inside the sub-volume STEP itself.
+3. All sub-volume STEP files share the ground-truth coordinate frame and are positioned at their absolute GT-specified pose. This is the *only* "rigid-body annotation": the pose lives inside the sub-volume STEP itself.
 
 The internal authoring workflow is unconstrained. A common approach is to model a full mating fixture in CAD (base plate, pins, sockets, etc.) and export each interface region as its own STEP file at the end. The delivered artifacts are `ground_truth.step` plus the per-sub-volume STEPs.
 
