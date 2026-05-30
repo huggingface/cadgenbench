@@ -82,7 +82,7 @@ $$
 \text{topo\_match} \;=\; \tfrac{1}{3}\bigl(s_0 + s_1 + s_2\bigr) \;\in\; [0, 1]
 $$
 
-Each $s_i$ equals $1$ iff the candidate's Betti matches the GT's on that axis, and decays smoothly as the count drifts in either direction — equivalent for non-negative integers to $(\min(b^{\text{cand}}, b^{\text{gt}})+1) / (\max(b^{\text{cand}}, b^{\text{gt}})+1)$. The $+1$ shift keeps the ratio finite when either Betti is zero (so "1 vs 0" is $1/2$, not undefined) and prevents "off by one near zero" from collapsing to a binary fail.
+Each $s_i$ equals $1$ iff the candidate's Betti matches the GT's on that axis, and decays smoothly as the count drifts in either direction, equivalent for non-negative integers to $(\min(b^{\text{cand}}, b^{\text{gt}})+1) / (\max(b^{\text{cand}}, b^{\text{gt}})+1)$. The $+1$ shift keeps the ratio finite when either Betti is zero (so "1 vs 0" is $1/2$, not undefined) and prevents "off by one near zero" from collapsing to a binary fail.
 
 The score is **symmetric** in candidate / GT and the same on every axis, so a one-step drift on $b_0$, $b_1$, or $b_2$ contributes the same penalty.
 
