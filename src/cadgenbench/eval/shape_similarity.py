@@ -232,7 +232,6 @@ class MetricMeta:
 
     label: str
     fmt: str
-    lower_is_better: bool = False
     suffix: str = ""
 
 
