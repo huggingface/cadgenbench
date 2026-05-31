@@ -81,10 +81,12 @@ no silent exception swallowing) live in [style.mdc](./style.mdc).
   `for f in $(git ls-files '*.py'); do head -15 "$f" | rg -q 'Apache License' || echo "missing: $f"; done`
 
 ## tests pass
-- `pytest -q` clean across `cadgenbench/tests/`. The renderer-
-  dependent suite (`tests/common/test_viewer.py`, baseline
-  end-to-end) needs a local run; everything else runs in the
-  sandbox.
+- `pytest -q` clean across `cadgenbench/tests/`. Run the full suite
+  yourself unsandboxed (`required_permissions: ["all"]`); the
+  renderer-dependent tests (`tests/common/test_viewer.py`, baseline
+  end-to-end) need a real GL context the sandbox lacks, so they pass
+  only unsandboxed. The non-renderer tests also run in the sandbox.
+  See style.mdc "VTK renderer".
 
 ## scope
 - In scope:
