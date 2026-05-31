@@ -37,7 +37,6 @@ from typing import Any
 import litellm
 from litellm import (
     APIConnectionError,
-    APIError,
     BadGatewayError,
     InternalServerError,
     RateLimitError,
