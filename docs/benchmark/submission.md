@@ -47,6 +47,7 @@ the candidate STEP came from a baseline agent, a script, or a human.
   "alignment":         { "rmse": 0.0124 },
   "gt_metrics":        { "shape_similarity_score": 0.84, ... },
   "shape_diagnostics": { ... },
+  "metric_errors":     { "shape_volume_iou": "RuntimeError: ..." },  // optional; present only when a sub-metric raised
   "interface_metrics": { "score": 0.93, "contexts": { ... } },  // optional
   "topology_metrics":  { "score": 1.0, "candidate": {...}, "gt": {...} },
   "cad_score":         0.917
@@ -61,6 +62,12 @@ produce a scorable STEP?":
 - `"missing"` , no `output.step` in the work dir. `cad_score = 0`,
   and the metric blocks (`gt_metrics`, `interface_metrics`, ...) are
   absent.
+
+`metric_errors` is present only when a shape sub-metric raised on a
+valid candidate. These metrics are deterministic on valid CAD, so a
+failure is exceptional: the affected sub-metric scores `0` (a crash
+never raises the score) and the exception is recorded here so the `0`
+stays auditable rather than silent.
 
 ### Run-level: `results/<run_name>/run_summary.json`
 
