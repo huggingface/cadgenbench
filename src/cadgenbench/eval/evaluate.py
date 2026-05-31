@@ -207,6 +207,8 @@ def evaluate_result(
     data["validation"] = validation_dict
     data["gt_metrics"] = scores
     data["shape_diagnostics"] = comparison.diagnostics
+    if comparison.metric_errors:
+        data["metric_errors"] = comparison.metric_errors
     data["alignment"] = {"rmse": round(rmse, 4)}
     if interface_metrics:
         data["interface_metrics"] = interface_metrics

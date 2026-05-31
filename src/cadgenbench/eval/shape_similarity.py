@@ -252,23 +252,32 @@ def compute_metrics(
     candidate: MetricContext,
     gt: MetricContext,
     metrics: dict[str, MetricFn] | None = None,
-) -> dict[str, float]:
-    """Run all applicable metrics and return ``{name: score}``.
+) -> tuple[dict[str, float], dict[str, str]]:
+    """Run all applicable metrics and return ``(scores, errors)``.
 
-    Metrics that return ``None`` (because the required data is missing)
-    are silently omitted from the result.
+    A metric that returns ``None`` (the required data is missing) is
+    omitted from ``scores``. A metric that raises is scored ``0.0`` and
+    recorded in ``errors`` as ``{name: "ExcType: message"}``: on valid
+    CAD these metrics are deterministic and should not fail, so an
+    exception is treated as a candidate-side failure (the sub-metric
+    counts as 0, which also means a deliberate crash can never raise
+    the score) and surfaced loudly instead of silently dropped.
+    ``errors`` is empty on a clean run.
     """
     fns = metrics if metrics is not None else DEFAULT_METRICS
-    results: dict[str, float] = {}
+    scores: dict[str, float] = {}
+    errors: dict[str, str] = {}
     for name, fn in fns.items():
         try:
             value = fn(candidate, gt)
-        except Exception:
-            logger.warning("Metric %s failed", name, exc_info=True)
+        except Exception as exc:
+            logger.error("Metric %s raised; scoring it 0", name, exc_info=True)
+            scores[name] = 0.0
+            errors[name] = f"{type(exc).__name__}: {exc}"
             continue
         if value is not None:
-            results[name] = value
-    return results
+            scores[name] = value
+    return scores, errors
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +293,7 @@ class ComparisonResult:
     diagnostics: dict[str, float]
     alignment_rmse: float | None = None
     aligned_step: Path | None = None
+    metric_errors: dict[str, str] = field(default_factory=dict)
 
 
 def compare_step_files(
@@ -382,7 +392,8 @@ def compare_step_files(
     if gt_renders is not None:
         _ensure_renders(ctx_gt, gt_renders)
 
-    scores: dict[str, float | None] = compute_metrics(ctx_candidate, ctx_gt, metrics=metrics)
+    scores: dict[str, float | None]
+    scores, metric_errors = compute_metrics(ctx_candidate, ctx_gt, metrics=metrics)
 
     component_keys = (
         "shape_point_cloud_f1",
@@ -426,6 +437,7 @@ def compare_step_files(
         diagnostics=diagnostics,
         alignment_rmse=rmse,
         aligned_step=aligned_path,
+        metric_errors=metric_errors,
     )
 
 

@@ -212,20 +212,22 @@ class TestComputeMetrics:
     def test_identical_step_full_context(self) -> None:
         """Same STEP on both sides -> all three shape sub-metrics report."""
         a = _ctx_with_step(10, 10, 10)
-        result = compute_metrics(a, a)
-        assert "shape_point_cloud_f1" in result
-        assert "shape_volume_iou" in result
-        assert "shape_feature_edge_f1" in result
+        scores, errors = compute_metrics(a, a)
+        assert "shape_point_cloud_f1" in scores
+        assert "shape_volume_iou" in scores
+        assert "shape_feature_edge_f1" in scores
+        assert errors == {}
 
     def test_empty_context(self) -> None:
         a = MetricContext()
-        result = compute_metrics(a, a)
-        assert result == {}
+        scores, errors = compute_metrics(a, a)
+        assert scores == {}
+        assert errors == {}
 
     def test_custom_subset(self) -> None:
         a = _ctx_with_step(10, 10, 10)
-        result = compute_metrics(a, a, metrics={"pc_f1": shape_point_cloud_f1})
-        assert list(result.keys()) == ["pc_f1"]
+        scores, _ = compute_metrics(a, a, metrics={"pc_f1": shape_point_cloud_f1})
+        assert list(scores.keys()) == ["pc_f1"]
 
     def test_custom_metric_function(self) -> None:
         def face_ratio(c: MetricContext, g: MetricContext) -> float | None:
@@ -240,16 +242,18 @@ class TestComputeMetrics:
             solid_count=1, shell_count=1, face_count=12,
             volume=1000, bounding_box=BBox(0, 10, 0, 10, 0, 10),
         ))
-        result = compute_metrics(a, b, metrics={"face_ratio": face_ratio})
-        assert result["face_ratio"] == pytest.approx(0.5)
+        scores, _ = compute_metrics(a, b, metrics={"face_ratio": face_ratio})
+        assert scores["face_ratio"] == pytest.approx(0.5)
 
-    def test_failing_metric_logged_and_skipped(self) -> None:
+    def test_failing_metric_scored_zero_and_recorded(self) -> None:
         def broken(c: MetricContext, g: MetricContext) -> float | None:
             raise RuntimeError("nope")
 
         a = MetricContext(measurements=_meas())
-        result = compute_metrics(
+        scores, errors = compute_metrics(
             a, a,
             metrics={"broken": broken, "pc_f1": shape_point_cloud_f1},
         )
-        assert "broken" not in result
+        assert scores["broken"] == 0.0
+        assert "broken" in errors
+        assert "nope" in errors["broken"]
