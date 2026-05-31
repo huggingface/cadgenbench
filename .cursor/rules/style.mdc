@@ -127,9 +127,12 @@
   anything that calls `render_step` / `render_steps` / `render_overlay`
   / `render_mesh`, `cadgenbench evaluate` over fresh fixtures, and
   `cadgenbench baseline run` end-to-end.
-- Default to running these unsandboxed yourself; only ask the user to
-  run them locally if the unsandboxed run also fails (e.g. macOS
-  permission prompts you cannot answer). The validity / similarity /
-  interface_match / topo_match / agent / measurements / mesh unit
-  tests run in seconds and never touch the renderer, so keep them in
-  the regular sandboxed loop.
+- Run these yourself unsandboxed with `required_permissions: ["all"]`.
+  This is verified: the full `pytest` suite passes that way in ~20s
+  (macOS Cocoa GL; Linux Mesa / EGL software backend). You can run
+  every test yourself, the renderer-dependent ones included, so never
+  hand test runs off to the user. The non-renderer unit tests
+  (validity / similarity / interface_match / topo_match / agent /
+  measurements / mesh) run in seconds inside the sandbox; keep those in
+  the fast sandboxed loop and escalate to an unsandboxed run for
+  anything that renders or runs a full `cadgenbench evaluate`.
