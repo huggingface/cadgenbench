@@ -144,8 +144,9 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> None:
     )
     p.add_argument("--timeout", type=int, default=defaults.runner_timeout,
                    help=f"Per-script execution timeout (default: {defaults.runner_timeout}s)")
-    p.add_argument("--parallel", type=int, default=1, metavar="N",
-                   help="Fixtures in parallel within each model's run.")
+    p.add_argument("--parallel", type=int, default=3, metavar="N",
+                   help="Fixtures in parallel within each model's run "
+                        "(default: 3).")
     p.add_argument("--fixture-retries", type=int, default=1, metavar="N",
                    help="Retries per fixture on exhausted LLM retries (default: 1).")
 
