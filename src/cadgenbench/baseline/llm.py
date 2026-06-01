@@ -102,6 +102,61 @@ RETRYABLE_ERRORS = (
 #                               ephemeral-state contention)
 _TRANSIENT_HTTP_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
+# How many of the most recent image-bearing messages keep their images in the
+# outgoing request. Renders accumulate one image per turn; resending the whole
+# history bloats the request and trips provider "many-image" limits (e.g.
+# Anthropic drops the per-image cap to 2000px once a request carries many
+# images). The task's input image (first image-bearing message) is always kept.
+_KEEP_RECENT_IMAGE_MSGS = 2
+
+
+def _prune_history_images(
+    messages: list[dict[str, Any]],
+    keep_recent: int = _KEEP_RECENT_IMAGE_MSGS,
+) -> list[dict[str, Any]]:
+    """Return a copy of *messages* that carries images only in the task's
+    input message and the most recent ``keep_recent`` image-bearing messages.
+
+    Older per-turn renders are dropped (replaced with a short text note) to
+    bound request size; all text is preserved, so the model still sees the
+    full turn-by-turn history and knows the earlier turns happened. The input
+    list is never mutated, so the persisted conversation keeps every image.
+    """
+    def _has_image(msg: dict[str, Any]) -> bool:
+        content = msg.get("content")
+        return isinstance(content, list) and any(
+            isinstance(b, dict) and b.get("type") == "image_url" for b in content
+        )
+
+    image_idxs = [i for i, m in enumerate(messages) if _has_image(m)]
+    keep = set(image_idxs[-keep_recent:])
+    # Always keep the task's input image, which lives in the first message
+    # (the initial prompt). Generation tasks have one; editing tasks don't
+    # (input is a STEP), so this adds nothing there and we keep strictly the
+    # last `keep_recent` turn renders.
+    if messages and _has_image(messages[0]):
+        keep.add(0)
+    if len(keep) >= len(image_idxs):
+        return messages  # nothing to drop
+
+    pruned: list[dict[str, Any]] = []
+    for i, msg in enumerate(messages):
+        if i in image_idxs and i not in keep:
+            kept = [
+                b for b in msg["content"]
+                if not (isinstance(b, dict) and b.get("type") == "image_url")
+            ]
+            n_dropped = len(msg["content"]) - len(kept)
+            kept.append({
+                "type": "text",
+                "text": f"[{n_dropped} render image(s) from this earlier turn "
+                        "omitted to bound request size]",
+            })
+            pruned.append({**msg, "content": kept})
+        else:
+            pruned.append(msg)
+    return pruned
+
 # Retry tuning: HF Inference Providers (Together/Novita/SambaNova via the HF
 # router) occasionally brownout on 502/503/504 for stretches of 30s–3min at
 # a time (observed 2026-04-23). 10 attempts with exponential backoff
@@ -267,17 +322,22 @@ class LLMClient:
                 # OpenAI / Gemini / others: let LiteLLM translate.
                 kwargs["reasoning_effort"] = effort
 
+        # Only the task input image + the last few renders ride along; older
+        # per-turn renders are dropped (text kept). Bounds request size and
+        # avoids provider many-image limits. Caller's list stays intact.
+        payload = _prune_history_images(messages)
+
         last_error: Exception | None = None
         backoff = self.initial_backoff
 
         for attempt in range(1, self.max_retries + 1):
             try:
                 if self.stream:
-                    response = self._stream_completion(messages, **kwargs)
+                    response = self._stream_completion(payload, **kwargs)
                 else:
                     response = litellm.completion(
                         model=self.model,
-                        messages=messages,
+                        messages=payload,
                         timeout=self.timeout,
                         **kwargs,
                     )

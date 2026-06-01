@@ -32,6 +32,7 @@ import argparse
 import json
 import logging
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -220,9 +221,8 @@ def run(args: argparse.Namespace) -> int:
         print(f"Parallel: {parallel} fixtures within each model's run")
     print()
 
-    run_dirs: list[Path] = []
-    for idx, model in enumerate(resolved_models):
-        print(f"=== [{idx + 1}/{len(resolved_models)}] {model} ===")
+    def _run_model(idx: int, model: str) -> Path:
+        print(f"=== [{idx + 1}/{len(resolved_models)}] {model} starting ===", flush=True)
         config = AgentConfig(
             model=model,
             temperature=args.temperature,
@@ -234,26 +234,47 @@ def run(args: argparse.Namespace) -> int:
             llm_timeout=args.llm_timeout,
             reasoning_effort=args.reasoning_effort,
         )
-
         model_slug = model.split("/")[-1]
-        run_name = f"{base_timestamp}_{model_slug}"
-        run_dir = output_dir / run_name
+        run_dir = output_dir / f"{base_timestamp}_{model_slug}"
         run_dir.mkdir(parents=True, exist_ok=True)
-
-        run_params = {
+        (run_dir / "params.json").write_text(json.dumps({
             "timestamp": base_timestamp,
             "fixtures": [t["name"] for t in tasks],
             "config": asdict(config),
             "parallel": parallel,
-        }
-        (run_dir / "params.json").write_text(json.dumps(run_params, indent=2))
-
-        all_results = _run_all(
+        }, indent=2))
+        results = _run_all(
             tasks, config=config, run_dir=run_dir,
             parallel=parallel, fixture_retries=fixture_retries,
         )
-        _print_summary(all_results)
-        run_dirs.append(run_dir)
+        print(f"=== [{idx + 1}/{len(resolved_models)}] {model} done ===", flush=True)
+        _print_summary(results)
+        return run_dir
+
+    # Models run concurrently: each is a separate provider/subscription, so
+    # there's no shared rate limit, and wall-clock is dominated by LLM latency
+    # (the GIL is released during the network wait). Mirrors the
+    # ThreadPoolExecutor that _run_all already uses for fixtures.
+    print(f"Running {len(resolved_models)} models in parallel\n")
+    run_dirs: list[Path | None] = [None] * len(resolved_models)
+    with ThreadPoolExecutor(max_workers=len(resolved_models)) as pool:
+        futures = {
+            pool.submit(_run_model, i, m): i
+            for i, m in enumerate(resolved_models)
+        }
+        for future in as_completed(futures):
+            i = futures[future]
+            try:
+                run_dirs[i] = future.result()
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Model %s raised; excluding it from the comparison",
+                    resolved_models[i],
+                )
+    run_dirs = [p for p in run_dirs if p is not None]
+    if not run_dirs:
+        print("All model runs failed; nothing to compare.", file=sys.stderr)
+        return 1
 
     # --- Comparison HTML --------------------------------------------------
     print(f"\n=== Generating comparison HTML across {len(run_dirs)} runs ===")
