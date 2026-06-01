@@ -22,6 +22,10 @@ cad_score =
             mean(shape_similarity, topology_match, interface_match)    otherwise
 ```
 
+(This is the **generation** composition. **Editing** tasks renormalize
+the shape axis against the no-op input and reweight the mean — see
+[§ Editing tasks](#editing-tasks-no-op-renormalization) below.)
+
 | Component | Range | What it asks | Deep dive |
 | --- | --- | --- | --- |
 | CAD Validity (gate) | $\{0, 1\}$ | Is the geometry valid? | [deep dive](./metrics/cad_validity.md) |
@@ -146,6 +150,65 @@ A part has one or more **mating groups**: sets of features that must align rigid
 Per sub-volume we compute a volumetric IoU against the candidate, with an asymmetric verification shell of opposite-material around the region (so oversize *and* undersize errors both register). Per-group score is the min over its sub-volumes; per-fixture score is the mean over groups.
 
 → See [more details below](./metrics/interface_match.md).
+
+---
+
+## Editing tasks: no-op renormalization
+
+Most fixtures are **generation** tasks and use the composition above
+unchanged. **Editing** tasks (an `input.step` plus an edit request,
+`task_type: editing`) need one adjustment.
+
+The problem: an editing GT is a small, local modification of the
+input, so the unedited input is already a valid solid that is *almost*
+the GT. All three scored axes are **global** similarity measures, so
+the "no-op" strategy (submit the input unchanged) scores high — often
+higher than a real attempt that perturbs the unchanged bulk. Scoring
+editing tasks with the raw composition would reward doing nothing.
+
+The fix anchors the **shape-similarity axis** against the no-op:
+
+```
+b_shape   = shape_similarity(input.step, GT)          # the no-op's raw score
+s_renorm  = max(0, (shape_similarity − b_shape) / (1 − b_shape))
+```
+
+`b_shape` (the no-op) maps to `0`; a perfect candidate stays at `1`;
+anything at or below the no-op floors at `0`. **Topology and interface
+match stay raw** — most edits leave them unchanged (so they
+contribute equally to every candidate), and where an edit *does* move
+them they already discriminate, and a candidate that *breaks* them
+should still be penalized.
+
+For editing fixtures the per-fixture score is a **weighted** mean
+(shape is the axis that actually resolves most edits, so it dominates),
+with absent axes dropping out and the remaining weights renormalizing:
+
+```
+            0                                                   if not is_valid
+cad_score =
+            0.5·s_renorm + 0.25·topo_match + 0.25·interface     otherwise
+```
+
+A no-op therefore scores at most `0.5·0 + 0.25 + 0.25 = 0.5` (and less
+when the edit moves topology/interface, since the no-op then misses
+those too); any genuine shape improvement clears it. The validity gate
+still hard-zeros as for generation.
+
+**`b_shape` is a fixture constant**, not a per-submission quantity: it
+depends only on `input.step`, `ground_truth.step`, and the
+shape/alignment implementation. It is precomputed once at authoring
+time and committed to the GT dataset as `<fixture>/edit_baseline.json`;
+the grader reads it back and never recomputes it per submission. The
+**presence** of that file is also how the grader knows a fixture is an
+editing task. See the authoring doc in the GT dataset
+(`AUTHORING.md`) for the precompute + the headroom gate that rejects
+edits too small for the shape metric to resolve.
+
+Implementation: [`src/cadgenbench/eval/edit_baseline.py`](../src/cadgenbench/eval/edit_baseline.py),
+wired into `_cad_score` in [`evaluate.py`](../src/cadgenbench/eval/evaluate.py).
+The renormalized + raw shape values are persisted under
+`result.json["edit_metrics"]` for the report and debug panel.
 
 ---
 

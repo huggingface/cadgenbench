@@ -88,6 +88,19 @@ Operating on the mesh makes the metric view-independent and renderer-independent
 
 ---
 
+## Editing tasks: renormalization against the no-op
+
+On an **editing** fixture the unedited input is already a valid solid
+that is *almost* the GT, so this axis (a global similarity measure)
+scores the no-op high. For editing fixtures the `shape_similarity_score`
+is therefore renormalized against the no-op baseline
+`b_shape = shape_similarity(input.step, GT)` before it enters
+`cad_score`: `s_renorm = max(0, (s − b_shape) / (1 − b_shape))`, so the
+no-op maps to `0` and a perfect candidate to `1`. The three sub-metrics
+above are computed and reported unchanged — the renormalization happens
+on their mean. See [`../metrics.md`](../metrics.md) § *Editing tasks* and
+[`edit_baseline.py`](../../src/cadgenbench/eval/edit_baseline.py).
+
 ## What this metric does *not* test
 
 - **Sub-threshold features.** All three sub-metrics use thresholds proportional to the GT bounding box (1 % of bbox diagonal). A $\varnothing\,3$ mm hole on a 200 mm bracket sits well below that and can be misplaced by ~1 mm without penalty. Small mating features are scored via [`interface_match.md`](./interface_match.md), where the verification region is sized to the feature, not the part.

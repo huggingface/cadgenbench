@@ -37,11 +37,19 @@ with these keys:
   (``per_axis_scores``) and the aggregate ``topo_match`` score. See
   ``docs/metrics/topo_match.md``.
 - ``cad_score``         , the **CAD Score**: single ``[0, 1]``
-  headline number per fixture. Equals the arithmetic mean of every
-  available component score (shape similarity, interface match,
-  topology match), so each axis contributes equally and only the ones
-  actually computed for a fixture enter the mean. Zero when the
-  candidate is not a valid solid or no STEP was produced.
+  headline number per fixture. For generation fixtures it is the
+  arithmetic mean of every available component score (shape similarity,
+  interface match, topology match), so each axis contributes equally
+  and only the ones actually computed for a fixture enter the mean. For
+  editing fixtures (those with a committed ``edit_baseline.json`` in
+  the GT dir) the shape axis is first renormalized against the no-op
+  baseline and the three axes are reweighted 0.5 / 0.25 / 0.25 (see
+  ``cadgenbench.eval.edit_baseline``). Zero when the candidate is not a
+  valid solid or no STEP was produced.
+- ``edit_metrics``      , editing fixtures only. The no-op baseline
+  (``baseline_shape_similarity``), the raw and renormalized shape-axis
+  values, the ``headroom`` (``1 - baseline``), and the per-axis
+  ``axis_weights`` used. Absent for generation fixtures.
 
 ``result.json`` carries no information about *how* the STEP was
 produced; that's the point. The baseline agent stashes its run-only
@@ -61,6 +69,12 @@ from pathlib import Path
 
 from cadgenbench.common.artifacts import StepArtifacts
 from cadgenbench.common.validity import analyze_step
+from cadgenbench.eval.edit_baseline import (
+    EDITING_AXIS_WEIGHTS,
+    check_baseline_fresh,
+    read_edit_baseline,
+    renormalize_shape,
+)
 from cadgenbench.eval.interface_match import (
     InterfaceMatchArtifacts,
     SubVolume,
@@ -228,12 +242,53 @@ def evaluate_result(
     if topology_metrics:
         data["topology_metrics"] = topology_metrics
 
-    data["cad_score"] = _cad_score(
-        scores=scores,
-        interface_metrics=interface_metrics,
-        topology_metrics=topology_metrics,
-        validation=validation_dict,
-    )
+    # --- Editing-task renormalization -------------------------------------
+    # A committed ``edit_baseline.json`` in the GT dir marks this as an
+    # editing fixture: the shape axis is renormalized against the no-op
+    # baseline and the three axes are reweighted (see
+    # ``cadgenbench.eval.edit_baseline``). Its absence ⇒ generation rules
+    # (raw shape, equal-weight mean). The scorer never reads the
+    # inputs-side ``description.yaml`` for this.
+    edit_baseline = read_edit_baseline(gt_dir)
+    if edit_baseline is None:
+        data["cad_score"] = _cad_score(
+            scores=scores,
+            interface_metrics=interface_metrics,
+            topology_metrics=topology_metrics,
+            validation=validation_dict,
+        )
+    else:
+        check_baseline_fresh(edit_baseline, gt_dir.name)
+        b_shape = edit_baseline.get("shape_similarity_score")
+        raw_shape = scores.get("shape_similarity_score")
+        shape_renorm = (
+            renormalize_shape(float(raw_shape), float(b_shape))
+            if raw_shape is not None and b_shape is not None
+            else None
+        )
+        data["edit_metrics"] = {
+            "baseline_shape_similarity": (
+                round(float(b_shape), 4) if b_shape is not None else None
+            ),
+            "shape_similarity_raw": (
+                round(float(raw_shape), 4) if raw_shape is not None else None
+            ),
+            "shape_similarity_renormalized": (
+                round(shape_renorm, 4) if shape_renorm is not None else None
+            ),
+            "headroom": (
+                round(1.0 - float(b_shape), 4) if b_shape is not None else None
+            ),
+            "axis_weights": EDITING_AXIS_WEIGHTS,
+        }
+        data["cad_score"] = _cad_score(
+            scores=scores,
+            interface_metrics=interface_metrics,
+            topology_metrics=topology_metrics,
+            validation=validation_dict,
+            shape_score=shape_renorm,
+            weights=EDITING_AXIS_WEIGHTS,
+        )
 
     result_json.write_text(json.dumps(data, indent=2))
 
@@ -246,31 +301,47 @@ def _cad_score(
     interface_metrics: dict,
     topology_metrics: dict,
     validation: dict,
+    shape_score: float | None = None,
+    weights: dict[str, float] | None = None,
 ) -> float:
     """Return the CAD Score (``[0, 1]``) for one fixture.
 
-    The score is the arithmetic mean of every component score that was
+    The score is a weighted mean of every component score that was
     successfully computed for this fixture: shape similarity, interface
-    match, topology match. Each axis contributes equally; missing axes
-    (e.g. fixtures without jig sub-volumes) simply drop out of the mean
-    rather than diluting it. Zeroes out when the candidate failed CAD
+    match, topology match. Missing axes (e.g. fixtures without jig
+    sub-volumes) drop out and the remaining weights renormalize, rather
+    than diluting the mean. Zeroes out when the candidate failed CAD
     validation so an invalid geometry never wins comparisons.
+
+    Args:
+        shape_score: Overrides the shape-similarity axis value. Editing
+            fixtures pass the no-op-renormalized shape score here (see
+            :mod:`cadgenbench.eval.edit_baseline`); generation fixtures
+            leave it ``None`` to use the raw ``shape_similarity_score``.
+        weights: Per-axis weights keyed ``"shape" | "interface" |
+            "topology"``. ``None`` means equal weighting (the generation
+            default, i.e. a plain arithmetic mean over present axes).
     """
     if not validation.get("is_valid"):
         return 0.0
-    terms: list[float] = []
-    shape = scores.get("shape_similarity_score")
-    if shape is not None:
-        terms.append(float(shape))
-    iface = (interface_metrics or {}).get("score")
-    if iface is not None:
-        terms.append(float(iface))
-    topo = (topology_metrics or {}).get("score")
-    if topo is not None:
-        terms.append(float(topo))
-    if not terms:
+    if shape_score is None:
+        shape_score = scores.get("shape_similarity_score")
+    axes: dict[str, float | None] = {
+        "shape": None if shape_score is None else float(shape_score),
+        "interface": (interface_metrics or {}).get("score"),
+        "topology": (topology_metrics or {}).get("score"),
+    }
+    num = 0.0
+    den = 0.0
+    for axis, value in axes.items():
+        if value is None:
+            continue
+        w = 1.0 if weights is None else float(weights.get(axis, 0.0))
+        num += w * float(value)
+        den += w
+    if den == 0:
         return 0.0
-    return sum(terms) / len(terms)
+    return num / den
 
 
 def evaluate_candidate_only(candidate_step: Path, result_dir: Path) -> None:

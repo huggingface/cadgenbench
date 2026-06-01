@@ -240,27 +240,49 @@ def _render_fixture_card(fix: dict, idx: int) -> str:
     shape_score = gt_m.get("shape_similarity_score")
     topo_m = result.get("topology_metrics") or {}
     topo_score = topo_m.get("score")
+    # Editing fixtures: the shape axis is renormalized against the no-op
+    # input baseline and cad_score is a weighted (not equal) mean. When
+    # present, surface the renormalized shape value + the no-op baseline.
+    edit_m = result.get("edit_metrics") or {}
+    is_editing = bool(edit_m)
+    shape_renorm = edit_m.get("shape_similarity_renormalized")
+    shape_baseline = edit_m.get("baseline_shape_similarity")
     if any(v is not None for v in (cad_score, shape_score, iface_score, topo_score)):
         n_components = sum(
             1 for v in (shape_score, iface_score, topo_score) if v is not None
         )
         p.append('<div class="headline-metrics">')
         if cad_score is not None:
+            cad_sub = (
+                "editing &middot; weighted 0.5 / 0.25 / 0.25 "
+                "(shape renormalized vs no-op)"
+                if is_editing
+                else f"mean of {n_components} available component(s)"
+            )
             p.append(
                 f'<div class="headline-pill headline-cad">'
                 f'<span class="headline-label">CAD Score</span>'
                 f'<span class="headline-value">'
                 f"{_fmt_metric('cad_score', cad_score)}</span>"
-                f'<span class="headline-sub">mean of {n_components} '
-                f'available component(s)</span>'
+                f'<span class="headline-sub">{cad_sub}</span>'
                 f'</div>'
             )
         if shape_score is not None:
+            if is_editing and shape_renorm is not None:
+                shape_value = _fmt_metric("shape_similarity_score", shape_renorm)
+                shape_sub = (
+                    f'<span class="headline-sub">renormalized &middot; '
+                    f"no-op b={float(shape_baseline):.3f} &middot; "
+                    f"raw {float(shape_score):.3f}</span>"
+                )
+            else:
+                shape_value = _fmt_metric("shape_similarity_score", shape_score)
+                shape_sub = ""
             p.append(
                 f'<div class="headline-pill headline-shape">'
                 f'<span class="headline-label">Shape Similarity</span>'
-                f'<span class="headline-value">'
-                f"{_fmt_metric('shape_similarity_score', shape_score)}</span>"
+                f'<span class="headline-value">{shape_value}</span>'
+                f"{shape_sub}"
                 f'</div>'
             )
         if iface_score is not None:
@@ -296,8 +318,11 @@ def _render_fixture_card(fix: dict, idx: int) -> str:
             meta = METRIC_DISPLAY.get(k)
             label = meta.label if meta else k
             parts.append(f"{html.escape(label)}: {_fmt_metric(k, v)}")
+        components_label = (
+            "Shape components (pre-renorm)" if is_editing else "Shape components"
+        )
         p.append(
-            f'<div class="metrics-sub">Shape components &middot; '
+            f'<div class="metrics-sub">{components_label} &middot; '
             f'{" &middot; ".join(parts)}</div>'
         )
 
