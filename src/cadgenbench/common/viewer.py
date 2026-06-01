@@ -68,6 +68,7 @@ __all__ = [
     "OVERLAY_PALETTE",
     "RenderedImage",
     "render_mesh",
+    "render_mesh_overlay",
     "render_overlay",
     "render_step",
     "render_steps",
@@ -290,6 +291,47 @@ def render_overlay(
         raise ValueError(
             f"colors length ({len(colors)}) must match step_paths length ({len(paths)})"
         )
+    meshes = [_tessellate(path) for path in paths]
+    return render_mesh_overlay(
+        meshes, colors=colors, views=views, width=width, height=height,
+    )
+
+
+def render_mesh_overlay(
+    meshes: Sequence[Mesh],
+    *,
+    colors: Sequence[tuple[float, float, float, float]] | None = None,
+    views: Sequence[str] | None = None,
+    width: int = 1024,
+    height: int = 768,
+) -> list[RenderedImage]:
+    """Render several already-tessellated meshes as one composite scene per view.
+
+    Mesh-native sibling of :func:`render_overlay`: callers that already
+    hold welded meshes (e.g. metric-side tessellations or a manifold
+    Boolean result) overlay them directly without a STEP round-trip.
+    Later meshes draw on top of earlier ones.
+
+    Args:
+        meshes: Welded triangle meshes (mm-space), drawn in order.
+        colors: Per-mesh rgba (each component in ``[0, 1]``). Defaults
+            to :data:`OVERLAY_PALETTE` cycled.
+        views: Camera preset names. Defaults to ``("iso",)``.
+        width: Image width in pixels.
+        height: Image height in pixels.
+
+    Raises:
+        ValueError: ``meshes`` is empty, ``colors`` length mismatch, a
+            mesh is empty, or unknown camera preset.
+    """
+    if not meshes:
+        raise ValueError("meshes must not be empty")
+    if colors is None:
+        colors = [OVERLAY_PALETTE[i % len(OVERLAY_PALETTE)] for i in range(len(meshes))]
+    elif len(colors) != len(meshes):
+        raise ValueError(
+            f"colors length ({len(colors)}) must match meshes length ({len(meshes)})"
+        )
     if views is None:
         views = ("iso",)
     validate_views(views)
@@ -298,8 +340,9 @@ def render_overlay(
     edge_meshes: list[pv.PolyData] = []
     bbox_min = np.array([np.inf] * 3, dtype=np.float64)
     bbox_max = np.array([-np.inf] * 3, dtype=np.float64)
-    for path, rgba in zip(paths, colors):
-        mesh = _tessellate(path)
+    for mesh, rgba in zip(meshes, colors):
+        if mesh.n_triangles == 0:
+            raise ValueError("render_mesh_overlay: a mesh has zero triangles")
         body = _mesh_to_polydata(mesh)
         shapes.append((body, (rgba[0], rgba[1], rgba[2]), float(rgba[3])))
         edge_meshes.append(

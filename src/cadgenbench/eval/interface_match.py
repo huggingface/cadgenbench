@@ -136,32 +136,32 @@ def disagreement_volume(part_step: str | Path, sv: SubVolume) -> float:
     A correct candidate returns 0. The function is the simplest
     discrimination signal usable before the full IoU + pose-search
     metric is in place.
-    """
-    from build123d import import_step
 
-    part = import_step(str(part_step))
-    R = import_step(str(sv.path))
+    Computed with the ``manifold3d`` mesh kernel (no OCCT Booleans): the
+    part and sub-volume are tessellated once each at the part's
+    deflection (shared scale) and intersected/subtracted as manifolds.
+    """
+    from cadgenbench.eval.booleans import (
+        intersect,
+        manifold_volume,
+        subtract,
+    )
+
+    part_artifacts = StepArtifacts(Path(part_step))
+    deflection = part_artifacts.deflection()
+    part_manifold = part_artifacts.manifold(deflection)
+    sub_volume_manifold = StepArtifacts(sv.path).manifold(deflection)
 
     if sv.fit_type == "KOR":
-        result = R & part
+        result = intersect(sub_volume_manifold, part_manifold)
     elif sv.fit_type == "KIR":
-        result = R - part
+        result = subtract(sub_volume_manifold, part_manifold)
     else:  # pragma: no cover - construction-time guarantee
         raise ValueError(
             f"Unknown fit_type {sv.fit_type!r} on {sv.path.name}"
         )
 
-    if result is None:
-        return 0.0
-
-    # build123d returns a single Shape when the Boolean produces one solid
-    # and a ShapeList when it splits into multiple disconnected solids.
-    if hasattr(result, "wrapped") and result.wrapped is not None:
-        return float(result.volume)
-    children = [s for s in result if hasattr(s, "wrapped") and s.wrapped is not None]
-    if not children:
-        return 0.0
-    return sum(float(s.volume) for s in children)
+    return manifold_volume(result)
 
 
 def score_candidate(
@@ -771,48 +771,4 @@ def interface_score(
         )
         per_context.append(min(per_sv.values()))
     return sum(per_context) / len(per_context)
-
-
-def _shape_volume(result) -> float:
-    """Sum the volumes of a build123d Boolean result.
-
-    Handles both single-Shape and ShapeList results that arise when a
-    Boolean produces one or several disconnected solids.
-    """
-    if result is None:
-        return 0.0
-    if hasattr(result, "wrapped") and result.wrapped is not None:
-        return float(result.volume)
-    children = [s for s in result if hasattr(s, "wrapped") and s.wrapped is not None]
-    return sum(float(s.volume) for s in children)
-
-
-def _safe_volume(result) -> float:
-    """Volume of a Boolean result, treating null/empty / OCC failures as 0.
-
-    OCC occasionally returns ``TopoDS_Shape`` instances whose underlying
-    shape is null (e.g. when a Boolean subtract empties the result).
-    Accessing ``.volume`` on those raises; callers want a numeric 0.
-    """
-    try:
-        return _shape_volume(result)
-    except Exception:
-        return 0.0
-
-
-def _safe_bool(left, right, op: str):
-    """Run a build123d Boolean op, returning None on failure.
-
-    ``op`` is one of ``"intersect"``, ``"subtract"``, ``"fuse"``.
-    """
-    try:
-        if op == "intersect":
-            return left & right
-        if op == "subtract":
-            return left - right
-        if op == "fuse":
-            return left + right
-        raise ValueError(f"Unknown boolean op: {op!r}")
-    except Exception:
-        return None
 

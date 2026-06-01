@@ -33,22 +33,24 @@ Both fire the same yellow highlight, so the eye flags any failure
 without thinking about fit_type. For ``correct.step`` the disagreement
 volume is ≈ 0 and no yellow appears.
 
-Rendering goes through :func:`cadgenbench.common.viewer.render_overlay`,
-in-process via VTK; safe to call from any host.
+Rendering goes through :func:`cadgenbench.common.viewer.render_mesh_overlay`,
+in-process via VTK; safe to call from any host. All geometry (the
+disagreement region included) is computed with the ``manifold3d`` mesh
+kernel: no OCCT Booleans on this path.
 """
 from __future__ import annotations
 
 import io
 import logging
-import tempfile
 from pathlib import Path
 
+from cadgenbench.common.mesh import Mesh
 from cadgenbench.eval.interface_match import (
     DEFAULT_DISAGREEMENT_EPSILON,
     SubVolume,
     discover_sub_volumes,
 )
-from cadgenbench.common.viewer import RenderedImage, render_overlay
+from cadgenbench.common.viewer import RenderedImage, render_mesh_overlay
 
 logger = logging.getLogger(__name__)
 
@@ -78,48 +80,51 @@ def render_part_with_subvolumes(
     per-sub-volume disagreement highlighted.
 
     See module docstring for the colour scheme.
+
+    Tessellates the part and each sub-volume exactly once (via
+    :class:`~cadgenbench.common.artifacts.StepArtifacts`, at the part's
+    deflection so every shape shares one scale), reuses those meshes for
+    both the ``manifold3d`` disagreement Boolean and the render, and
+    draws everything through :func:`render_mesh_overlay`.
     """
+    from cadgenbench.common.artifacts import StepArtifacts
+
     part_step = Path(part_step).resolve()
+    part_artifacts = StepArtifacts(part_step)
+    deflection = part_artifacts.deflection()
+    part_manifold = part_artifacts.manifold(deflection)
 
-    disagreement_paths: list[Path] = []
+    meshes: list[Mesh] = [part_artifacts.mesh(deflection)]
+    colors: list[tuple[float, float, float, float]] = [PART_COLOR]
     total_disagreement_vol = 0.0
+    n_disagreements = 0
     for sv in sub_volumes:
-        vol, path = _compute_disagreement_step(part_step, sv)
-        total_disagreement_vol += vol
-        if path is not None:
-            disagreement_paths.append(path)
+        sv_artifacts = StepArtifacts(sv.path)
+        meshes.append(sv_artifacts.mesh(deflection))
+        colors.append(_color_for(sv))
 
-    step_paths: list[Path] = [
-        part_step,
-        *[sv.path for sv in sub_volumes],
-        *disagreement_paths,
-    ]
-    colors: list[tuple[float, float, float, float]] = (
-        [PART_COLOR]
-        + [_color_for(sv) for sv in sub_volumes]
-        + [DISAGREEMENT_COLOR] * len(disagreement_paths)
-    )
-    if disagreement_paths:
+        vol, disagreement_mesh = _disagreement_mesh(
+            part_manifold, sv_artifacts.manifold(deflection), sv.fit_type,
+        )
+        total_disagreement_vol += vol
+        if disagreement_mesh is not None:
+            meshes.append(disagreement_mesh)
+            colors.append(DISAGREEMENT_COLOR)
+            n_disagreements += 1
+
+    if n_disagreements:
         logger.info(
             "Total disagreement volume %.2f mm^3 across %d sub-volume(s)",
             total_disagreement_vol, len(sub_volumes),
         )
 
-    try:
-        return render_overlay(
-            step_paths,
-            colors=colors,
-            views=views,
-            width=width,
-            height=height,
-        )
-    finally:
-        for p in disagreement_paths:
-            p.unlink(missing_ok=True)
-            try:
-                p.parent.rmdir()
-            except OSError:
-                pass
+    return render_mesh_overlay(
+        meshes,
+        colors=colors,
+        views=views,
+        width=width,
+        height=height,
+    )
 
 
 def render_fixture(
@@ -324,42 +329,38 @@ def render_test_overview(
 # ---------------------------------------------------------------------------
 
 
-def _compute_disagreement_step(
-    part_step: Path,
-    sv: SubVolume,
-) -> tuple[float, Path | None]:
-    """Compute the disagreement geometry and export it for rendering.
+def _disagreement_mesh(
+    part_manifold,
+    sub_volume_manifold,
+    fit_type: str,
+) -> tuple[float, Mesh | None]:
+    """Disagreement region between a candidate and one sub-volume.
 
-    Returns ``(volume, step_path)``. ``step_path`` is ``None`` when the
-    volume is below :data:`cadgenbench.eval.interface_match.DEFAULT_DISAGREEMENT_EPSILON`,
-    i.e. when there is nothing visually meaningful to highlight.
+    The disagreement is the part of ``R`` the candidate gets wrong:
+
+    - ``KOR`` (keep-out): ``R ∩ candidate`` (candidate has material it shouldn't).
+    - ``KIR`` (keep-in):  ``R \\ candidate`` (candidate is missing material).
+
+    Computed with the ``manifold3d`` mesh kernel (no OCCT Booleans).
+    Returns ``(volume, mesh)``; ``mesh`` is ``None`` when the volume is
+    below :data:`cadgenbench.eval.interface_match.DEFAULT_DISAGREEMENT_EPSILON`,
+    i.e. nothing visually meaningful to highlight.
     """
-    from build123d import Compound, export_step, import_step
+    from cadgenbench.eval.booleans import (
+        intersect,
+        manifold_to_mesh,
+        manifold_volume,
+        subtract,
+    )
 
-    part = import_step(str(part_step))
-    R = import_step(str(sv.path))
+    if fit_type == "KOR":
+        result = intersect(sub_volume_manifold, part_manifold)
+    elif fit_type == "KIR":
+        result = subtract(sub_volume_manifold, part_manifold)
+    else:  # pragma: no cover - construction-time guarantee
+        raise ValueError(f"Unknown fit_type {fit_type!r}")
 
-    result = (R & part) if sv.fit_type == "KOR" else (R - part)
-    if result is None:
-        return 0.0, None
-
-    # build123d returns a single Shape when the Boolean produces one
-    # solid and a ShapeList when it splits into multiple disconnected
-    # solids.
-    if hasattr(result, "wrapped") and result.wrapped is not None:
-        volume = float(result.volume)
-        to_export = result
-    else:
-        children = [s for s in result if hasattr(s, "wrapped") and s.wrapped is not None]
-        if not children:
-            return 0.0, None
-        volume = sum(float(s.volume) for s in children)
-        to_export = Compound(children=children)
-
+    volume = manifold_volume(result)
     if volume < DEFAULT_DISAGREEMENT_EPSILON:
         return volume, None
-
-    tmp_dir = Path(tempfile.mkdtemp(prefix="jig_viz_"))
-    out_step = tmp_dir / "disagreement.step"
-    export_step(to_export, str(out_step))
-    return volume, out_step
+    return volume, manifold_to_mesh(result)

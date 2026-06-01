@@ -76,6 +76,36 @@ def mesh_to_manifold(mesh: Mesh) -> "m3d.Manifold":
     return manifold
 
 
+def manifold_to_mesh(
+    manifold: "m3d.Manifold",
+    *,
+    linear_deflection_mm: float = 0.0,
+) -> Mesh:
+    """Convert a ``manifold3d.Manifold`` back to our :class:`Mesh`.
+
+    Inverse of :func:`mesh_to_manifold`. Used to render Boolean results
+    (which live as manifolds) through the mesh renderer without a STEP
+    round-trip. ``linear_deflection_mm`` is metadata only (a Boolean
+    result has no single source deflection); rendering ignores it.
+
+    Raises:
+        ValueError: the manifold is empty (no geometry to mesh).
+    """
+    if manifold.is_empty():
+        raise ValueError("cannot convert empty Manifold to Mesh")
+
+    mesh_gl = manifold.to_mesh()
+    verts = np.asarray(mesh_gl.vert_properties, dtype=np.float64)
+    if verts.ndim == 2 and verts.shape[1] > 3:
+        verts = verts[:, :3]
+    tris = np.asarray(mesh_gl.tri_verts, dtype=np.int64).reshape(-1, 3)
+    return Mesh(
+        vertices=np.ascontiguousarray(verts),
+        triangles=np.ascontiguousarray(tris),
+        linear_deflection_mm=float(linear_deflection_mm),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Boolean ops (typed shorthand)
 # ---------------------------------------------------------------------------
