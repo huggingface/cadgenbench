@@ -23,6 +23,12 @@ Answers three questions about a STEP file:
      per-vertex topology errors over the whole shape.
    - Every shell is closed (``_is_watertight``), i.e. each oriented face
      skin meets its neighbours edge-to-edge with no naked / free edges.
+   - Geometry quality (``_collect_geometry_quality_errors``): no
+     near-degenerate edge (length >= ``MIN_EDGE_LENGTH_MM``), no tiny
+     face (area >= ``MIN_FACE_AREA_MM2``), and bounded BREP tolerance
+     (<= ``MAX_TOLERANCE_MM``). Fixed floors stated in the submitter's
+     own geometry terms, rejected up front instead of failing the mesh
+     gate downstream.
 
    A non-watertight BREP cannot be 3D-printed, Boolean'd against, or
    topologically analysed for handles / cavities, so it is rejected at
@@ -70,10 +76,12 @@ class ValidationResult:
     Fields:
         is_valid: True iff (a) ``BRepCheck_Analyzer.IsValid()`` reports
             no errors over the whole shape, AND (b) every shell is
-            closed (``is_watertight``), AND (c) the boundary
-            tessellation is a clean closed orientable manifold (every
-            edge in exactly two triangles with opposite orientations).
-            Required by the existing zero-cascade in
+            closed (``is_watertight``), AND (c) the geometry clears the
+            quality floors (no near-degenerate edge, tiny face, or
+            inflated tolerance; see ``_collect_geometry_quality_errors``),
+            AND (d) the boundary tessellation is a clean closed orientable
+            manifold (every edge in exactly two triangles with opposite
+            orientations). Required by the existing zero-cascade in
             :func:`cadgenbench.eval.evaluate._cad_score`.
         is_watertight: every shell is closed AND no BREP topology errors.
             A pure BREP signal, independent of the mesh pipeline. It
@@ -82,7 +90,9 @@ class ValidationResult:
         topology_errors: de-duplicated human-readable strings combining
             BREP errors (``"Face: BRepCheck_SelfIntersectingWire"``),
             the watertight gate (``"BREP not watertight: open shells /
-            naked edges"``), and mesh-pipeline errors
+            naked edges"``), the geometry-quality gate (``"3 edge(s)
+            shorter than 0.001 mm (shortest 1.099e-05 mm)"``), and
+            mesh-pipeline errors
             (``"mesh non-manifold: edge (220, 243) shared by 4 triangles"``).
             Designed to be displayed verbatim when ``is_valid`` is False
             so a human or LLM can diagnose the failure mode without
@@ -110,6 +120,20 @@ class ValidityResult:
 # Backwards-compatible alias for the previous name. Will be removed once
 # external callers (none known) migrate.
 AnalysisResult = ValidityResult
+
+
+# ---------------------------------------------------------------------------
+# Geometry-quality policy
+# ---------------------------------------------------------------------------
+
+# Fixed, part-size-independent geometry-quality floors. They live in the
+# submitter's own terms (edge length, face area, BREP tolerance) so a part
+# can be designed and checked against them directly, not against the mesher's
+# output. These are the single source of truth; the labeler and submission
+# docs quote them.
+MIN_EDGE_LENGTH_MM = 0.001  # reject any non-degenerate edge shorter than this
+MIN_FACE_AREA_MM2 = 0.001  # reject any face smaller than this
+MAX_TOLERANCE_MM = 0.1  # reject if any edge / vertex tolerance exceeds this
 
 
 # ---------------------------------------------------------------------------
@@ -239,9 +263,22 @@ def _validate_wrapped(
             "edges (failed _is_watertight)",
         )
 
+    # Sliver-face gate. A face thinner than the tessellation deflection
+    # cannot be meshed into a watertight boundary (OCC drops or degrades
+    # its triangulation), so it would otherwise fail downstream as a
+    # confusing mesh-gate crash. Catch it here, on the BREP, with a clear
+    # per-face reason. Runs only on an otherwise-valid watertight BREP so
+    # the deflection is meaningful and we are not piling onto a shape
+    # that is already rejected.
     mesh_ok = True
     if brep_ok and is_watertight:
-        mesh_ok = _run_mesh_gate(wrapped, bbox_diagonal, topology_errors)
+        quality_errors = _collect_geometry_quality_errors(wrapped)
+        topology_errors.extend(quality_errors)
+        if not quality_errors:
+            deflection = _tessellation_deflection(wrapped, bbox_diagonal)
+            mesh_ok = _run_mesh_gate(wrapped, deflection, topology_errors)
+        else:
+            mesh_ok = False
 
     is_valid = brep_ok and is_watertight and mesh_ok
 
@@ -252,9 +289,28 @@ def _validate_wrapped(
     )
 
 
-def _run_mesh_gate(
+def _tessellation_deflection(
     wrapped,  # type: ignore[no-untyped-def]
     bbox_diagonal: float | None,
+) -> float:
+    """Deflection the mesh gate (and sliver gate) tessellate at.
+
+    Mirrors :func:`cadgenbench.common.mesh.deflection_for_bbox`, computing
+    the bbox locally when the caller did not supply it so both gates use
+    one consistent value.
+    """
+    from cadgenbench.common.mesh import deflection_for_bbox
+
+    if bbox_diagonal is None:
+        from cadgenbench.common.measurements import _compute_bbox
+
+        bbox_diagonal = float(_compute_bbox(wrapped).diagonal)
+    return deflection_for_bbox(bbox_diagonal)
+
+
+def _run_mesh_gate(
+    wrapped,  # type: ignore[no-untyped-def]
+    deflection: float,
     topology_errors: list[str],
 ) -> bool:
     """Run the mesh-pipeline gate and append any failure to *topology_errors*.
@@ -265,21 +321,12 @@ def _run_mesh_gate(
     """
     from cadgenbench.common.mesh import (
         MeshSanityError,
-        deflection_for_bbox,
         tessellate_shape,
         validate_mesh,
     )
 
-    if bbox_diagonal is None:
-        # Compute locally so :func:`validate_step` callers don't have to
-        # think about the bbox.
-        from cadgenbench.common.measurements import _compute_bbox
-
-        bbox_diagonal = float(_compute_bbox(wrapped).diagonal)
-
     try:
-        defl = deflection_for_bbox(bbox_diagonal)
-        mesh = tessellate_shape(wrapped, defl)
+        mesh = tessellate_shape(wrapped, deflection)
         validate_mesh(mesh)
     except MeshSanityError as exc:
         # MeshSanityError messages already start with the failure mode
@@ -289,6 +336,85 @@ def _run_mesh_gate(
         topology_errors.append(str(exc))
         return False
     return True
+
+
+def _collect_geometry_quality_errors(
+    wrapped,  # type: ignore[no-untyped-def]
+) -> list[str]:
+    """Reject BREPs with degenerate or low-quality geometry up front.
+
+    Three fixed, part-size-independent floors that a submitter or author
+    can design to and verify in their own CAD terms, instead of against the
+    mesher's output:
+
+    - every non-degenerate edge at least ``MIN_EDGE_LENGTH_MM`` long,
+    - every face at least ``MIN_FACE_AREA_MM2`` in area,
+    - every edge / vertex tolerance at most ``MAX_TOLERANCE_MM``.
+
+    A near-degenerate edge is the artifact that drove the example_3 mesh
+    failure (an 11 nm edge), so it is the load-bearing check; the area and
+    tolerance floors are sanity bounds. Returns one summary string per
+    violated floor (count plus worst offender); empty when the geometry is
+    clean.
+    """
+    from OCP.BRep import BRep_Tool
+    from OCP.BRepGProp import BRepGProp
+    from OCP.GProp import GProp_GProps
+    from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_VERTEX
+    from OCP.TopExp import TopExp
+    from OCP.TopoDS import TopoDS
+    from OCP.TopTools import TopTools_IndexedMapOfShape
+
+    errors: list[str] = []
+
+    edges = TopTools_IndexedMapOfShape()
+    TopExp.MapShapes_s(wrapped, TopAbs_EDGE, edges)
+    short_edges: list[float] = []
+    max_tol = 0.0
+    for ei in range(1, edges.Size() + 1):
+        edge = TopoDS.Edge_s(edges.FindKey(ei))
+        max_tol = max(max_tol, float(BRep_Tool.Tolerance_s(edge)))
+        if BRep_Tool.Degenerated_s(edge):
+            continue
+        props = GProp_GProps()
+        BRepGProp.LinearProperties_s(edge, props)
+        length = float(props.Mass())
+        if length < MIN_EDGE_LENGTH_MM:
+            short_edges.append(length)
+    if short_edges:
+        errors.append(
+            f"{len(short_edges)} edge(s) shorter than {MIN_EDGE_LENGTH_MM} mm "
+            f"(shortest {min(short_edges):.3e} mm)",
+        )
+
+    faces = TopTools_IndexedMapOfShape()
+    TopExp.MapShapes_s(wrapped, TopAbs_FACE, faces)
+    small_faces: list[float] = []
+    for fi in range(1, faces.Size() + 1):
+        props = GProp_GProps()
+        BRepGProp.SurfaceProperties_s(TopoDS.Face_s(faces.FindKey(fi)), props)
+        area = float(props.Mass())
+        if area < MIN_FACE_AREA_MM2:
+            small_faces.append(area)
+    if small_faces:
+        errors.append(
+            f"{len(small_faces)} face(s) smaller than {MIN_FACE_AREA_MM2} mm^2 "
+            f"(smallest {min(small_faces):.3e} mm^2)",
+        )
+
+    vertices = TopTools_IndexedMapOfShape()
+    TopExp.MapShapes_s(wrapped, TopAbs_VERTEX, vertices)
+    for vi in range(1, vertices.Size() + 1):
+        max_tol = max(
+            max_tol, float(BRep_Tool.Tolerance_s(TopoDS.Vertex_s(vertices.FindKey(vi)))),
+        )
+    if max_tol > MAX_TOLERANCE_MM:
+        errors.append(
+            f"BREP tolerance {max_tol:.3e} mm exceeds the maximum "
+            f"{MAX_TOLERANCE_MM} mm",
+        )
+
+    return errors
 
 
 def _is_watertight(shape) -> bool:  # type: ignore[no-untyped-def]

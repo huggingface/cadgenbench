@@ -167,14 +167,32 @@ def tessellate_shape(
     *,
     angular_deflection_rad: float = 0.5,
 ) -> Mesh:
-    """Tessellate a pre-loaded OCC ``TopoDS_Shape``."""
+    """Tessellate a pre-loaded OCC ``TopoDS_Shape`` into a welded mesh.
+
+    Faces are stitched into one mesh by *topology*, not coordinates.
+    OCC discretises every ``TopoDS_Edge`` once, so each face carrying
+    that edge stores a polygon of node indices into its own
+    triangulation running along the edge. We read those polygons and
+    merge corresponding nodes by index (union-find). A periodic seam
+    lies on a single face but is stored as a closed representation
+    holding two polygons, one per side of the seam; merging those two by
+    index stitches the seam the same way. Finally, all nodes that resolve
+    to the same BREP vertex are merged, which closes apices where a face
+    boundary passes through a point via a degenerate edge (fillet, cone,
+    or pole tips) that carries no polygon to stitch along. The result is
+    conformal at any deflection whenever the BREP is topologically
+    closed, with no coordinate weld tolerance anywhere.
+    """
     from OCP.BRep import BRep_Tool
     from OCP.BRepMesh import BRepMesh_IncrementalMesh
-    from OCP.TopAbs import TopAbs_FACE, TopAbs_REVERSED
+    from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_REVERSED, TopAbs_VERTEX
     from OCP.TopExp import TopExp
     from OCP.TopLoc import TopLoc_Location
     from OCP.TopoDS import TopoDS
-    from OCP.TopTools import TopTools_IndexedMapOfShape
+    from OCP.TopTools import (
+        TopTools_IndexedDataMapOfShapeListOfShape,
+        TopTools_IndexedMapOfShape,
+    )
 
     if linear_deflection_mm <= 0:
         raise ValueError(
@@ -189,16 +207,18 @@ def tessellate_shape(
         False,
     )
 
-    face_map = TopTools_IndexedMapOfShape()
-    TopExp.MapShapes_s(wrapped, TopAbs_FACE, face_map)
-    if face_map.Size() == 0:
+    faces = TopTools_IndexedMapOfShape()
+    TopExp.MapShapes_s(wrapped, TopAbs_FACE, faces)
+    if faces.Size() == 0:
         raise MeshSanityError("shape has no faces to tessellate")
 
-    all_vertices: list[tuple[float, float, float]] = []
+    # 1. Lay every face's triangulation into one global node/triangle list.
+    vertices: list[tuple[float, float, float]] = []
     triangles: list[tuple[int, int, int]] = []
-
-    for fi in range(1, face_map.Size() + 1):
-        face = TopoDS.Face_s(face_map.FindKey(fi))
+    face_base: dict[int, int] = {}
+    face_tri: dict[int, tuple] = {}
+    for fi in range(1, faces.Size() + 1):
+        face = TopoDS.Face_s(faces.FindKey(fi))
         loc = TopLoc_Location()
         tri = BRep_Tool.Triangulation_s(face, loc)
         if tri is None:
@@ -207,21 +227,16 @@ def tessellate_shape(
                 f"(deflection={linear_deflection_mm} mm)",
             )
         trsf = loc.Transformation()
-        reversed_face = face.Orientation() == TopAbs_REVERSED
-
-        base = len(all_vertices)
-        n_nodes = tri.NbNodes()
-        for i in range(1, n_nodes + 1):
+        base = len(vertices)
+        face_base[fi] = base
+        face_tri[fi] = (tri, loc)
+        for i in range(1, tri.NbNodes() + 1):
             p = tri.Node(i).Transformed(trsf)
-            all_vertices.append((p.X(), p.Y(), p.Z()))
-
-        n_tris = tri.NbTriangles()
-        for i in range(1, n_tris + 1):
-            t = tri.Triangle(i)
-            n1, n2, n3 = t.Get()
-            a = base + (n1 - 1)
-            b = base + (n2 - 1)
-            c = base + (n3 - 1)
+            vertices.append((p.X(), p.Y(), p.Z()))
+        reversed_face = face.Orientation() == TopAbs_REVERSED
+        for i in range(1, tri.NbTriangles() + 1):
+            n1, n2, n3 = tri.Triangle(i).Get()
+            a, b, c = base + n1 - 1, base + n2 - 1, base + n3 - 1
             if reversed_face:
                 a, b = b, a
             triangles.append((a, b, c))
@@ -229,51 +244,165 @@ def tessellate_shape(
     if not triangles:
         raise MeshSanityError("tessellation produced no triangles")
 
-    # Weld coincident vertices. Tolerance is small (0.1 % of deflection)
-    # so we only weld nodes that are numerically the same point, e.g.
-    # vertices on a shared edge as sampled by two adjacent faces. We
-    # never collapse genuine short edges that are below the chord-error
-    # threshold.
-    raw_vertices = np.asarray(all_vertices, dtype=np.float64)
-    raw_faces = np.asarray(triangles, dtype=np.int64)
-    merge_tol = max(1e-9, 1e-3 * linear_deflection_mm)
-    snapped = np.round(raw_vertices / merge_tol).astype(np.int64)
-    _, inv = np.unique(snapped, axis=0, return_inverse=True)
-    welded_faces = inv[raw_faces]
-    # Average positions across welded duplicates (numerical noise only).
-    n_unique = int(_.shape[0])
+    # 2. Merge shared-edge nodes by index (union-find). Each face
+    # carrying an edge stores a polygon of node indices into its own
+    # triangulation running along that edge; the same edge in two faces
+    # yields two equal-length lists of corresponding nodes. A periodic
+    # seam lies on a single face but is stored as a closed representation
+    # carrying two polygons (``PolygonOnTriangulation`` and
+    # ``PolygonOnTriangulation2``), one per side of the seam, which we
+    # merge the same way.
+    parent = list(range(len(vertices)))
+
+    def find(x: int) -> int:
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:
+            parent[x], x = root, parent[x]
+        return root
+
+    def union(x: int, y: int) -> None:
+        rx, ry = find(x), find(y)
+        if rx != ry:
+            parent[max(rx, ry)] = min(rx, ry)
+
+    verts = np.asarray(vertices, dtype=np.float64)
+    # Each edge runs between two BREP vertices; collect, per vertex, the
+    # triangulation nodes that land on it (the endpoints of every edge
+    # polygon) so they can be merged in step 3.
+    vmap = TopTools_IndexedMapOfShape()
+    TopExp.MapShapes_s(wrapped, TopAbs_VERTEX, vmap)
+    vertex_nodes: dict[int, list[int]] = {}
+    edge_faces = TopTools_IndexedDataMapOfShapeListOfShape()
+    TopExp.MapShapesAndAncestors_s(wrapped, TopAbs_EDGE, TopAbs_FACE, edge_faces)
+    for ei in range(1, edge_faces.Extent() + 1):
+        edge = TopoDS.Edge_s(edge_faces.FindKey(ei))
+        edge_loc = edge.Location()
+        node_lists: list[list[int]] = []
+        seen_tri: set[int] = set()
+        for adj_face in edge_faces.FindFromIndex(ei):
+            fi = faces.FindIndex(adj_face)
+            if fi == 0:
+                continue
+            tri, loc = face_tri[fi]
+            # A seam lists its face twice; its single closed
+            # representation already carries both sides, so process each
+            # triangulation once.
+            if id(tri) in seen_tri:
+                continue
+            seen_tri.add(id(tri))
+            base = face_base[fi]
+            pred = loc.Predivided(edge_loc)
+            for cr in edge.TShape().Curves():
+                if not cr.IsPolygonOnTriangulation(tri, pred):
+                    continue
+                p1 = cr.PolygonOnTriangulation()
+                if p1 is not None:
+                    node_lists.append([base + n - 1 for n in p1.Nodes()])
+                if cr.IsPolygonOnClosedTriangulation():
+                    p2 = cr.PolygonOnTriangulation2()
+                    if p2 is not None:
+                        node_lists.append([base + n - 1 for n in p2.Nodes()])
+        # Every array for one edge is indexed along that edge's single
+        # curve parametrization, so node k of any array is the same point
+        # as node k of every other. Merge by index, never by coordinates.
+        # The coordinate checks below only *guard* that assumption: they
+        # raise on a length mismatch or opposite storage order rather
+        # than choosing a merge, so a silent "closed but twisted" mesh
+        # becomes a loud, diagnosable failure.
+        if not node_lists:
+            continue
+        ref = node_lists[0]
+        ref_pts = verts[ref]
+        for other in node_lists[1:]:
+            if len(other) != len(ref):
+                raise MeshSanityError(
+                    f"edge #{ei}: shared-edge node arrays differ in "
+                    f"length ({len(ref)} vs {len(other)}); cannot stitch "
+                    "by index",
+                )
+            other_pts = verts[other]
+            fwd = float(np.abs(ref_pts - other_pts).max())
+            rev = float(np.abs(ref_pts - other_pts[::-1]).max())
+            if rev < fwd:
+                raise MeshSanityError(
+                    f"edge #{ei}: shared-edge node arrays are stored in "
+                    f"opposite order (forward error {fwd:.3e} mm > reverse "
+                    f"{rev:.3e} mm); an index stitch would twist the mesh",
+                )
+            for u, v in zip(ref, other):
+                union(u, v)
+
+        # Record this edge's endpoint nodes against its two BREP vertices.
+        # A polygon's nodes run along the edge parametrisation, so node 0
+        # sits at the edge's first vertex and node -1 at its last.
+        v_first = vmap.FindIndex(TopExp.FirstVertex_s(edge))
+        v_last = vmap.FindIndex(TopExp.LastVertex_s(edge))
+        for arr in node_lists:
+            if v_first:
+                vertex_nodes.setdefault(v_first, []).append(arr[0])
+            if v_last:
+                vertex_nodes.setdefault(v_last, []).append(arr[-1])
+
+    # Merge nodes that resolve to the same BREP vertex. Where a face
+    # boundary passes through a point via a degenerate edge (a fillet,
+    # cone, or pole apex), the face's two boundary nodes there are
+    # distinct indices denoting one point, and the edge stitch above
+    # never links them because the connecting edge is degenerate and
+    # carries no polygon. Unioning by shared vertex closes such apices by
+    # topology, with no coordinate tolerance. The coordinate check only
+    # *guards* the node-to-vertex assignment, raising rather than choosing.
+    for vi, nodes in vertex_nodes.items():
+        vp = BRep_Tool.Pnt_s(TopoDS.Vertex_s(vmap.FindKey(vi)))
+        vertex_xyz = np.array([vp.X(), vp.Y(), vp.Z()], dtype=np.float64)
+        far = np.abs(verts[nodes] - vertex_xyz).max(axis=1)
+        if far.size and float(far.max()) > linear_deflection_mm:
+            raise MeshSanityError(
+                f"vertex #{vi}: an edge endpoint node is "
+                f"{float(far.max()):.3e} mm from the vertex (> deflection "
+                f"{linear_deflection_mm} mm); edge polygon orientation is "
+                "inconsistent with FirstVertex/LastVertex",
+            )
+        base_node = nodes[0]
+        for n in nodes[1:]:
+            union(base_node, n)
+
+    roots = np.array([find(i) for i in range(len(vertices))], dtype=np.int64)
+
+    # 3. Relabel to representatives, average merged positions, compact.
+    uniq, inv = np.unique(roots, return_inverse=True)
+    n_unique = int(uniq.shape[0])
     centroids = np.zeros((n_unique, 3), dtype=np.float64)
     counts = np.zeros(n_unique, dtype=np.int64)
-    np.add.at(centroids, inv, raw_vertices)
+    np.add.at(centroids, inv, verts)
     np.add.at(counts, inv, 1)
     centroids /= np.maximum(counts, 1)[:, None]
 
-    # Drop degenerate triangles. These arise on **periodic surface
-    # seams** (sphere poles, cylinder/torus seams crossing a topological
-    # vertex), where OCC's parametric tessellation lays down a sliver
-    # triangle whose two corners weld to the same global point. They
-    # carry no surface area and their non-degenerate neighbours still
-    # cover the local region, dropping is the standard fix and is
-    # safe iff the surviving mesh passes :func:`validate_mesh`.
-    keep_mask = (
-        (welded_faces[:, 0] != welded_faces[:, 1])
-        & (welded_faces[:, 1] != welded_faces[:, 2])
-        & (welded_faces[:, 0] != welded_faces[:, 2])
+    merged_faces = inv[np.asarray(triangles, dtype=np.int64)]
+    # Drop triangles that became zero-area after the merge. A closed
+    # edge whose closure node one face repeats and the adjacent face
+    # splits into two coincident nodes forces those two nodes to unify,
+    # which collapses the thin sliver triangle spanning them. The sliver
+    # carries no area and its neighbours still cover the region, so
+    # dropping it is exact (no tolerance) and closure is reconfirmed by
+    # :func:`validate_mesh`.
+    keep = (
+        (merged_faces[:, 0] != merged_faces[:, 1])
+        & (merged_faces[:, 1] != merged_faces[:, 2])
+        & (merged_faces[:, 0] != merged_faces[:, 2])
     )
-    welded_faces = welded_faces[keep_mask]
-    if welded_faces.shape[0] == 0:
-        raise MeshSanityError("welding collapsed all triangles")
+    merged_faces = merged_faces[keep]
+    if merged_faces.shape[0] == 0:
+        raise MeshSanityError("stitching collapsed all triangles")
 
-    # Compact vertex list to only referenced indices.
-    used = np.unique(welded_faces.reshape(-1))
+    used = np.unique(merged_faces.reshape(-1))
     remap = np.full(n_unique, -1, dtype=np.int64)
     remap[used] = np.arange(len(used))
-    compact_vertices = centroids[used]
-    compact_faces = remap[welded_faces]
 
     return Mesh(
-        vertices=compact_vertices,
-        triangles=compact_faces.astype(np.int64),
+        vertices=centroids[used],
+        triangles=remap[merged_faces].astype(np.int64),
         linear_deflection_mm=float(linear_deflection_mm),
     )
 
