@@ -42,6 +42,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from cadgenbench.common.artifacts import StepArtifacts
+
 
 # ---------------------------------------------------------------------------
 # Fit type
@@ -254,7 +256,95 @@ class _SubVolumeCache:
         return self.sv.fit_type
 
 
-def _build_sub_volume_cache(sv: SubVolume, gt_manifold, deflection_mm):
+@dataclass(frozen=True)
+class _CandidateRegionCache:
+    """Candidate-side region C for one sub-volume, fixed across pose search."""
+
+    sub_volume: _SubVolumeCache
+    C: object
+    vol_C: float
+
+    @property
+    def name(self) -> str:
+        return self.sub_volume.name
+
+
+@dataclass
+class InterfaceMatchArtifacts:
+    """GT-side interface artifacts reused across candidates in one worker."""
+
+    gt_step: Path
+    sub_volumes: list[SubVolume]
+    gt_artifacts: StepArtifacts | None = None
+    linear_deflection_mm: float | None = None
+    _sub_volume_artifacts: dict[Path, StepArtifacts] | None = None
+    _sub_volume_caches: dict[Path, _SubVolumeCache] | None = None
+
+    def __post_init__(self) -> None:
+        self.gt_step = Path(self.gt_step)
+        if self.gt_artifacts is None:
+            self.gt_artifacts = StepArtifacts(self.gt_step)
+        if self._sub_volume_artifacts is None:
+            self._sub_volume_artifacts = {}
+        if self._sub_volume_caches is None:
+            self._sub_volume_caches = {}
+
+    @classmethod
+    def for_fixture(
+        cls,
+        fixture_dir: str | Path,
+        *,
+        gt_step: str | Path | None = None,
+    ) -> "InterfaceMatchArtifacts":
+        fixture_dir = Path(fixture_dir)
+        return cls(
+            gt_step=Path(gt_step) if gt_step is not None else fixture_dir / "gt.step",
+            sub_volumes=discover_sub_volumes(fixture_dir),
+        )
+
+    @property
+    def deflection_mm(self) -> float:
+        from cadgenbench.common.mesh import deflection_for_bbox
+
+        if self.linear_deflection_mm is None:
+            assert self.gt_artifacts is not None
+            self.linear_deflection_mm = deflection_for_bbox(
+                self.gt_artifacts.analysis.measurements.bounding_box.diagonal,
+            )
+        return float(self.linear_deflection_mm)
+
+    @property
+    def gt_manifold(self):
+        assert self.gt_artifacts is not None
+        return self.gt_artifacts.manifold(self.deflection_mm)
+
+    def sub_volume_artifact(self, sv: SubVolume) -> StepArtifacts:
+        assert self._sub_volume_artifacts is not None
+        key = Path(sv.path)
+        if key not in self._sub_volume_artifacts:
+            self._sub_volume_artifacts[key] = StepArtifacts(key)
+        return self._sub_volume_artifacts[key]
+
+    def cache_for(self, sv: SubVolume) -> _SubVolumeCache:
+        assert self._sub_volume_caches is not None
+        key = Path(sv.path)
+        if key not in self._sub_volume_caches:
+            self._sub_volume_caches[key] = _build_sub_volume_cache(
+                sv,
+                self.gt_manifold,
+                self.deflection_mm,
+                sv_artifacts=self.sub_volume_artifact(sv),
+            )
+        return self._sub_volume_caches[key]
+
+
+def _build_sub_volume_cache(
+    sv: SubVolume,
+    gt_manifold,
+    deflection_mm,
+    *,
+    sv_artifacts: StepArtifacts | None = None,
+):
     """Build the pose-independent cache for one sub-volume.
 
     *gt_manifold* is a pre-tessellated ``manifold3d.Manifold`` of the
@@ -274,7 +364,11 @@ def _build_sub_volume_cache(sv: SubVolume, gt_manifold, deflection_mm):
     )
     from cadgenbench.common.mesh import tessellate_and_validate
 
-    R_mesh = tessellate_and_validate(sv.path, deflection_mm)
+    R_mesh = (
+        sv_artifacts.mesh(deflection_mm)
+        if sv_artifacts is not None
+        else tessellate_and_validate(sv.path, deflection_mm)
+    )
     R = mesh_to_manifold(R_mesh)
 
     # Inflated AABB built via manifold3d's cube primitive.
@@ -338,6 +432,52 @@ def _iou_with_cache(
     return 1.0 if iou >= SATURATION_THRESHOLD else iou
 
 
+def _candidate_region_for_cache(
+    cache: _SubVolumeCache,
+    candidate_manifold,
+) -> _CandidateRegionCache:
+    """Compute the pose-independent candidate region C for one sub-volume."""
+    from cadgenbench.eval.booleans import (
+        intersect,
+        manifold_volume,
+        subtract,
+    )
+
+    if cache.fit_type == "KOR":
+        C = subtract(cache.bbox_R, candidate_manifold)
+    else:  # KIR
+        C = intersect(cache.bbox_R, candidate_manifold)
+    return _CandidateRegionCache(
+        sub_volume=cache,
+        C=C,
+        vol_C=manifold_volume(C),
+    )
+
+
+def _iou_with_candidate_region(
+    candidate_region: _CandidateRegionCache,
+    pose: tuple[float, ...],
+) -> float:
+    """IoU using precomputed candidate region C for one pose."""
+    from cadgenbench.eval.booleans import (
+        apply_pose,
+        intersect,
+        manifold_volume,
+    )
+
+    cache = candidate_region.sub_volume
+    if candidate_region.vol_C <= 0:
+        return 0.0
+
+    R_p = cache.R if pose == _ZERO_POSE else apply_pose(cache.R, pose)
+    vol_inter = manifold_volume(intersect(R_p, candidate_region.C))
+    vol_union = cache.vol_R + candidate_region.vol_C - vol_inter
+    if vol_union <= 0:
+        return 0.0
+    iou = vol_inter / vol_union
+    return 1.0 if iou >= SATURATION_THRESHOLD else iou
+
+
 def _tessellate_for_iou(step_path: Path, deflection_mm: float):
     """Tessellate *step_path* and return its ``manifold3d.Manifold``."""
     from cadgenbench.eval.booleans import mesh_to_manifold
@@ -381,15 +521,10 @@ def iou_at_pose(
     GT-specified pose. The full v1 metric layers
     :func:`best_iou_in_context` on top of this primitive.
     """
-    from cadgenbench.common.validity import analyze_step
-    from cadgenbench.common.mesh import deflection_for_bbox
-
-    defl = deflection_for_bbox(
-        analyze_step(gt_step).measurements.bounding_box.diagonal,
-    )
-    gt_manifold = _tessellate_for_iou(Path(gt_step), defl)
-    candidate_manifold = _tessellate_for_iou(Path(part_step), defl)
-    cache = _build_sub_volume_cache(sv, gt_manifold, defl)
+    artifacts = InterfaceMatchArtifacts(gt_step=Path(gt_step), sub_volumes=[sv])
+    defl = artifacts.deflection_mm
+    candidate_manifold = StepArtifacts(part_step).manifold(defl)
+    cache = artifacts.cache_for(sv)
     return _iou_with_cache(cache, candidate_manifold, _ZERO_POSE)
 
 
@@ -444,6 +579,8 @@ def best_iou_in_context(
     workers: int = 1,
     max_translation_mm: float | None = None,
     max_rotation_deg: float = DEFAULT_MAX_ROTATION_DEG,
+    candidate_artifacts: StepArtifacts | None = None,
+    interface_artifacts: InterfaceMatchArtifacts | None = None,
 ) -> dict[str, float]:
     """Deterministic bounded pose search for one rigid mating context.
 
@@ -462,7 +599,9 @@ def best_iou_in_context(
         gt_step: Ground-truth STEP, used to build the verification
             shell around each sub-volume.
         n_samples: Pose count, including the zero pose.
-        workers: Accepted for API stability; ignored.
+        workers: Number of threads used for pose/sub-volume scoring. Keep at
+            1 when running inside already-parallel worker pools to avoid
+            oversubscription.
         max_translation_mm: Half-width of the per-axis translation
             sampling interval, in mm. When ``None`` (the default) the
             window is derived from the GT bounding-box diagonal as
@@ -472,12 +611,14 @@ def best_iou_in_context(
     """
     if not sub_volumes:
         raise ValueError("best_iou_in_context: sub_volumes must not be empty")
-    del workers
 
-    from cadgenbench.common.validity import analyze_step
-    from cadgenbench.common.mesh import deflection_for_bbox
-
-    gt_diag = float(analyze_step(gt_step).measurements.bounding_box.diagonal)
+    interface_artifacts = interface_artifacts or InterfaceMatchArtifacts(
+        gt_step=Path(gt_step),
+        sub_volumes=sub_volumes,
+    )
+    gt_diag = float(
+        interface_artifacts.gt_artifacts.analysis.measurements.bounding_box.diagonal,
+    )
     if max_translation_mm is None:
         max_translation_mm = TRANSLATION_FRACTION_OF_BBOX * gt_diag
 
@@ -487,15 +628,35 @@ def best_iou_in_context(
         max_rotation_deg=max_rotation_deg,
     )
 
-    defl = deflection_for_bbox(gt_diag)
-    gt_manifold = _tessellate_for_iou(Path(gt_step), defl)
-    candidate_manifold = _tessellate_for_iou(Path(part_step), defl)
-    caches = [_build_sub_volume_cache(sv, gt_manifold, defl) for sv in sub_volumes]
+    defl = interface_artifacts.deflection_mm
+    candidate_artifacts = candidate_artifacts or StepArtifacts(part_step)
+    candidate_manifold = candidate_artifacts.manifold(defl)
+    caches = [interface_artifacts.cache_for(sv) for sv in sub_volumes]
+    candidate_regions = [
+        _candidate_region_for_cache(c, candidate_manifold)
+        for c in caches
+    ]
 
     per_sv = {c.name: 0.0 for c in caches}
-    for pose in poses:
-        for c in caches:
-            iou = _iou_with_cache(c, candidate_manifold, pose)
+    tasks = [(pose, c) for pose in poses for c in candidate_regions]
+    if workers > 1 and len(tasks) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+
+        max_workers = min(int(workers), len(tasks))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            results = pool.map(
+                lambda item: (
+                    item[1].name,
+                    _iou_with_candidate_region(item[1], item[0]),
+                ),
+                tasks,
+            )
+            for name, iou in results:
+                if iou > per_sv[name]:
+                    per_sv[name] = iou
+    else:
+        for pose, c in tasks:
+            iou = _iou_with_candidate_region(c, pose)
             if iou > per_sv[c.name]:
                 per_sv[c.name] = iou
     return per_sv
@@ -531,6 +692,8 @@ def interface_score_iou(
     for sv in sub_volumes:
         by_context.setdefault(sv.context_id, []).append(sv)
 
+    artifacts = InterfaceMatchArtifacts(gt_step=gt_step, sub_volumes=sub_volumes)
+    candidate_artifacts = StepArtifacts(part_step)
     out: dict[str, float] = {}
     for ctx_svs in by_context.values():
         out.update(best_iou_in_context(
@@ -541,6 +704,8 @@ def interface_score_iou(
             workers=workers,
             max_translation_mm=max_translation_mm,
             max_rotation_deg=max_rotation_deg,
+            candidate_artifacts=candidate_artifacts,
+            interface_artifacts=artifacts,
         ))
     return out
 
@@ -589,6 +754,8 @@ def interface_score(
     for sv in sub_volumes:
         by_context.setdefault(sv.context_id, []).append(sv)
 
+    artifacts = InterfaceMatchArtifacts(gt_step=gt_step, sub_volumes=sub_volumes)
+    candidate_artifacts = StepArtifacts(part_step)
     per_context: list[float] = []
     for ctx_svs in by_context.values():
         per_sv = best_iou_in_context(
@@ -599,6 +766,8 @@ def interface_score(
             workers=workers,
             max_translation_mm=max_translation_mm,
             max_rotation_deg=max_rotation_deg,
+            candidate_artifacts=candidate_artifacts,
+            interface_artifacts=artifacts,
         )
         per_context.append(min(per_sv.values()))
     return sum(per_context) / len(per_context)

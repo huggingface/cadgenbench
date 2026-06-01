@@ -49,9 +49,9 @@ from pathlib import Path
 
 import numpy as np
 
-from cadgenbench.common.validity import ValidationResult, analyze_step
+from cadgenbench.common.artifacts import StepArtifacts
+from cadgenbench.common.validity import ValidationResult
 from cadgenbench.common.measurements import Measurements
-from cadgenbench.common.viewer import DEFAULT_VIEWS as RENDER_VIEWS, render_mesh
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,7 @@ class MetricContext:
     _pc_seed: int = field(default=0, repr=False)
     _mesh: object | None = field(default=None, repr=False)
     _manifold: object | None = field(default=None, repr=False)
+    artifacts: StepArtifacts | None = field(default=None, repr=False)
 
     def _ensure_point_cloud(self) -> None:
         """Sample points + outward-unit normals once, then cache them."""
@@ -131,10 +132,18 @@ class MetricContext:
             return self._mesh
         if self.step_path is None:
             return None
-        from cadgenbench.common.mesh import (
-            deflection_for_bbox,
-            tessellate_and_validate,
-        )
+        from cadgenbench.common.mesh import deflection_for_bbox
+
+        if self.artifacts is not None:
+            if self.linear_deflection_mm is not None:
+                defl = float(self.linear_deflection_mm)
+            elif self.measurements is not None:
+                defl = deflection_for_bbox(self.measurements.bounding_box.diagonal)
+            else:
+                defl = self.artifacts.deflection()
+            self._mesh = self.artifacts.mesh(defl)
+            return self._mesh
+        from cadgenbench.common.mesh import tessellate_and_validate
 
         if self.linear_deflection_mm is not None:
             defl = float(self.linear_deflection_mm)
@@ -307,6 +316,8 @@ def compare_step_files(
     gt_renders_dir: str | Path | None = None,
     metrics: dict[str, MetricFn] | None = None,
     refine: bool = False,
+    candidate_artifacts: StepArtifacts | None = None,
+    gt_artifacts: StepArtifacts | None = None,
 ) -> ComparisonResult:
     """Align two STEP files, render them, and compute all applicable metrics.
 
@@ -337,6 +348,7 @@ def compare_step_files(
     """
     candidate_step = Path(candidate_step)
     gt_step = Path(gt_step)
+    gt_artifacts = gt_artifacts or StepArtifacts(gt_step)
 
     aligned_path: Path | None = None
     rmse: float | None = alignment_rmse
@@ -353,12 +365,14 @@ def compare_step_files(
         step_for_metrics = ar.output_path
         aligned_path = ar.output_path
         rmse = ar.rmse
+        candidate_artifacts = None
 
     cand_renders = Path(candidate_renders_dir) if candidate_renders_dir else None
     gt_renders = Path(gt_renders_dir) if gt_renders_dir else None
 
-    cand_analysis = analyze_step(step_for_metrics)
-    gt_analysis = analyze_step(gt_step)
+    candidate_artifacts = candidate_artifacts or StepArtifacts(step_for_metrics)
+    cand_analysis = candidate_artifacts.analysis
+    gt_analysis = gt_artifacts.analysis
 
     # One deflection drives the mesh-Boolean Volume IoU on both sides,
     # derived from the GT's bbox so candidate and GT are tessellated
@@ -375,6 +389,7 @@ def compare_step_files(
         measurements=cand_analysis.measurements,
         renders_dir=cand_renders,
         linear_deflection_mm=shared_deflection,
+        artifacts=candidate_artifacts,
     )
     ctx_gt = MetricContext(
         step_path=gt_step,
@@ -382,6 +397,7 @@ def compare_step_files(
         measurements=gt_analysis.measurements,
         renders_dir=gt_renders,
         linear_deflection_mm=shared_deflection,
+        artifacts=gt_artifacts,
     )
 
     # Render after building the contexts so we reuse the welded mesh
@@ -392,45 +408,14 @@ def compare_step_files(
     if gt_renders is not None:
         _ensure_renders(ctx_gt, gt_renders)
 
-    scores: dict[str, float | None]
-    scores, metric_errors = compute_metrics(ctx_candidate, ctx_gt, metrics=metrics)
-
-    component_keys = (
-        "shape_point_cloud_f1",
-        "shape_volume_iou",
-        "shape_feature_edge_f1",
-    )
-    component_values = [scores[k] for k in component_keys if scores.get(k) is not None]
-    if component_values:
-        scores["shape_similarity_score"] = float(sum(component_values) / len(component_values))
-
-    diagnostics: dict[str, float] = {}
-    diag = _bbox_diagonal(ctx_gt)
-    if diag is not None:
-        diagnostics["part_diagonal"] = diag
-    pc_stats = _point_cloud_f1_stats(ctx_candidate, ctx_gt)
-    if pc_stats is not None:
-        diagnostics["point_cloud_f1"] = pc_stats["f1"]
-        diagnostics["point_cloud_precision"] = pc_stats["precision"]
-        diagnostics["point_cloud_recall"] = pc_stats["recall"]
-        diagnostics["point_cloud_threshold"] = pc_stats["threshold"]
-        diagnostics["point_cloud_mean_chamfer"] = pc_stats["mean_chamfer"]
-        diagnostics["point_cloud_mean_normal_dot"] = pc_stats["mean_normal_dot"]
-    stats = _volume_overlap_stats(ctx_candidate, ctx_gt)
-    if stats is not None:
-        diagnostics["volume_intersection"] = stats[0]
-        diagnostics["volume_union"] = stats[1]
-        diagnostics["volume_symmetric_difference"] = stats[2]
-    fe_stats = _feature_edge_f1_stats(ctx_candidate, ctx_gt)
-    if fe_stats is not None:
-        diagnostics["feature_edge_f1"] = fe_stats["f1"]
-        diagnostics["feature_edge_precision"] = fe_stats["precision"]
-        diagnostics["feature_edge_recall"] = fe_stats["recall"]
-        diagnostics["feature_edge_threshold"] = fe_stats["threshold"]
-        diagnostics["feature_edge_n_points_candidate"] = fe_stats["n_points_candidate"]
-        diagnostics["feature_edge_n_points_gt"] = fe_stats["n_points_gt"]
-        diagnostics["feature_edge_n_kept_candidate"] = fe_stats["n_kept_candidate"]
-        diagnostics["feature_edge_n_kept_gt"] = fe_stats["n_kept_gt"]
+    if metrics is None:
+        scores, diagnostics, metric_errors = _compute_default_scores_and_diagnostics(
+            ctx_candidate,
+            ctx_gt,
+        )
+    else:
+        scores, metric_errors = compute_metrics(ctx_candidate, ctx_gt, metrics=metrics)
+        diagnostics = _compute_diagnostics(ctx_candidate, ctx_gt)
 
     return ComparisonResult(
         scores=scores,
@@ -456,6 +441,118 @@ def _bbox_diagonal(ctx: MetricContext) -> float | None:
 def _clamp01(value: float) -> float:
     """Clamp a scalar to the unit interval."""
     return max(0.0, min(1.0, value))
+
+
+def _compute_default_scores_and_diagnostics(
+    candidate: MetricContext,
+    gt: MetricContext,
+) -> tuple[dict[str, float | None], dict[str, float], dict[str, str]]:
+    """Compute default shape metrics and diagnostics without duplicate work."""
+    scores: dict[str, float | None] = {}
+    errors: dict[str, str] = {}
+    diagnostics: dict[str, float] = {}
+
+    diag = _bbox_diagonal(gt)
+    if diag is not None:
+        diagnostics["part_diagonal"] = diag
+
+    try:
+        pc_stats = _point_cloud_f1_stats(candidate, gt)
+    except Exception as exc:
+        logger.error("Metric shape_point_cloud_f1 raised; scoring it 0", exc_info=True)
+        scores["shape_point_cloud_f1"] = 0.0
+        errors["shape_point_cloud_f1"] = f"{type(exc).__name__}: {exc}"
+        pc_stats = None
+    if pc_stats is not None:
+        scores["shape_point_cloud_f1"] = _clamp01(pc_stats["f1"])
+        _add_point_cloud_diagnostics(diagnostics, pc_stats)
+
+    try:
+        volume_stats = _volume_overlap_stats(candidate, gt)
+    except Exception as exc:
+        logger.error("Metric shape_volume_iou raised; scoring it 0", exc_info=True)
+        scores["shape_volume_iou"] = 0.0
+        errors["shape_volume_iou"] = f"{type(exc).__name__}: {exc}"
+        volume_stats = None
+    if volume_stats is not None:
+        inter, union, _sym_diff = volume_stats
+        if union > 0:
+            scores["shape_volume_iou"] = _clamp01(inter / union)
+        _add_volume_diagnostics(diagnostics, volume_stats)
+
+    try:
+        fe_stats = _feature_edge_f1_stats(candidate, gt)
+    except Exception as exc:
+        logger.error("Metric shape_feature_edge_f1 raised; scoring it 0", exc_info=True)
+        scores["shape_feature_edge_f1"] = 0.0
+        errors["shape_feature_edge_f1"] = f"{type(exc).__name__}: {exc}"
+        fe_stats = None
+    if fe_stats is not None:
+        scores["shape_feature_edge_f1"] = _clamp01(fe_stats["f1"])
+        _add_feature_edge_diagnostics(diagnostics, fe_stats)
+
+    component_keys = (
+        "shape_point_cloud_f1",
+        "shape_volume_iou",
+        "shape_feature_edge_f1",
+    )
+    component_values = [scores[k] for k in component_keys if scores.get(k) is not None]
+    if component_values:
+        scores["shape_similarity_score"] = float(sum(component_values) / len(component_values))
+    return scores, diagnostics, errors
+
+
+def _compute_diagnostics(candidate: MetricContext, gt: MetricContext) -> dict[str, float]:
+    """Compute diagnostics for custom metric runs."""
+    diagnostics: dict[str, float] = {}
+    diag = _bbox_diagonal(gt)
+    if diag is not None:
+        diagnostics["part_diagonal"] = diag
+    pc_stats = _point_cloud_f1_stats(candidate, gt)
+    if pc_stats is not None:
+        _add_point_cloud_diagnostics(diagnostics, pc_stats)
+    stats = _volume_overlap_stats(candidate, gt)
+    if stats is not None:
+        _add_volume_diagnostics(diagnostics, stats)
+    fe_stats = _feature_edge_f1_stats(candidate, gt)
+    if fe_stats is not None:
+        _add_feature_edge_diagnostics(diagnostics, fe_stats)
+    return diagnostics
+
+
+def _add_point_cloud_diagnostics(
+    diagnostics: dict[str, float],
+    pc_stats: dict[str, float],
+) -> None:
+    diagnostics["point_cloud_f1"] = pc_stats["f1"]
+    diagnostics["point_cloud_precision"] = pc_stats["precision"]
+    diagnostics["point_cloud_recall"] = pc_stats["recall"]
+    diagnostics["point_cloud_threshold"] = pc_stats["threshold"]
+    diagnostics["point_cloud_mean_chamfer"] = pc_stats["mean_chamfer"]
+    diagnostics["point_cloud_mean_normal_dot"] = pc_stats["mean_normal_dot"]
+
+
+def _add_volume_diagnostics(
+    diagnostics: dict[str, float],
+    stats: tuple[float, float, float],
+) -> None:
+    diagnostics["volume_intersection"] = stats[0]
+    diagnostics["volume_union"] = stats[1]
+    diagnostics["volume_symmetric_difference"] = stats[2]
+
+
+def _add_feature_edge_diagnostics(
+    diagnostics: dict[str, float],
+    fe_stats: dict[str, float],
+) -> None:
+    diagnostics["feature_edge_f1"] = fe_stats["f1"]
+    diagnostics["feature_edge_precision"] = fe_stats["precision"]
+    diagnostics["feature_edge_recall"] = fe_stats["recall"]
+    diagnostics["feature_edge_threshold"] = fe_stats["threshold"]
+    diagnostics["feature_edge_n_points_candidate"] = fe_stats["n_points_candidate"]
+    diagnostics["feature_edge_n_points_gt"] = fe_stats["n_points_gt"]
+    diagnostics["feature_edge_n_kept_candidate"] = fe_stats["n_kept_candidate"]
+    diagnostics["feature_edge_n_kept_gt"] = fe_stats["n_kept_gt"]
 
 
 def _point_cloud_f1_stats(
@@ -664,6 +761,8 @@ def _ensure_renders(ctx: MetricContext, renders_dir: Path) -> None:
     the shared GT-derived deflection) so we never tessellate twice for
     the same fixture.
     """
+    from cadgenbench.common.viewer import DEFAULT_VIEWS as RENDER_VIEWS, render_mesh
+
     renders_dir.mkdir(parents=True, exist_ok=True)
     missing = [v for v in RENDER_VIEWS if not (renders_dir / f"{v}.png").exists()]
     if not missing:

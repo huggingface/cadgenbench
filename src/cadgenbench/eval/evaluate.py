@@ -59,8 +59,10 @@ import logging
 import shutil
 from pathlib import Path
 
+from cadgenbench.common.artifacts import StepArtifacts
 from cadgenbench.common.validity import analyze_step
 from cadgenbench.eval.interface_match import (
+    InterfaceMatchArtifacts,
     SubVolume,
     best_iou_in_context,
     discover_sub_volumes,
@@ -148,7 +150,8 @@ def evaluate_result(
     # short-circuit here both to avoid the crash and to keep
     # ``evaluate_result`` exit-clean: per-fixture validity failures
     # never bubble out to the caller.
-    validation_dict = _validation_dict(raw_candidate)
+    raw_artifacts = StepArtifacts(raw_candidate)
+    validation_dict = _validation_dict(raw_candidate, artifacts=raw_artifacts)
     if not validation_dict.get("is_valid"):
         prior = _read_json(result_json)
         data = {
@@ -171,10 +174,12 @@ def evaluate_result(
     aligned_step = result_dir / ALIGNED_STEP
     renders_dir = result_dir / RENDERS_DIR
 
+    gt_artifacts = StepArtifacts(gt_step)
     rmse = _align_or_reuse(
         raw_candidate, gt_step, aligned_step, renders_dir,
         data=data, force=force_align,
     )
+    aligned_artifacts = StepArtifacts(aligned_step)
 
     # --- Shape similarity ---------------------------------------------------
     comparison = compare_step_files(
@@ -182,6 +187,8 @@ def evaluate_result(
         align=False,
         alignment_rmse=rmse,
         candidate_renders_dir=renders_dir,
+        candidate_artifacts=aligned_artifacts,
+        gt_artifacts=gt_artifacts,
     )
     scores = comparison.scores
 
@@ -190,6 +197,8 @@ def evaluate_result(
         aligned_step,
         gt_dir,
         gt_step,
+        candidate_artifacts=aligned_artifacts,
+        gt_artifacts=gt_artifacts,
     )
     if interface_metrics:
         _maybe_render_interface_overlay(
@@ -200,7 +209,11 @@ def evaluate_result(
 
     # --- Topology match (Betti b0/b1/b2 on the tessellated boundary) --------
     topology_metrics = _topology_metrics_dict(
-        raw_candidate, gt_step, validation_dict,
+        raw_candidate,
+        gt_step,
+        validation_dict,
+        candidate_artifacts=raw_artifacts,
+        gt_artifacts=gt_artifacts,
     )
 
     data["status"] = STATUS_VALID
@@ -346,14 +359,18 @@ def _find_candidate_step(result_dir: Path) -> Path | None:
     return None
 
 
-def _validation_dict(candidate_step: Path) -> dict:
+def _validation_dict(
+    candidate_step: Path,
+    *,
+    artifacts: StepArtifacts | None = None,
+) -> dict:
     """Flatten validity + measurements into the ``result.json["validation"]`` schema.
 
     The JSON key is still ``validation`` for backward compatibility with
     downstream reports, even though it now carries measurement fields too.
     """
     try:
-        a = analyze_step(candidate_step)
+        a = artifacts.analysis if artifacts is not None else analyze_step(candidate_step)
         v, m = a.validation, a.measurements
         bb = m.bounding_box
         return {
@@ -420,6 +437,9 @@ def _topology_metrics_dict(
     candidate_step: Path,
     gt_step: Path,
     validation: dict,
+    *,
+    candidate_artifacts: StepArtifacts | None = None,
+    gt_artifacts: StepArtifacts | None = None,
 ) -> dict:
     """Compute Betti agreement between candidate and GT, return persistable dict.
 
@@ -433,7 +453,12 @@ def _topology_metrics_dict(
     if not validation.get("is_valid"):
         return {}
     try:
-        result = topo_match(candidate_step, gt_step)
+        result = topo_match(
+            candidate_step,
+            gt_step,
+            candidate_artifacts=candidate_artifacts,
+            gt_artifacts=gt_artifacts,
+        )
     except MeshSanityError as exc:
         # If the candidate (or GT!) survives is_valid but its mesh
         # pipeline still trips a gate here, surface the discrepancy
@@ -454,6 +479,9 @@ def _interface_metrics_dict(
     *,
     n_samples: int = 32,
     workers: int = 1,
+    candidate_artifacts: StepArtifacts | None = None,
+    gt_artifacts: StepArtifacts | None = None,
+    interface_artifacts: InterfaceMatchArtifacts | None = None,
 ) -> dict:
     """Return interface-match metrics for one aligned candidate.
 
@@ -463,6 +491,12 @@ def _interface_metrics_dict(
     sub_volumes = discover_sub_volumes(fixture_dir)
     if not sub_volumes:
         return {}
+    interface_artifacts = interface_artifacts or InterfaceMatchArtifacts(
+        gt_step=gt_step,
+        sub_volumes=sub_volumes,
+        gt_artifacts=gt_artifacts,
+    )
+    candidate_artifacts = candidate_artifacts or StepArtifacts(aligned_candidate_step)
 
     by_context: dict[int, list[SubVolume]] = {}
     for sv in sub_volumes:
@@ -478,6 +512,8 @@ def _interface_metrics_dict(
             gt_step,
             n_samples=n_samples,
             workers=workers,
+            candidate_artifacts=candidate_artifacts,
+            interface_artifacts=interface_artifacts,
         )
         ctx_score = min(per_sv.values())
         context_scores.append(ctx_score)

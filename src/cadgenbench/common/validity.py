@@ -222,6 +222,7 @@ def _validate_wrapped(
     wrapped,  # type: ignore[no-untyped-def]
     *,
     bbox_diagonal: float | None = None,
+    mesh_cache: dict[float, object] | None = None,
 ) -> ValidationResult:
     """Validate a pre-loaded OCC ``TopoDS_Shape``.
 
@@ -276,7 +277,12 @@ def _validate_wrapped(
         topology_errors.extend(quality_errors)
         if not quality_errors:
             deflection = _tessellation_deflection(wrapped, bbox_diagonal)
-            mesh_ok = _run_mesh_gate(wrapped, deflection, topology_errors)
+            mesh_ok = _run_mesh_gate(
+                wrapped,
+                deflection,
+                topology_errors,
+                mesh_cache=mesh_cache,
+            )
         else:
             mesh_ok = False
 
@@ -312,6 +318,8 @@ def _run_mesh_gate(
     wrapped,  # type: ignore[no-untyped-def]
     deflection: float,
     topology_errors: list[str],
+    *,
+    mesh_cache: dict[float, object] | None = None,
 ) -> bool:
     """Run the mesh-pipeline gate and append any failure to *topology_errors*.
 
@@ -328,6 +336,8 @@ def _run_mesh_gate(
     try:
         mesh = tessellate_shape(wrapped, deflection)
         validate_mesh(mesh)
+        if mesh_cache is not None:
+            mesh_cache[float(deflection)] = mesh
     except MeshSanityError as exc:
         # MeshSanityError messages already start with the failure mode
         # ("mesh non-manifold: ...", "mesh not closed: ...",

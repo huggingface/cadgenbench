@@ -1,0 +1,12 @@
+---
+description: Workspace repo layout reminder
+alwaysApply: true
+---
+
+# Workspace Layout
+
+This Cursor workspace contains several sibling git repositories. Do not assume
+the workspace root is a git repo. Before git operations, read
+`../space-setup/README.md` and run git commands from the relevant child repo,
+for example `cadgenbench/`, `cadgenbench-data-gt/`, `space-setup/`, or
+`cadgenbench-leaderboard/`.

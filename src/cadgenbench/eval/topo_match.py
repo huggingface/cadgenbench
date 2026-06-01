@@ -64,6 +64,7 @@ from pathlib import Path
 
 import numpy as np
 
+from cadgenbench.common.artifacts import StepArtifacts
 from cadgenbench.common.measurements import measure_step
 from cadgenbench.common.mesh import (
     Mesh,
@@ -205,6 +206,9 @@ def _per_betti_score(b_cand: int, b_gt: int) -> float:
 def topo_match(
     candidate_step: str | Path,
     gt_step: str | Path,
+    *,
+    candidate_artifacts: StepArtifacts | None = None,
+    gt_artifacts: StepArtifacts | None = None,
 ) -> TopoMatchResult:
     """End-to-end: tessellate both at the **GT's** deflection, score Betti.
 
@@ -214,13 +218,13 @@ def topo_match(
     candidate_step = Path(candidate_step)
     gt_step = Path(gt_step)
 
-    gt_m = measure_step(gt_step)
+    gt_artifacts = gt_artifacts or StepArtifacts(gt_step)
+    candidate_artifacts = candidate_artifacts or StepArtifacts(candidate_step)
+    gt_m = gt_artifacts.analysis.measurements
     defl = deflection_for_bbox(gt_m.bounding_box.diagonal)
 
-    gt_betti = compute_betti_for_step(gt_step, linear_deflection_mm=defl)
-    cand_betti = compute_betti_for_step(
-        candidate_step, linear_deflection_mm=defl,
-    )
+    gt_betti = gt_artifacts.betti(defl)
+    cand_betti = candidate_artifacts.betti(defl)
     score, per_axis_scores = topo_match_score(cand_betti, gt_betti)
     return TopoMatchResult(
         candidate=cand_betti,

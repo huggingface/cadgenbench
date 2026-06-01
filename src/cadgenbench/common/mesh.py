@@ -53,6 +53,7 @@ downgrades a check.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -133,6 +134,7 @@ def tessellate_step(
     linear_deflection_mm: float,
     *,
     angular_deflection_rad: float = 0.5,
+    parallel: bool | None = None,
 ) -> Mesh:
     """Tessellate a STEP file into a welded :class:`Mesh`.
 
@@ -158,6 +160,7 @@ def tessellate_step(
         shape.wrapped,
         linear_deflection_mm,
         angular_deflection_rad=angular_deflection_rad,
+        parallel=parallel,
     )
 
 
@@ -166,6 +169,7 @@ def tessellate_shape(
     linear_deflection_mm: float,
     *,
     angular_deflection_rad: float = 0.5,
+    parallel: bool | None = None,
 ) -> Mesh:
     """Tessellate a pre-loaded OCC ``TopoDS_Shape`` into a welded mesh.
 
@@ -199,13 +203,17 @@ def tessellate_shape(
             f"linear_deflection_mm must be > 0, got {linear_deflection_mm}",
         )
 
-    BRepMesh_IncrementalMesh(
-        wrapped,
-        linear_deflection_mm,
-        False,
-        angular_deflection_rad,
-        False,
-    )
+    if parallel is None:
+        parallel = os.environ.get("CADGENBENCH_OCC_PARALLEL_MESH", "1") != "0"
+
+    mesher = BRepMesh_IncrementalMesh()
+    mesher.SetShape(wrapped)
+    params = mesher.ChangeParameters()
+    params.Deflection = float(linear_deflection_mm)
+    params.Angle = float(angular_deflection_rad)
+    params.Relative = False
+    params.InParallel = bool(parallel)
+    mesher.Perform()
 
     faces = TopTools_IndexedMapOfShape()
     TopExp.MapShapes_s(wrapped, TopAbs_FACE, faces)

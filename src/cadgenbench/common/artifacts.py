@@ -1,0 +1,251 @@
+"""Lazy per-STEP geometry artifacts shared by validation and metrics.
+
+This module intentionally keeps caches in-process. Callers that run many
+workers can still put serialized mesh arrays next to the dataset later; each
+worker can hydrate those into its own Python / Manifold objects.
+"""
+from __future__ import annotations
+
+import os
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import numpy as np
+
+from cadgenbench.common.mesh import Mesh
+from cadgenbench.common.measurements import BBox, Measurements, _measure_wrapped
+from cadgenbench.common.validity import (
+    ValidationResult,
+    ValidityResult,
+    _load_step_wrapped,
+    _validate_wrapped,
+)
+
+
+@dataclass
+class StepArtifacts:
+    """Lazy artifacts for one STEP file.
+
+    The object is deliberately small and process-local. OCC shapes and
+    ``manifold3d.Manifold`` instances are not treated as stable serialized
+    dataset artifacts; callers can serialize the mesh arrays separately if
+    they need cross-worker reuse.
+    """
+
+    step_path: Path | str
+    mesh_cache_dir: Path | str | None = None
+    _wrapped: object | None = field(default=None, init=False, repr=False)
+    _analysis: ValidityResult | None = field(default=None, init=False, repr=False)
+    _meshes: dict[float, object] = field(default_factory=dict, init=False, repr=False)
+    _manifolds: dict[float, object] = field(default_factory=dict, init=False, repr=False)
+    _bettis: dict[float, object] = field(default_factory=dict, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.step_path = Path(self.step_path)
+        if self.mesh_cache_dir is None:
+            self.mesh_cache_dir = os.environ.get("CADGENBENCH_MESH_CACHE_DIR")
+        if self.mesh_cache_dir is not None:
+            self.mesh_cache_dir = Path(self.mesh_cache_dir)
+
+    @property
+    def wrapped(self):  # type: ignore[no-untyped-def]
+        """Loaded OCC ``TopoDS_Shape``, parsed once per artifact."""
+        if self._wrapped is None:
+            self._wrapped = _load_step_wrapped(self.step_path)
+        return self._wrapped
+
+    @property
+    def analysis(self) -> ValidityResult:
+        """Validity + measurements, computed once from the loaded shape."""
+        if self._analysis is None:
+            cached = self._load_analysis_cache()
+            if cached is not None:
+                self._analysis = cached
+            else:
+                measurements = _measure_wrapped(self.wrapped)
+                validation = _validate_wrapped(
+                    self.wrapped,
+                    bbox_diagonal=measurements.bounding_box.diagonal,
+                    mesh_cache=self._meshes,
+                )
+                self._analysis = ValidityResult(
+                    validation=validation,
+                    measurements=measurements,
+                )
+                self._store_analysis_cache(self._analysis)
+        return self._analysis
+
+    def deflection(self) -> float:
+        """Default tessellation deflection derived from this STEP's bbox."""
+        from cadgenbench.common.mesh import deflection_for_bbox
+
+        return deflection_for_bbox(self.analysis.measurements.bounding_box.diagonal)
+
+    def mesh(self, linear_deflection_mm: float | None = None):
+        """Validated mesh at *linear_deflection_mm*, cached by deflection."""
+        from cadgenbench.common.mesh import tessellate_shape, validate_mesh
+
+        deflection = self.deflection() if linear_deflection_mm is None else float(
+            linear_deflection_mm,
+        )
+        if deflection in self._meshes:
+            self._store_mesh_cache(deflection, self._meshes[deflection])
+        else:
+            cached = self._load_mesh_cache(deflection)
+            if cached is not None:
+                self._meshes[deflection] = cached
+                return cached
+            mesh = tessellate_shape(self.wrapped, deflection)
+            validate_mesh(mesh)
+            self._meshes[deflection] = mesh
+            self._store_mesh_cache(deflection, mesh)
+        return self._meshes[deflection]
+
+    def manifold(self, linear_deflection_mm: float | None = None):
+        """``manifold3d.Manifold`` for the cached validated mesh."""
+        from cadgenbench.eval.booleans import mesh_to_manifold
+
+        deflection = self.deflection() if linear_deflection_mm is None else float(
+            linear_deflection_mm,
+        )
+        if deflection not in self._manifolds:
+            self._manifolds[deflection] = mesh_to_manifold(self.mesh(deflection))
+        return self._manifolds[deflection]
+
+    def betti(self, linear_deflection_mm: float | None = None):
+        """Betti numbers for the cached validated mesh."""
+        from cadgenbench.eval.topo_match import compute_betti_from_mesh
+
+        deflection = self.deflection() if linear_deflection_mm is None else float(
+            linear_deflection_mm,
+        )
+        if deflection not in self._bettis:
+            self._bettis[deflection] = compute_betti_from_mesh(self.mesh(deflection))
+        return self._bettis[deflection]
+
+    def _cache_stem(self) -> str | None:
+        if self.mesh_cache_dir is None:
+            return None
+        stat = self.step_path.stat()
+        name = "".join(
+            c if c.isalnum() or c in "._-" else "_"
+            for c in self.step_path.stem
+        )
+        return f"{name}-{stat.st_size}-{stat.st_mtime_ns}"
+
+    def _mesh_cache_path(self, linear_deflection_mm: float) -> Path | None:
+        stem = self._cache_stem()
+        if stem is None:
+            return None
+        defl = f"{linear_deflection_mm:.12g}".replace(".", "p")
+        key = f"{stem}-{defl}.npz"
+        return Path(self.mesh_cache_dir) / key
+
+    def _analysis_cache_path(self) -> Path | None:
+        stem = self._cache_stem()
+        if stem is None:
+            return None
+        return Path(self.mesh_cache_dir) / f"{stem}-analysis.json"
+
+    def _load_analysis_cache(self) -> ValidityResult | None:
+        path = self._analysis_cache_path()
+        if path is None or not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text())
+            bb = data["measurements"]["bounding_box"]
+            measurements = Measurements(
+                solid_count=int(data["measurements"]["solid_count"]),
+                shell_count=int(data["measurements"]["shell_count"]),
+                face_count=int(data["measurements"]["face_count"]),
+                volume=float(data["measurements"]["volume"]),
+                bounding_box=BBox(
+                    x_min=float(bb["x_min"]),
+                    x_max=float(bb["x_max"]),
+                    y_min=float(bb["y_min"]),
+                    y_max=float(bb["y_max"]),
+                    z_min=float(bb["z_min"]),
+                    z_max=float(bb["z_max"]),
+                ),
+            )
+            validation = ValidationResult(
+                is_valid=bool(data["validation"]["is_valid"]),
+                is_watertight=bool(data["validation"]["is_watertight"]),
+                topology_errors=tuple(data["validation"]["topology_errors"]),
+            )
+            return ValidityResult(validation=validation, measurements=measurements)
+        except Exception:
+            return None
+
+    def _store_analysis_cache(self, analysis: ValidityResult) -> None:
+        path = self._analysis_cache_path()
+        if path is None or path.exists():
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        bb = analysis.measurements.bounding_box
+        data = {
+            "validation": {
+                "is_valid": analysis.validation.is_valid,
+                "is_watertight": analysis.validation.is_watertight,
+                "topology_errors": list(analysis.validation.topology_errors),
+            },
+            "measurements": {
+                "solid_count": analysis.measurements.solid_count,
+                "shell_count": analysis.measurements.shell_count,
+                "face_count": analysis.measurements.face_count,
+                "volume": analysis.measurements.volume,
+                "bounding_box": {
+                    "x_min": bb.x_min,
+                    "x_max": bb.x_max,
+                    "y_min": bb.y_min,
+                    "y_max": bb.y_max,
+                    "z_min": bb.z_min,
+                    "z_max": bb.z_max,
+                },
+            },
+        }
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            tmp.write_text(json.dumps(data, sort_keys=True))
+            tmp.replace(path)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+
+    def _load_mesh_cache(self, linear_deflection_mm: float) -> Mesh | None:
+        path = self._mesh_cache_path(linear_deflection_mm)
+        if path is None or not path.exists():
+            return None
+        try:
+            with np.load(path, allow_pickle=False) as data:
+                vertices = np.asarray(data["vertices"], dtype=np.float64)
+                triangles = np.asarray(data["triangles"], dtype=np.int64)
+                deflection = float(data["linear_deflection_mm"])
+            if abs(deflection - linear_deflection_mm) > 1e-12:
+                return None
+            return Mesh(
+                vertices=vertices,
+                triangles=triangles,
+                linear_deflection_mm=deflection,
+            )
+        except Exception:
+            # Corrupt or stale cache entries should never affect scoring.
+            return None
+
+    def _store_mesh_cache(self, linear_deflection_mm: float, mesh: object) -> None:
+        path = self._mesh_cache_path(linear_deflection_mm)
+        if path is None or path.exists() or not isinstance(mesh, Mesh):
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            with tmp.open("wb") as fh:
+                np.savez(
+                    fh,
+                    vertices=mesh.vertices,
+                    triangles=mesh.triangles,
+                    linear_deflection_mm=np.asarray(mesh.linear_deflection_mm),
+                )
+            tmp.replace(path)
+        except Exception:
+            tmp.unlink(missing_ok=True)
