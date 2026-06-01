@@ -40,6 +40,7 @@ of magnitude faster than the previous Chromium / three-cad-viewer path.
 from __future__ import annotations
 
 import io
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -401,6 +402,9 @@ def _parallel_scale_for_view(
     return max(half_h, half_w / aspect) * FRAME_MARGIN
 
 
+_RENDER_LOCK = threading.Lock()
+
+
 def _render_scene(
     *,
     shapes: list[tuple[pv.PolyData, tuple[float, float, float], float]],
@@ -412,42 +416,49 @@ def _render_scene(
     height: int,
 ) -> bytes:
     """Render one frame: shaded triangles + feature-edge overlay -> PNG bytes."""
-    pl = pv.Plotter(off_screen=True, window_size=(width, height))
-    try:
-        pl.set_background(BACKGROUND_RGB)
-        for body, rgb, alpha in shapes:
-            pl.add_mesh(
-                body,
-                color=rgb,
-                opacity=alpha,
-                smooth_shading=False,
-                show_edges=False,
-                ambient=0.45,
-                diffuse=0.65,
-                specular=0.10,
-                specular_power=15,
+    # VTK/OpenGL is not thread-safe and there is a single GL context per
+    # process. Baseline fixtures and compare-llms models both run as threads,
+    # so without serialisation concurrent renders contend on (or crash) the
+    # shared context. A process-global lock makes every render one-at-a-time;
+    # each render is short, so this is correct rather than a real bottleneck.
+    # (True render parallelism needs process/GPU isolation, e.g. HF Jobs.)
+    with _RENDER_LOCK:
+        pl = pv.Plotter(off_screen=True, window_size=(width, height))
+        try:
+            pl.set_background(BACKGROUND_RGB)
+            for body, rgb, alpha in shapes:
+                pl.add_mesh(
+                    body,
+                    color=rgb,
+                    opacity=alpha,
+                    smooth_shading=False,
+                    show_edges=False,
+                    ambient=0.45,
+                    diffuse=0.65,
+                    specular=0.10,
+                    specular_power=15,
+                )
+            for edges in edge_meshes:
+                if edges.n_points > 0:
+                    pl.add_mesh(edges, color=EDGE_RGB, line_width=EDGE_LINE_WIDTH)
+
+            eye, target, up = camera_placement(view, bbox_min, bbox_max)
+            cam = pl.camera
+            cam.position = tuple(map(float, eye))
+            cam.focal_point = tuple(map(float, target))
+            cam.up = tuple(map(float, up))
+            cam.parallel_projection = True
+            cam.parallel_scale = _parallel_scale_for_view(
+                bbox_min, bbox_max,
+                eye=eye, target=target, up=up,
+                window_w=width, window_h=height,
             )
-        for edges in edge_meshes:
-            if edges.n_points > 0:
-                pl.add_mesh(edges, color=EDGE_RGB, line_width=EDGE_LINE_WIDTH)
 
-        eye, target, up = camera_placement(view, bbox_min, bbox_max)
-        cam = pl.camera
-        cam.position = tuple(map(float, eye))
-        cam.focal_point = tuple(map(float, target))
-        cam.up = tuple(map(float, up))
-        cam.parallel_projection = True
-        cam.parallel_scale = _parallel_scale_for_view(
-            bbox_min, bbox_max,
-            eye=eye, target=target, up=up,
-            window_w=width, window_h=height,
-        )
-
-        arr = np.asarray(
-            pl.screenshot(return_img=True, transparent_background=False)
-        )
-    finally:
-        pl.close()
+            arr = np.asarray(
+                pl.screenshot(return_img=True, transparent_background=False)
+            )
+        finally:
+            pl.close()
 
     buf = io.BytesIO()
     Image.fromarray(arr).save(buf, format="PNG", optimize=True)
