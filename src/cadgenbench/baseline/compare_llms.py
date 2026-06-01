@@ -32,7 +32,7 @@ import argparse
 import json
 import logging
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -67,6 +67,39 @@ DEFAULT_COMPARE_LABELS: tuple[str, ...] = (
     "Gemini 3.1 Pro",
     "GPT-5.5",
 )
+
+
+def _run_model_process(
+    *,
+    idx: int,
+    total_models: int,
+    model: str,
+    tasks: list[dict],
+    output_dir: Path,
+    base_timestamp: str,
+    parallel: int,
+    fixture_retries: int,
+    config_kwargs: dict,
+) -> tuple[int, str, Path, list[tuple[str, object]]]:
+    """Run one model's full fixture set in a separate process."""
+    config = AgentConfig(model=model, **config_kwargs)
+    model_slug = model.split("/")[-1]
+    run_dir = output_dir / f"{base_timestamp}_{model_slug}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "params.json").write_text(json.dumps({
+        "timestamp": base_timestamp,
+        "fixtures": [t["name"] for t in tasks],
+        "config": asdict(config),
+        "parallel": parallel,
+    }, indent=2))
+    results = _run_all(
+        tasks,
+        config=config,
+        run_dir=run_dir,
+        parallel=parallel,
+        fixture_retries=fixture_retries,
+    )
+    return idx, f"[{idx + 1}/{total_models}] {model}", run_dir, results
 
 
 # ---------------------------------------------------------------------------
@@ -222,51 +255,44 @@ def run(args: argparse.Namespace) -> int:
         print(f"Parallel: {parallel} fixtures within each model's run")
     print()
 
-    def _run_model(idx: int, model: str) -> Path:
-        print(f"=== [{idx + 1}/{len(resolved_models)}] {model} starting ===", flush=True)
-        config = AgentConfig(
-            model=model,
-            temperature=args.temperature,
-            max_tokens=args.max_tokens_per_call,
-            max_total_tokens=args.max_tokens,
-            max_iterations=args.max_iter,
-            max_duration_s=args.max_duration,
-            runner_timeout=args.timeout,
-            llm_timeout=args.llm_timeout,
-            reasoning_effort=args.reasoning_effort,
-        )
-        model_slug = model.split("/")[-1]
-        run_dir = output_dir / f"{base_timestamp}_{model_slug}"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "params.json").write_text(json.dumps({
-            "timestamp": base_timestamp,
-            "fixtures": [t["name"] for t in tasks],
-            "config": asdict(config),
-            "parallel": parallel,
-        }, indent=2))
-        results = _run_all(
-            tasks, config=config, run_dir=run_dir,
-            parallel=parallel, fixture_retries=fixture_retries,
-        )
-        print(f"=== [{idx + 1}/{len(resolved_models)}] {model} done ===", flush=True)
-        _print_summary(results)
-        return run_dir
+    config_kwargs = {
+        "temperature": args.temperature,
+        "max_tokens": args.max_tokens_per_call,
+        "max_total_tokens": args.max_tokens,
+        "max_iterations": args.max_iter,
+        "max_duration_s": args.max_duration,
+        "runner_timeout": args.timeout,
+        "llm_timeout": args.llm_timeout,
+        "reasoning_effort": args.reasoning_effort,
+    }
 
-    # Models run concurrently: each is a separate provider/subscription, so
-    # there's no shared rate limit, and wall-clock is dominated by LLM latency
-    # (the GIL is released during the network wait). Mirrors the
-    # ThreadPoolExecutor that _run_all already uses for fixtures.
+    # Models run concurrently in separate processes. This avoids the GIL for
+    # CPU-heavy steps (e.g., tessellation/eval) while still overlapping LLM IO.
     print(f"Running {len(resolved_models)} models in parallel\n")
     run_dirs: list[Path | None] = [None] * len(resolved_models)
-    with ThreadPoolExecutor(max_workers=len(resolved_models)) as pool:
+    with ProcessPoolExecutor(max_workers=len(resolved_models)) as pool:
         futures = {
-            pool.submit(_run_model, i, m): i
+            pool.submit(
+                _run_model_process,
+                idx=i,
+                total_models=len(resolved_models),
+                model=m,
+                tasks=tasks,
+                output_dir=output_dir,
+                base_timestamp=base_timestamp,
+                parallel=parallel,
+                fixture_retries=fixture_retries,
+                config_kwargs=config_kwargs,
+            ): i
             for i, m in enumerate(resolved_models)
         }
         for future in as_completed(futures):
             i = futures[future]
             try:
-                run_dirs[i] = future.result()
+                idx, label, run_dir, results = future.result()
+                print(f"=== {label} done ===", flush=True)
+                _print_summary(results)
+                run_dirs[idx] = run_dir
             except Exception:
                 logging.getLogger(__name__).exception(
                     "Model %s raised; excluding it from the comparison",

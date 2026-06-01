@@ -287,6 +287,7 @@ def tessellate_shape(
     for ei in range(1, edge_faces.Extent() + 1):
         edge = TopoDS.Edge_s(edge_faces.FindKey(ei))
         edge_loc = edge.Location()
+        edge_curves = tuple(edge.TShape().Curves())
         node_lists: list[list[int]] = []
         seen_tri: set[int] = set()
         for adj_face in edge_faces.FindFromIndex(ei):
@@ -302,16 +303,26 @@ def tessellate_shape(
             seen_tri.add(id(tri))
             base = face_base[fi]
             pred = loc.Predivided(edge_loc)
-            for cr in edge.TShape().Curves():
+            for cr in edge_curves:
                 if not cr.IsPolygonOnTriangulation(tri, pred):
                     continue
                 p1 = cr.PolygonOnTriangulation()
                 if p1 is not None:
-                    node_lists.append([base + n - 1 for n in p1.Nodes()])
+                    p1_nodes = np.fromiter(
+                        p1.Nodes(),
+                        dtype=np.int64,
+                        count=p1.NbNodes(),
+                    )
+                    node_lists.append((p1_nodes + (base - 1)).tolist())
                 if cr.IsPolygonOnClosedTriangulation():
                     p2 = cr.PolygonOnTriangulation2()
                     if p2 is not None:
-                        node_lists.append([base + n - 1 for n in p2.Nodes()])
+                        p2_nodes = np.fromiter(
+                            p2.Nodes(),
+                            dtype=np.int64,
+                            count=p2.NbNodes(),
+                        )
+                        node_lists.append((p2_nodes + (base - 1)).tolist())
         # Every array for one edge is indexed along that edge's single
         # curve parametrization, so node k of any array is the same point
         # as node k of every other. Merge by index, never by coordinates.

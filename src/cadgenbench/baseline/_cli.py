@@ -35,8 +35,7 @@ import json
 import logging
 import sys
 import textwrap
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -278,10 +277,17 @@ def _find_candidate_artifact(result: AgentResult) -> Path | None:
 
 def _print_metric_summary(data: dict, *, printer) -> None:
     """Print CAD score + per-component scores + interface + validity for one fixture."""
+    for line in _metric_summary_lines(data):
+        printer(line)
+
+
+def _metric_summary_lines(data: dict) -> list[str]:
+    """Build summary lines for one fixture's metric output."""
+    lines: list[str] = []
     validation = data.get("validation") or {}
     is_valid = validation.get("is_valid")
     is_watertight = validation.get("is_watertight")
-    printer(f"  CAD validity: valid={is_valid}, watertight={is_watertight}")
+    lines.append(f"  CAD validity: valid={is_valid}, watertight={is_watertight}")
 
     gt_metrics = data.get("gt_metrics") or {}
     cad_score = data.get("cad_score")
@@ -304,13 +310,13 @@ def _print_metric_summary(data: dict, *, printer) -> None:
             if meta else f"{key}={value:.3f}",
         )
     if parts:
-        printer(f"  GT metrics: {', '.join(parts)}")
+        lines.append(f"  GT metrics: {', '.join(parts)}")
 
     interface = data.get("interface_metrics") or {}
     iface_score = interface.get("score")
     if iface_score is not None:
         ctx_count = len(interface.get("contexts") or {})
-        printer(f"  Interface: score={iface_score:.3f} (contexts={ctx_count})")
+        lines.append(f"  Interface: score={iface_score:.3f} (contexts={ctx_count})")
 
     topology = data.get("topology_metrics") or {}
     topo_score = topology.get("score")
@@ -319,10 +325,94 @@ def _print_metric_summary(data: dict, *, printer) -> None:
         gt = topology.get("gt") or {}
         cand_sig = f"({cand.get('b0')}, {cand.get('b1')}, {cand.get('b2')})"
         gt_sig = f"({gt.get('b0')}, {gt.get('b1')}, {gt.get('b2')})"
-        printer(
+        lines.append(
             f"  Topo: score={topo_score:.3f} "
             f"betti(cand)={cand_sig} vs betti(gt)={gt_sig}",
         )
+    return lines
+
+
+def _run_one_task(
+    task: dict,
+    *,
+    config: AgentConfig,
+    run_dir: Path,
+) -> tuple[str, AgentResult, list[str]]:
+    """Run one fixture and return its logs plus baseline result."""
+    name = task["name"]
+    description = task["description"]
+    task_type = task.get("task_type", "generation")
+
+    input_files = None
+    raw_files = task.get("input_files")
+    if raw_files:
+        inputs_dir = task["_inputs_dir"]
+        input_files = [Path(inputs_dir) / f for f in raw_files]
+
+    logs = [
+        f"\n--- {name} ({task_type}) ---",
+        f"Task: {description[:100]}...",
+    ]
+    if input_files:
+        logs.append(f"Input files: {', '.join(f.name for f in input_files)}")
+
+    out_dir = run_dir / name
+    result = run_agent(
+        description,
+        config=config,
+        input_files=input_files,
+        output_dir=out_dir,
+    )
+    logs.append(f"Results saved to: {out_dir}")
+
+    candidate = _find_candidate_artifact(result)
+    gt_dir = Path(task["_gt_dir"]) if task.get("_gt_dir") else None
+    gt_step = gt_dir / GT_STEP_NAME if gt_dir else None
+
+    if gt_step and gt_step.exists() and candidate is not None:
+        evaluate_result(out_dir, gt_dir, candidate_step=candidate)
+        data = json.loads((out_dir / "result.json").read_text())
+        logs.extend(_metric_summary_lines(data))
+    elif candidate is not None:
+        evaluate_candidate_only(candidate, out_dir)
+    else:
+        logs.append("  Evaluation skipped: no output.step produced")
+
+    return name, result, logs
+
+
+def _run_one_with_retry(
+    task: dict,
+    *,
+    config: AgentConfig,
+    run_dir: Path,
+    fixture_retries: int,
+) -> tuple[str, AgentResult, list[str]]:
+    """Run fixture; on exhausted LLM retries, restart from turn 0."""
+    name = task["name"]
+    attempts = fixture_retries + 1
+    retry_logs: list[str] = []
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            fixture_name, result, logs = _run_one_task(
+                task,
+                config=config,
+                run_dir=run_dir,
+            )
+            return fixture_name, result, [*retry_logs, *logs]
+        except RuntimeError as exc:
+            if "LLM call failed after" not in str(exc):
+                raise
+            last_exc = exc
+            if attempt < attempts:
+                retry_logs.append(
+                    f"\n--- {name} fixture retry "
+                    f"({attempt}/{fixture_retries}) after LLM "
+                    f"exhaustion; restarting from turn 0 ---",
+                )
+    assert last_exc is not None
+    raise last_exc
 
 
 def _run_all(
@@ -334,102 +424,45 @@ def _run_all(
     fixture_retries: int,
 ) -> list[tuple[str, AgentResult]]:
     """Execute every task, sequentially or in parallel, with per-fixture retry."""
-    print_lock = threading.Lock()
-
-    def tprint(*a: object, **kw: object) -> None:
-        with print_lock:
-            print(*a, **kw)
-
-    def run_one(task: dict) -> tuple[str, AgentResult]:
-        name = task["name"]
-        description = task["description"]
-        task_type = task.get("task_type", "generation")
-
-        input_files = None
-        raw_files = task.get("input_files")
-        if raw_files:
-            inputs_dir = task["_inputs_dir"]
-            input_files = [Path(inputs_dir) / f for f in raw_files]
-
-        tprint(f"\n--- {name} ({task_type}) ---")
-        tprint(f"Task: {description[:100]}...")
-        if input_files:
-            tprint(f"Input files: {', '.join(f.name for f in input_files)}")
-
-        out_dir = run_dir / name
-        result = run_agent(
-            description, config=config, input_files=input_files,
-            output_dir=out_dir,
-        )
-        tprint(f"Results saved to: {out_dir}")
-
-        candidate = _find_candidate_artifact(result)
-        gt_dir = Path(task["_gt_dir"]) if task.get("_gt_dir") else None
-        gt_step = gt_dir / GT_STEP_NAME if gt_dir else None
-
-        if gt_step and gt_step.exists() and candidate is not None:
-            evaluate_result(out_dir, gt_dir, candidate_step=candidate)
-            data = json.loads((out_dir / "result.json").read_text())
-            _print_metric_summary(data, printer=tprint)
-        elif candidate is not None:
-            evaluate_candidate_only(candidate, out_dir)
-        else:
-            tprint("  Evaluation skipped: no output.step produced")
-
-        return name, result
-
-    def run_one_with_retry(task: dict) -> tuple[str, AgentResult]:
-        """Run a fixture; on exhausted LLM retries, restart from turn 0.
-
-        The inner LLMClient already retries transient 5xx/429 for up to
-        ~6 min per call. If that budget is still not enough (sustained
-        provider outage) a ``RuntimeError`` with "LLM call failed after"
-        bubbles up and kills the fixture. This wrapper re-runs the entire
-        fixture from turn 0 -- token cost is re-paid, but the fixture can
-        survive outages longer than the per-call retry window. Non-LLM
-        exceptions are not retried.
-        """
-        name = task["name"]
-        attempts = fixture_retries + 1
-        last_exc: Exception | None = None
-        for attempt in range(1, attempts + 1):
-            try:
-                return run_one(task)
-            except RuntimeError as exc:
-                if "LLM call failed after" not in str(exc):
-                    raise
-                last_exc = exc
-                if attempt < attempts:
-                    tprint(
-                        f"\n--- {name} fixture retry "
-                        f"({attempt}/{fixture_retries}) after LLM "
-                        f"exhaustion; restarting from turn 0 ---",
-                    )
-        assert last_exc is not None
-        raise last_exc
-
     all_results: list[tuple[str, AgentResult]] = []
     if parallel <= 1:
         for task in tasks:
             try:
-                all_results.append(run_one_with_retry(task))
+                name, result, logs = _run_one_with_retry(
+                    task,
+                    config=config,
+                    run_dir=run_dir,
+                    fixture_retries=fixture_retries,
+                )
+                for line in logs:
+                    print(line)
+                all_results.append((name, result))
             except Exception:
-                tprint(f"\n--- {task['name']} FAILED ---")
+                print(f"\n--- {task['name']} FAILED ---")
                 logging.getLogger(__name__).exception(
                     "Fixture %s raised an exception", task["name"],
                 )
     else:
-        with ThreadPoolExecutor(max_workers=parallel) as pool:
+        with ProcessPoolExecutor(max_workers=parallel) as pool:
             futures = {
-                pool.submit(run_one_with_retry, task): task["name"]
+                pool.submit(
+                    _run_one_with_retry,
+                    task,
+                    config=config,
+                    run_dir=run_dir,
+                    fixture_retries=fixture_retries,
+                ): task["name"]
                 for task in tasks
             }
             for future in as_completed(futures):
                 name = futures[future]
                 try:
-                    all_results.append(future.result())
+                    fixture_name, result, logs = future.result()
+                    for line in logs:
+                        print(line)
+                    all_results.append((fixture_name, result))
                 except Exception:
-                    tprint(f"\n--- {name} FAILED ---")
+                    print(f"\n--- {name} FAILED ---")
                     logging.getLogger(__name__).exception(
                         "Fixture %s raised an exception", name,
                     )
@@ -440,7 +473,7 @@ def _run_all(
     try:
         from cadgenbench.eval.run_summary import write_run_summary  # noqa: PLC0415
         summary_path = write_run_summary(run_dir)
-        tprint(f"Wrote {summary_path.name}")
+        print(f"Wrote {summary_path.name}")
     except Exception:
         logging.getLogger(__name__).exception(
             "write_run_summary failed for %s", run_dir,
