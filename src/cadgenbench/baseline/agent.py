@@ -54,6 +54,15 @@ logger = logging.getLogger(__name__)
 
 _CODE_BLOCK_RE = re.compile(r"```python\s*\n(.*?)```", re.DOTALL)
 _DONE_RE = re.compile(r"\[DONE\]")
+# Any fenced code block (``` ... ```), language-agnostic. Stripped before
+# searching for the [DONE] marker so a literal "[DONE]" inside code (e.g.
+# print("[DONE]") or a comment) never triggers completion.
+_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+
+
+def _has_done_signal(text: str) -> bool:
+    """True iff ``[DONE]`` appears outside of any fenced code block."""
+    return bool(_DONE_RE.search(_FENCE_RE.sub("", text)))
 
 # Hardcoded for the BREP / build123d pipeline (the only kernel supported).
 ARTIFACT_FILENAME = "output.step"
@@ -83,13 +92,19 @@ def extract_code(text: str) -> str | None:
 # Code execution
 # ---------------------------------------------------------------------------
 
-def _snapshot_files(directory: Path) -> dict[str, float]:
-    """Return {filename: mtime} for all files in directory."""
-    result = {}
+def _snapshot_files(directory: Path) -> dict[str, tuple[float, int]]:
+    """Return {filename: (mtime, size)} for all files in directory.
+
+    Tracks size alongside mtime so a same-second overwrite that changes the
+    file's size is still detected on coarse-resolution filesystems (where
+    mtime alone would compare equal).
+    """
+    result: dict[str, tuple[float, int]] = {}
     if directory.exists():
         for f in directory.iterdir():
             if f.is_file() and not f.name.startswith("_"):
-                result[f.name] = f.stat().st_mtime
+                st = f.stat()
+                result[f.name] = (st.st_mtime, st.st_size)
     return result
 
 
@@ -125,18 +140,21 @@ def execute_code(
         success = False
         stdout = exc.stdout or ""
         stderr = exc.stderr or ""
+        # Keep any partial stderr captured before the kill: a traceback in
+        # progress often shows where the script hung.
         error_text = f"Script timed out after {timeout}s"
+        partial = stderr.strip()
+        if partial:
+            error_text += f"\n--- partial stderr before timeout ---\n{partial}"
 
     script_path.unlink(missing_ok=True)
 
     after = _snapshot_files(work_dir)
     new_or_modified = {}
-    for name, mtime in after.items():
-        if name not in before or mtime > before[name]:
-            try:
-                new_or_modified[name] = (work_dir / name).stat().st_size
-            except OSError:
-                pass
+    for name, (mtime, size) in after.items():
+        prev = before.get(name)
+        if prev is None or mtime > prev[0] or size != prev[1]:
+            new_or_modified[name] = size
 
     return CodeExecution(
         code=code,
@@ -279,6 +297,25 @@ def _file_listing(work_dir: Path) -> str:
 # Feedback formatting
 # ---------------------------------------------------------------------------
 
+def _truncate_middle(text: str, limit: int) -> str:
+    """Truncate *text* to ~*limit* chars, keeping the head and the tail.
+
+    Used for stderr: Python tracebacks put the actual ``ExceptionType:
+    message`` line at the very end, so a head-only truncation would drop
+    the single most useful line. Keep a small head (the failing call site)
+    plus a larger tail (the exception itself).
+    """
+    if len(text) <= limit:
+        return text
+    head = limit // 4
+    tail = limit - head
+    return (
+        f"{text[:head]}\n"
+        f"... (truncated, {len(text)} chars total) ...\n"
+        f"{text[-tail:]}"
+    )
+
+
 def format_execution_feedback(
     executions: list[CodeExecution],
     work_dir: Path,
@@ -303,9 +340,7 @@ def format_execution_feedback(
             text_parts.append(f"stdout:\n```\n{stdout_truncated}\n```")
 
         if not exe.success and exe.stderr.strip():
-            stderr_truncated = exe.stderr[:2000]
-            if len(exe.stderr) > 2000:
-                stderr_truncated += f"\n... (truncated, {len(exe.stderr)} chars total)"
+            stderr_truncated = _truncate_middle(exe.stderr, 2000)
             text_parts.append(f"stderr:\n```\n{stderr_truncated}\n```")
 
         if exe.files_produced:
@@ -323,17 +358,28 @@ def format_execution_feedback(
 
     content.append({"type": "text", "text": "\n\n".join(text_parts)})
 
-    # Manually-saved PNGs (agent-written render code)
-    for f in sorted(work_dir.iterdir()):
-        if f.suffix.lower() == ".png" and f.is_file():
-            try:
-                data = base64.b64encode(f.read_bytes()).decode()
-                content.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{data}"},
-                })
-            except Exception:
-                logger.warning("Failed to read PNG %s", f, exc_info=True)
+    # Manually-saved PNGs the agent rendered *this turn*. Restrict to the
+    # files this turn's executions actually created/modified (not everything
+    # on disk) so stale one-off renders from earlier turns don't keep riding
+    # along and multiplying the request size.
+    produced_pngs = sorted({
+        name
+        for exe in executions
+        for name in exe.files_produced
+        if name.lower().endswith(".png")
+    })
+    for name in produced_pngs:
+        f = work_dir / name
+        if not f.is_file():
+            continue
+        try:
+            data = base64.b64encode(f.read_bytes()).decode()
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{data}"},
+            })
+        except Exception:
+            logger.warning("Failed to read PNG %s", f, exc_info=True)
 
     # Auto iso render (in-memory, not written to disk)
     if auto_iso is not None:
@@ -409,6 +455,12 @@ def run_agent(
     turns: list[TurnRecord] = []
     total_tokens = 0
     stopped_reason = "max_iterations"
+    # Whether the agent has been shown the auto validation + render of
+    # output.step at least once. Gates [DONE]: the first time the artifact is
+    # reviewed we defer and require re-confirmation; after that a repeated
+    # [DONE] is accepted even if the agent re-ran code that turn (otherwise a
+    # model that always emits a code block could never satisfy the gate).
+    artifact_feedback_shown = False
     t0 = time.monotonic()
 
     def _build_result() -> AgentResult:
@@ -485,79 +537,10 @@ def run_agent(
             print(f"  {tag} No code block in response", flush=True)
             auto_text, auto_iso = "", None
 
-        if _DONE_RE.search(assistant_text):
-            # Hard gate: require output.step before accepting [DONE]
-            if not (work_dir / ARTIFACT_FILENAME).exists():
-                rejection = (
-                    f"⚠️ `[DONE]` rejected, `{ARTIFACT_FILENAME}` was not found in the "
-                    "working directory.  Make sure your script writes "
-                    f"`{ARTIFACT_FILENAME}` before signaling done.\n\n"
-                    + _file_listing(work_dir)
-                )
-                print(f"  {tag} [DONE] rejected (no {ARTIFACT_FILENAME})", flush=True)
-                turns.append(TurnRecord(
-                    turn=turn_idx,
-                    assistant_message=assistant_text,
-                    code_executions=executions,
-                    prompt_tokens=completion.prompt_tokens,
-                    completion_tokens=completion.completion_tokens,
-                    reasoning_tokens=completion.reasoning_tokens,
-                    duration_s=time.monotonic() - turn_t0,
-                ))
-                _save_incremental()
-                messages.append({"role": "assistant", "content": assistant_text})
-                messages.append({"role": "user", "content": rejection})
-                continue
+        done_signaled = _has_done_signal(assistant_text)
 
-            # If auto-feedback was generated this turn the agent hasn't seen it
-            # yet, send it back and require explicit re-confirmation so the
-            # agent always reviews the render+validation before finishing.
-            if auto_text or auto_iso is not None:
-                print(f"  {tag} [DONE] deferred, sending unseen auto-feedback first", flush=True)
-                turns.append(TurnRecord(
-                    turn=turn_idx,
-                    assistant_message=assistant_text,
-                    code_executions=executions,
-                    prompt_tokens=completion.prompt_tokens,
-                    completion_tokens=completion.completion_tokens,
-                    reasoning_tokens=completion.reasoning_tokens,
-                    duration_s=time.monotonic() - turn_t0,
-                ))
-                _save_incremental()
-                messages.append({"role": "assistant", "content": assistant_text})
-                deferred_content = format_execution_feedback(
-                    executions, work_dir, auto_text=auto_text, auto_iso=auto_iso,
-                )
-                # Prepend a note explaining why we're deferring [DONE]
-                note = (
-                    "Your `[DONE]` signal was received, but you haven't yet reviewed "
-                    "the automatic validation and render below.  "
-                    "Please inspect them and respond with `[DONE]` again if you are "
-                    "satisfied, or continue iterating if you see issues.\n\n"
-                )
-                if deferred_content and deferred_content[0].get("type") == "text":
-                    deferred_content[0]["text"] = note + deferred_content[0]["text"]
-                else:
-                    deferred_content.insert(0, {"type": "text", "text": note})
-                messages.append({"role": "user", "content": deferred_content})
-                continue
-
-            turns.append(TurnRecord(
-                turn=turn_idx,
-                assistant_message=assistant_text,
-                code_executions=executions,
-                prompt_tokens=completion.prompt_tokens,
-                completion_tokens=completion.completion_tokens,
-                reasoning_tokens=completion.reasoning_tokens,
-                duration_s=time.monotonic() - turn_t0,
-            ))
-            stopped_reason = "done"
-            print(f"  {tag} Agent signaled [DONE]", flush=True)
-            messages.append({"role": "assistant", "content": assistant_text})
-            _save_incremental()
-            break
-
-        turn_duration = time.monotonic() - turn_t0
+        # Record this turn once, then append the assistant message so the
+        # persisted conversation is always complete before any save.
         turns.append(TurnRecord(
             turn=turn_idx,
             assistant_message=assistant_text,
@@ -565,11 +548,71 @@ def run_agent(
             prompt_tokens=completion.prompt_tokens,
             completion_tokens=completion.completion_tokens,
             reasoning_tokens=completion.reasoning_tokens,
-            duration_s=turn_duration,
+            duration_s=time.monotonic() - turn_t0,
         ))
-
-        # Append assistant message before saving so conversation.json is complete.
         messages.append({"role": "assistant", "content": assistant_text})
+
+        artifact_exists = (work_dir / ARTIFACT_FILENAME).exists()
+        last_exe_failed = bool(executions) and not executions[-1].success
+
+        def _send_feedback(note: str | None = None) -> None:
+            content = format_execution_feedback(
+                executions, work_dir, auto_text=auto_text, auto_iso=auto_iso,
+            )
+            if note:
+                if content and content[0].get("type") == "text":
+                    content[0]["text"] = note + content[0]["text"]
+                else:
+                    content.insert(0, {"type": "text", "text": note})
+            messages.append({"role": "user", "content": content})
+
+        if done_signaled:
+            # Hard gate: require output.step before accepting [DONE].
+            if not artifact_exists:
+                print(f"  {tag} [DONE] rejected (no {ARTIFACT_FILENAME})", flush=True)
+                messages.append({"role": "user", "content": (
+                    f"⚠️ `[DONE]` rejected, `{ARTIFACT_FILENAME}` was not found in the "
+                    "working directory.  Make sure your script writes "
+                    f"`{ARTIFACT_FILENAME}` before signaling done.\n\n"
+                    + _file_listing(work_dir)
+                )})
+                _save_incremental()
+                continue
+
+            # Don't finish on a failed script: the artifact may be stale (the
+            # failed run didn't regenerate it). Show the failure and let the
+            # agent fix it, then re-confirm on a clean run.
+            if last_exe_failed:
+                print(f"  {tag} [DONE] deferred, last script failed", flush=True)
+                _send_feedback(
+                    "Your `[DONE]` signal was received, but the script above failed, "
+                    f"so `{ARTIFACT_FILENAME}` may be stale.  Fix the error and "
+                    "re-export, then signal `[DONE]` again.\n\n"
+                )
+                _save_incremental()
+                continue
+
+            # Require the agent to have reviewed the auto validation + render of
+            # output.step at least once before accepting [DONE]. Fires only on
+            # the first review; afterwards a repeated [DONE] is accepted even if
+            # the agent re-ran code, so a model that always emits a code block
+            # can still finish.
+            if (auto_text or auto_iso is not None) and not artifact_feedback_shown:
+                print(f"  {tag} [DONE] deferred, sending unseen auto-feedback first", flush=True)
+                _send_feedback(
+                    "Your `[DONE]` signal was received, but you haven't yet reviewed "
+                    "the automatic validation and render below.  "
+                    "Please inspect them and respond with `[DONE]` again if you are "
+                    "satisfied, or continue iterating if you see issues.\n\n"
+                )
+                artifact_feedback_shown = True
+                _save_incremental()
+                continue
+
+            stopped_reason = "done"
+            print(f"  {tag} Agent signaled [DONE]", flush=True)
+            _save_incremental()
+            break
 
         if budget_exceeded:
             stopped_reason = "max_tokens"
@@ -578,10 +621,11 @@ def run_agent(
             break
 
         if executions:
-            feedback_content = format_execution_feedback(
-                executions, work_dir, auto_text=auto_text, auto_iso=auto_iso,
-            )
-            messages.append({"role": "user", "content": feedback_content})
+            _send_feedback()
+            # Mark the artifact as reviewed once we've shown its validation/
+            # render, so a later [DONE] doesn't get deferred indefinitely.
+            if auto_text or auto_iso is not None:
+                artifact_feedback_shown = True
         else:
             messages.append({
                 "role": "user",

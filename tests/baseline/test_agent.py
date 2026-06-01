@@ -9,6 +9,8 @@ import pytest
 
 from cadgenbench.baseline.types import AgentConfig, AgentResult, CodeExecution, TurnRecord
 from cadgenbench.baseline.agent import (
+    _has_done_signal,
+    _truncate_middle,
     execute_code,
     extract_code,
     extract_code_blocks,
@@ -117,6 +119,49 @@ class TestExtractCode:
 
 
 # ---------------------------------------------------------------------------
+# _has_done_signal ([DONE] must be outside code blocks)
+# ---------------------------------------------------------------------------
+
+class TestHasDoneSignal:
+
+    def test_done_in_prose(self) -> None:
+        assert _has_done_signal("Looks good. [DONE]")
+
+    def test_done_only_inside_code_block_ignored(self) -> None:
+        assert not _has_done_signal("```python\nprint('[DONE]')\n```")
+
+    def test_done_in_code_comment_ignored(self) -> None:
+        text = "Here:\n```python\nx = 1  # [DONE]\n```\nstill working"
+        assert not _has_done_signal(text)
+
+    def test_done_after_code_block_detected(self) -> None:
+        assert _has_done_signal("```python\nbuild()\n```\n\n[DONE]")
+
+    def test_no_done(self) -> None:
+        assert not _has_done_signal("just iterating")
+
+
+# ---------------------------------------------------------------------------
+# _truncate_middle (stderr keeps the exception line at the tail)
+# ---------------------------------------------------------------------------
+
+class TestTruncateMiddle:
+
+    def test_short_text_unchanged(self) -> None:
+        assert _truncate_middle("short", 100) == "short"
+
+    def test_keeps_head_and_tail(self) -> None:
+        text = "HEAD" + ("x" * 5000) + "ValueError: the real error"
+        out = _truncate_middle(text, 500)
+        assert len(out) < len(text)
+        assert out.startswith("HEAD")
+        # The exception line lives at the very end of a traceback; it must
+        # survive truncation.
+        assert "ValueError: the real error" in out
+        assert "truncated" in out
+
+
+# ---------------------------------------------------------------------------
 # execute_code
 # ---------------------------------------------------------------------------
 
@@ -192,6 +237,28 @@ class TestFormatExecutionFeedback:
         image_blocks = [b for b in content if b.get("type") == "image_url"]
         assert len(image_blocks) == 1
 
+    def test_only_this_turns_pngs_attached(self, tmp_path: Path) -> None:
+        # A stale render left on disk from an earlier turn must NOT ride along;
+        # only PNGs this turn's execution produced get attached.
+        (tmp_path / "stale.png").write_bytes(b"\x89PNG stale")
+        (tmp_path / "fresh.png").write_bytes(b"\x89PNG fresh")
+        exe = CodeExecution(
+            code="pass", success=True, stdout="", stderr="",
+            files_produced={"fresh.png": 10}, duration_s=0.1,
+        )
+        content = format_execution_feedback([exe], tmp_path)
+        image_blocks = [b for b in content if b.get("type") == "image_url"]
+        assert len(image_blocks) == 1
+
+    def test_long_stderr_keeps_tail(self, tmp_path: Path) -> None:
+        stderr = "Traceback...\n" + ("frame\n" * 2000) + "RuntimeError: boom"
+        exe = CodeExecution(
+            code="bad", success=False, stdout="", stderr=stderr,
+            files_produced={}, duration_s=0.1,
+        )
+        text = format_execution_feedback([exe], tmp_path)[0]["text"]
+        assert "RuntimeError: boom" in text
+
     def test_multiple_scripts_labeled(self, tmp_path: Path) -> None:
         exes = [
             CodeExecution("a()", True, "", "", {}, 0.1),
@@ -220,6 +287,45 @@ class TestRunAgentDoneSignal:
         assert result.stopped_reason == "done"
         assert result.completed
         assert len(result.turns) == 1
+
+
+class TestRunAgentDoneDeferral:
+    """The [DONE] gate must (a) defer once so the agent reviews the auto
+    validation + render, then (b) accept on re-confirmation -- even if the
+    agent keeps emitting a code block every turn (otherwise such a model
+    could never finish and would always hit max_iterations)."""
+
+    @patch(
+        "cadgenbench.baseline.agent._auto_validate_and_render",
+        return_value=("Valid: True", None),
+    )
+    @patch("cadgenbench.baseline.agent.execute_code")
+    def test_done_with_code_every_turn_still_finishes(self, mock_exec, _mock_auto):
+        mock_exec.side_effect = _success_exec_with_artifact
+        # Both turns carry [DONE] *and* a code block.
+        client = _make_client(_make_done_completion(), _make_done_completion())
+        config = AgentConfig(max_iterations=10)
+        result = run_agent("Build a box", config=config, client=client)
+
+        assert result.stopped_reason == "done"
+        assert result.completed
+        # Turn 0 deferred (first review), turn 1 accepted.
+        assert len(result.turns) == 2
+
+    @patch(
+        "cadgenbench.baseline.agent._auto_validate_and_render",
+        return_value=("Valid: True", None),
+    )
+    @patch("cadgenbench.baseline.agent.execute_code")
+    def test_done_only_inside_code_block_does_not_finish(self, mock_exec, _mock_auto):
+        mock_exec.side_effect = _success_exec_with_artifact
+        code_only_done = _make_completion(content="```python\nprint('[DONE]')\n```")
+        client = _make_client(code_only_done)
+        config = AgentConfig(max_iterations=1)
+        result = run_agent("Build a box", config=config, client=client)
+
+        assert result.stopped_reason == "max_iterations"
+        assert not result.completed
 
 
 class TestRunAgentMaxIterations:

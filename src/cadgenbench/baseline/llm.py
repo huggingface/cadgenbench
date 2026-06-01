@@ -213,7 +213,7 @@ _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 # Matches a leaked ``</think>`` close tag without a preceding ``<think>`` -
 # i.e. the provider dumped raw reasoning text then the closing delimiter then
 # the real answer. We take everything after the last ``</think>``.
-_LEAKED_CLOSE_RE = re.compile(r"^.*?</think>\s*", re.DOTALL)
+_LEAKED_CLOSE_RE = re.compile(r"^.*</think>\s*", re.DOTALL)
 
 
 def _strip_thinking(content: str) -> str:
@@ -455,20 +455,29 @@ class LLMClient:
         if details is not None:
             reasoning_tokens = getattr(details, "reasoning_tokens", None)
 
-        if not content and usage.completion_tokens > 0:
+        # Some providers omit one or more usage fields (None). Coerce to ints
+        # so the agent's running ``total_tokens`` budget arithmetic can't hit a
+        # TypeError mid-run; fall back to prompt+completion when total is absent.
+        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        total_tokens = int(getattr(usage, "total_tokens", 0) or 0) or (
+            prompt_tokens + completion_tokens
+        )
+
+        if not content and completion_tokens > 0:
             logger.warning(
                 "LLM returned empty content with %d completion tokens consumed "
                 "(reasoning_tokens=%s). Raise max_tokens if this is an open-weights "
                 "reasoning model whose chain-of-thought burned the output budget.",
-                usage.completion_tokens,
+                completion_tokens,
                 reasoning_tokens,
             )
 
         return CompletionResult(
             content=content,
-            prompt_tokens=usage.prompt_tokens,
-            completion_tokens=usage.completion_tokens,
-            total_tokens=usage.total_tokens,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
             model=response.model,
             raw=response,
             reasoning_tokens=reasoning_tokens,
