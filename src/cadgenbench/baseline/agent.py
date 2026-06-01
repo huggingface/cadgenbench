@@ -317,21 +317,24 @@ def _truncate_middle(text: str, limit: int) -> str:
 
 
 def format_execution_feedback(
-    executions: list[CodeExecution],
+    execution: CodeExecution | None,
     work_dir: Path,
     auto_text: str = "",
     auto_iso: bytes | None = None,
 ) -> list[dict[str, Any]]:
-    """Build a multimodal user message with execution results + auto feedback."""
+    """Build a multimodal user message for one turn's execution + auto feedback.
+
+    The agent runs exactly one code block per turn, so this takes a single
+    :class:`CodeExecution` (or ``None`` when the turn produced no runnable
+    code).
+    """
     content: list[dict[str, Any]] = []
     text_parts: list[str] = []
 
-    for i, exe in enumerate(executions):
-        label = f"Script {i}" if len(executions) > 1 else "Execution"
-        if exe.success:
-            text_parts.append(f"### {label}: SUCCESS ({exe.duration_s:.1f}s)")
-        else:
-            text_parts.append(f"### {label}: FAILED ({exe.duration_s:.1f}s)")
+    if execution is not None:
+        exe = execution
+        status = "SUCCESS" if exe.success else "FAILED"
+        text_parts.append(f"### Execution: {status} ({exe.duration_s:.1f}s)")
 
         if exe.stdout.strip():
             stdout_truncated = exe.stdout[:3000]
@@ -359,15 +362,13 @@ def format_execution_feedback(
     content.append({"type": "text", "text": "\n\n".join(text_parts)})
 
     # Manually-saved PNGs the agent rendered *this turn*. Restrict to the
-    # files this turn's executions actually created/modified (not everything
+    # files this turn's execution actually created/modified (not everything
     # on disk) so stale one-off renders from earlier turns don't keep riding
     # along and multiplying the request size.
-    produced_pngs = sorted({
-        name
-        for exe in executions
-        for name in exe.files_produced
-        if name.lower().endswith(".png")
-    })
+    files_produced = execution.files_produced if execution is not None else {}
+    produced_pngs = sorted(
+        name for name in files_produced if name.lower().endswith(".png")
+    )
     for name in produced_pngs:
         f = work_dir / name
         if not f.is_file():
@@ -513,7 +514,20 @@ def run_agent(
 
         assistant_text = completion.content
 
-        code = extract_code(assistant_text)
+        code_blocks = extract_code_blocks(assistant_text)
+        code = code_blocks[0] if code_blocks else None
+        # Single-block contract: we execute only the first ```python block.
+        # If the model emitted more, run the first and tell it so the dropped
+        # blocks aren't silently lost (the prompt asks for one self-contained
+        # block per turn).
+        multi_block_note = ""
+        if len(code_blocks) > 1:
+            multi_block_note = (
+                f"⚠️ Note: your response contained {len(code_blocks)} ```python "
+                "blocks, but only the first was executed.  Send exactly one "
+                "self-contained code block per turn."
+            )
+            print(f"  {tag} {len(code_blocks)} code blocks; ran first only", flush=True)
         executions: list[CodeExecution] = []
 
         if code is not None:
@@ -557,13 +571,17 @@ def run_agent(
 
         def _send_feedback(note: str | None = None) -> None:
             content = format_execution_feedback(
-                executions, work_dir, auto_text=auto_text, auto_iso=auto_iso,
+                executions[0] if executions else None,
+                work_dir, auto_text=auto_text, auto_iso=auto_iso,
             )
-            if note:
+            prefix = note or ""
+            if multi_block_note:
+                prefix += multi_block_note + "\n\n"
+            if prefix:
                 if content and content[0].get("type") == "text":
-                    content[0]["text"] = note + content[0]["text"]
+                    content[0]["text"] = prefix + content[0]["text"]
                 else:
-                    content.insert(0, {"type": "text", "text": note})
+                    content.insert(0, {"type": "text", "text": prefix})
             messages.append({"role": "user", "content": content})
 
         if done_signaled:

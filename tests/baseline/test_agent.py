@@ -212,7 +212,7 @@ class TestFormatExecutionFeedback:
             code="print('ok')", success=True, stdout="ok\n", stderr="",
             files_produced={"output.step": 4}, duration_s=1.0,
         )
-        content = format_execution_feedback([exe], tmp_path)
+        content = format_execution_feedback(exe, tmp_path)
         text_block = content[0]["text"]
         assert "SUCCESS" in text_block
         assert "output.step" in text_block
@@ -222,10 +222,16 @@ class TestFormatExecutionFeedback:
             code="bad", success=False, stdout="", stderr="NameError: x",
             files_produced={}, duration_s=0.5,
         )
-        content = format_execution_feedback([exe], tmp_path)
+        content = format_execution_feedback(exe, tmp_path)
         text_block = content[0]["text"]
         assert "FAILED" in text_block
         assert "NameError" in text_block
+
+    def test_no_execution_still_lists_files(self, tmp_path: Path) -> None:
+        # A turn with no runnable code passes execution=None; the message
+        # should still carry the working-directory listing.
+        content = format_execution_feedback(None, tmp_path)
+        assert "Working directory is empty." in content[0]["text"]
 
     def test_png_attached_as_image(self, tmp_path: Path) -> None:
         (tmp_path / "view.png").write_bytes(b"\x89PNG fake")
@@ -233,7 +239,7 @@ class TestFormatExecutionFeedback:
             code="pass", success=True, stdout="", stderr="",
             files_produced={"view.png": 9}, duration_s=0.1,
         )
-        content = format_execution_feedback([exe], tmp_path)
+        content = format_execution_feedback(exe, tmp_path)
         image_blocks = [b for b in content if b.get("type") == "image_url"]
         assert len(image_blocks) == 1
 
@@ -246,7 +252,7 @@ class TestFormatExecutionFeedback:
             code="pass", success=True, stdout="", stderr="",
             files_produced={"fresh.png": 10}, duration_s=0.1,
         )
-        content = format_execution_feedback([exe], tmp_path)
+        content = format_execution_feedback(exe, tmp_path)
         image_blocks = [b for b in content if b.get("type") == "image_url"]
         assert len(image_blocks) == 1
 
@@ -256,18 +262,8 @@ class TestFormatExecutionFeedback:
             code="bad", success=False, stdout="", stderr=stderr,
             files_produced={}, duration_s=0.1,
         )
-        text = format_execution_feedback([exe], tmp_path)[0]["text"]
+        text = format_execution_feedback(exe, tmp_path)[0]["text"]
         assert "RuntimeError: boom" in text
-
-    def test_multiple_scripts_labeled(self, tmp_path: Path) -> None:
-        exes = [
-            CodeExecution("a()", True, "", "", {}, 0.1),
-            CodeExecution("b()", False, "", "err", {}, 0.2),
-        ]
-        content = format_execution_feedback(exes, tmp_path)
-        text = content[0]["text"]
-        assert "Script 0" in text
-        assert "Script 1" in text
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +283,43 @@ class TestRunAgentDoneSignal:
         assert result.stopped_reason == "done"
         assert result.completed
         assert len(result.turns) == 1
+
+
+class TestRunAgentMultipleCodeBlocks:
+    """Single-block contract: only the first ```python block runs, and the
+    agent is told that extra blocks were dropped (not silently ignored)."""
+
+    @patch("cadgenbench.baseline.agent.execute_code")
+    def test_runs_first_block_and_warns(self, mock_exec):
+        mock_exec.return_value = CodeExecution(
+            code="a()", success=True, stdout="", stderr="",
+            files_produced={}, duration_s=0.1,
+        )
+        seen_last_msg: list = []
+
+        def recording_complete(messages, **kwargs):
+            seen_last_msg.append(messages[-1])
+            if len(seen_last_msg) == 1:
+                return _make_completion(
+                    content="```python\na()\n```\ntext\n```python\nb()\n```",
+                    tokens=50,
+                )
+            return _make_completion(content="still thinking, no code", tokens=50)
+
+        client = MagicMock(spec=LLMClient)
+        client.model = "test-model"
+        client.complete = MagicMock(side_effect=recording_complete)
+        config = AgentConfig(max_iterations=2, max_total_tokens=999_999)
+        result = run_agent("Build a box", config=config, client=client)
+
+        # Only the first of the two blocks ran.
+        assert mock_exec.call_count == 1
+        assert len(result.turns[0].code_executions) == 1
+        # The turn-0 feedback the 2nd LLM call sees carries the dropped-block
+        # notice.
+        feedback = seen_last_msg[1]["content"]
+        text = feedback[0]["text"] if isinstance(feedback, list) else feedback
+        assert "only the first was executed" in text
 
 
 class TestRunAgentDoneDeferral:
