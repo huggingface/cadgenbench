@@ -157,12 +157,21 @@ def validate_step(step_path: str | Path) -> ValidationResult:
     return _validate_wrapped(wrapped)
 
 
-def analyze_step(step_path: str | Path) -> ValidityResult:
+def analyze_step(
+    step_path: str | Path,
+    *,
+    mesh_cache: dict[float, object] | None = None,
+) -> ValidityResult:
     """Load a STEP file once and return both validity and measurements.
 
     Order: measurements first (cheap), then validation reuses the bbox
     diagonal to compute its tessellation deflection without re-walking
     the shape.
+
+    ``mesh_cache``: optional ``{deflection: Mesh}`` dict. When supplied and
+    the shape reaches the mesh gate, the tessellated boundary mesh is stored
+    here so callers can reuse it (e.g. for rendering) instead of
+    tessellating the same part a second time.
 
     Raises:
         FileNotFoundError: If the file does not exist.
@@ -172,6 +181,7 @@ def analyze_step(step_path: str | Path) -> ValidityResult:
     measurements = _measure_wrapped(wrapped)
     validation = _validate_wrapped(
         wrapped, bbox_diagonal=measurements.bounding_box.diagonal,
+        mesh_cache=mesh_cache,
     )
     return ValidityResult(validation=validation, measurements=measurements)
 

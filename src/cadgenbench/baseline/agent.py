@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,7 +49,7 @@ from cadgenbench.baseline.types import (
 )
 from cadgenbench.common.validity import analyze_step
 from cadgenbench.baseline.llm import LLMClient
-from cadgenbench.common.viewer import render_step
+from cadgenbench.common.viewer import render_mesh, render_step
 
 logger = logging.getLogger(__name__)
 
@@ -170,18 +171,44 @@ def execute_code(
 # Auto validation + render (injected into feedback after every code run)
 # ---------------------------------------------------------------------------
 
-def _validate_and_render_step(step_path: Path) -> tuple[str, bytes | None]:
-    """Validate + iso-render a STEP file. Caller guarantees ``step_path`` exists.
+# Validate + render runs in a worker process so OCC tessellation (CPU- and
+# GIL-bound) parallelizes across concurrent fixtures/models instead of
+# serializing on the GIL, and each render gets its own VTK/GL context. The
+# pool is created lazily and shared across all agent threads in the process.
+_RENDER_POOL = None
+_RENDER_POOL_LOCK = threading.Lock()
 
-    Returns ``(text_block, iso_png_bytes)``. ``iso_png_bytes`` is None when
-    the render fails or returns nothing. Used both as the per-turn auto
-    feedback on ``output.step`` and as the agent-startup snapshot of any
-    seeded ``input.step`` (editing tasks).
+
+def _get_render_pool():  # type: ignore[no-untyped-def]
+    global _RENDER_POOL
+    if _RENDER_POOL is None:
+        with _RENDER_POOL_LOCK:
+            if _RENDER_POOL is None:
+                import multiprocessing as mp
+                import os
+                from concurrent.futures import ProcessPoolExecutor
+
+                _RENDER_POOL = ProcessPoolExecutor(
+                    max_workers=min(os.cpu_count() or 4, 8),
+                    mp_context=mp.get_context("spawn"),
+                )
+    return _RENDER_POOL
+
+
+def _validate_and_render_blob(step_path_str: str) -> tuple[str, bytes | None]:
+    """Validate a STEP file and iso-render it, tessellating only **once**.
+
+    The validity gate already tessellates the boundary for its mesh check;
+    we hand it a ``mesh_cache`` and reuse that exact mesh for the render
+    instead of meshing the part a second time. Designed to run inside the
+    render pool's worker process. Returns ``(text_block, iso_png_bytes)``.
     """
+    step_path = Path(step_path_str)
     name = step_path.name
     lines: list[str] = [f"### Auto-validation of {name}"]
+    mesh_cache: dict[float, object] = {}
     try:
-        a = analyze_step(step_path)
+        a = analyze_step(step_path, mesh_cache=mesh_cache)
         v, m = a.validation, a.measurements
         bb = m.bounding_box
         lines += [
@@ -204,7 +231,14 @@ def _validate_and_render_step(step_path: Path) -> tuple[str, bytes | None]:
     lines.append("")
     lines.append(f"### Iso render of {name}")
     try:
-        images = render_step(step_path, views=["iso"])
+        # Reuse the validity gate's tessellation when it produced one (valid
+        # parts); otherwise tessellate here (the part never reached the mesh
+        # gate, e.g. an invalid BREP).
+        cached_mesh = next(iter(mesh_cache.values()), None)
+        if cached_mesh is not None:
+            images = render_mesh(cached_mesh, views=["iso"])
+        else:
+            images = render_step(step_path, views=["iso"])
         if images:
             iso_bytes = images[0].data
             lines.append("(see attached image below)")
@@ -214,6 +248,23 @@ def _validate_and_render_step(step_path: Path) -> tuple[str, bytes | None]:
         lines.append(f"⚠️ Render failed: {exc}")
 
     return "\n".join(lines), iso_bytes
+
+
+def _validate_and_render_step(step_path: Path) -> tuple[str, bytes | None]:
+    """Validate + iso-render a STEP file. Caller guarantees ``step_path`` exists.
+
+    Dispatches to a shared process pool so the CPU-heavy tessellation runs in
+    parallel across concurrent agent threads rather than serializing on the
+    GIL. Falls back to running inline if the pool is unavailable. Used both
+    for per-turn ``output.step`` feedback and the startup snapshot of any
+    seeded ``input.step`` (editing tasks).
+    """
+    try:
+        return _get_render_pool().submit(
+            _validate_and_render_blob, str(step_path),
+        ).result()
+    except Exception:
+        return _validate_and_render_blob(str(step_path))
 
 
 def _auto_validate_and_render(
