@@ -69,6 +69,45 @@ DEFAULT_COMPARE_LABELS: tuple[str, ...] = (
 )
 
 
+def _shutdown_child_pools() -> None:
+    """Force-close leaked module-global worker pools in this child process.
+
+    ``run_agent`` lazily creates a module-global ``_RENDER_POOL``
+    (``ProcessPoolExecutor``) and the validity gate a ``_MESH_POOL``
+    (``mp.Pool``); neither is ever shut down. When models run under the
+    outer ``ProcessPoolExecutor`` here, those leaked pools keep the model
+    child process alive at teardown (a render abandoned at the wall-clock
+    timeout makes the implicit join hang), so the parent's ``as_completed``
+    blocks forever and the comparison HTML never gets generated. Tearing
+    them down (and terminating any lingering workers) lets the child exit
+    promptly so its future resolves. Best-effort: never raises.
+    """
+    try:
+        from cadgenbench.baseline import agent as _agent
+        pool = getattr(_agent, "_RENDER_POOL", None)
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
+            for proc in list(getattr(pool, "_processes", {}).values()):
+                try:
+                    proc.terminate()
+                except Exception:  # noqa: BLE001
+                    pass
+            _agent._RENDER_POOL = None
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from cadgenbench.common import validity as _validity
+        mesh_pool = getattr(_validity, "_MESH_POOL", None)
+        if mesh_pool is not None:
+            try:
+                mesh_pool.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+            _validity._MESH_POOL = None
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _run_model_process(
     *,
     idx: int,
@@ -92,13 +131,18 @@ def _run_model_process(
         "config": asdict(config),
         "parallel": parallel,
     }, indent=2))
-    results = _run_all(
-        tasks,
-        config=config,
-        run_dir=run_dir,
-        parallel=parallel,
-        fixture_retries=fixture_retries,
-    )
+    try:
+        results = _run_all(
+            tasks,
+            config=config,
+            run_dir=run_dir,
+            parallel=parallel,
+            fixture_retries=fixture_retries,
+        )
+    finally:
+        # Close leaked render/mesh pools so this child exits cleanly and the
+        # parent's as_completed loop does not hang waiting on it.
+        _shutdown_child_pools()
     return idx, f"[{idx + 1}/{total_models}] {model}", run_dir, results
 
 
