@@ -83,12 +83,32 @@ class StepArtifacts:
         return deflection_for_bbox(self.analysis.measurements.bounding_box.diagonal)
 
     def mesh(self, linear_deflection_mm: float | None = None):
-        """Validated mesh at *linear_deflection_mm*, cached by deflection."""
-        from cadgenbench.common.mesh import tessellate_shape, validate_mesh
+        """The part's one validated mesh, produced via the robust path + cached.
 
-        deflection = self.deflection() if linear_deflection_mm is None else float(
-            linear_deflection_mm,
-        )
+        The deflection is chosen internally from the part's own bbox and
+        escalated as needed by :func:`robust_tessellate_shape`; callers
+        don't pass one (any argument is ignored, kept transiently for
+        compatibility while call sites are migrated). Asking for a mesh
+        always returns the same cached, already-valid mesh.
+        """
+        from cadgenbench.common.mesh import MeshSanityError, robust_tessellate_shape
+
+        # Negative cache: validity already ran the same robust meshing path
+        # and recorded the verdict. If the part is invalid there is no valid
+        # mesh to produce, so raise immediately rather than re-running the
+        # (escalating) ladder for every metric that asks. Valid parts had
+        # their mesh stored into ``self._meshes`` by the validity gate, so
+        # the lookup below is a cache hit and never re-meshes.
+        validation = self.analysis.validation
+        if not validation.is_valid:
+            reason = (
+                validation.topology_errors[0]
+                if validation.topology_errors
+                else "is_valid=False"
+            )
+            raise MeshSanityError(f"{self.step_path.name}: not a valid mesh ({reason})")
+
+        deflection = self.deflection()
         if deflection in self._meshes:
             self._store_mesh_cache(deflection, self._meshes[deflection])
         else:
@@ -96,32 +116,27 @@ class StepArtifacts:
             if cached is not None:
                 self._meshes[deflection] = cached
                 return cached
-            mesh = tessellate_shape(self.wrapped, deflection)
-            validate_mesh(mesh)
+            mesh = robust_tessellate_shape(self.wrapped, deflection)
             self._meshes[deflection] = mesh
             self._store_mesh_cache(deflection, mesh)
         return self._meshes[deflection]
 
     def manifold(self, linear_deflection_mm: float | None = None):
-        """``manifold3d.Manifold`` for the cached validated mesh."""
+        """``manifold3d.Manifold`` for the part's cached validated mesh."""
         from cadgenbench.eval.booleans import mesh_to_manifold
 
-        deflection = self.deflection() if linear_deflection_mm is None else float(
-            linear_deflection_mm,
-        )
+        deflection = self.deflection()
         if deflection not in self._manifolds:
-            self._manifolds[deflection] = mesh_to_manifold(self.mesh(deflection))
+            self._manifolds[deflection] = mesh_to_manifold(self.mesh())
         return self._manifolds[deflection]
 
     def betti(self, linear_deflection_mm: float | None = None):
-        """Betti numbers for the cached validated mesh."""
+        """Betti numbers for the part's cached validated mesh."""
         from cadgenbench.eval.topo_match import compute_betti_from_mesh
 
-        deflection = self.deflection() if linear_deflection_mm is None else float(
-            linear_deflection_mm,
-        )
+        deflection = self.deflection()
         if deflection not in self._bettis:
-            self._bettis[deflection] = compute_betti_from_mesh(self.mesh(deflection))
+            self._bettis[deflection] = compute_betti_from_mesh(self.mesh())
         return self._bettis[deflection]
 
     def _cache_stem(self) -> str | None:
@@ -221,8 +236,10 @@ class StepArtifacts:
                 vertices = np.asarray(data["vertices"], dtype=np.float64)
                 triangles = np.asarray(data["triangles"], dtype=np.int64)
                 deflection = float(data["linear_deflection_mm"])
-            if abs(deflection - linear_deflection_mm) > 1e-12:
-                return None
+            # The cache file is keyed (in its name) by the requested
+            # deflection; the stored mesh's own ``linear_deflection_mm`` may
+            # be finer (the robust tessellator escalated). Trust the filename
+            # key and return the stored mesh with its true deflection.
             return Mesh(
                 vertices=vertices,
                 triangles=triangles,

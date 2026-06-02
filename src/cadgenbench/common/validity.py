@@ -339,13 +339,15 @@ def _run_mesh_gate(
     """
     from cadgenbench.common.mesh import (
         MeshSanityError,
-        tessellate_shape,
-        validate_mesh,
+        robust_tessellate_shape,
     )
 
     try:
-        mesh = tessellate_shape(wrapped, deflection)
-        validate_mesh(mesh)
+        # Single robust meshing path (escalating deflection): the part is
+        # valid if any ladder rung yields a closed manifold. The resulting
+        # mesh is cached for reuse by the metric accessors so GT, candidate,
+        # validity, and the cache all share one code path / one mesh.
+        mesh = robust_tessellate_shape(wrapped, deflection)
         if mesh_cache is not None:
             mesh_cache[float(deflection)] = mesh
     except MeshSanityError as exc:
