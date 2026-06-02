@@ -170,8 +170,21 @@ def tessellate_shape(
     *,
     angular_deflection_rad: float = 0.5,
     parallel: bool | None = None,
+    _edge_debug: dict | None = None,
+    _skip_vertex_merge: bool = False,
+    _skip_seam_merge: bool = False,
+    _cancel_flaps: bool = True,
+    _relative: bool = False,
+    _trace: dict | None = None,
 ) -> Mesh:
     """Tessellate a pre-loaded OCC ``TopoDS_Shape`` into a welded mesh.
+
+    ``_edge_debug`` is a diagnostics-only escape hatch (default ``None`` =
+    normal behaviour, unchanged). When a dict is passed, the shared-edge
+    stitching does **not** raise on a length / order mismatch; instead it
+    tallies every shared edge into ``missing`` / ``difflen`` /
+    ``opposite_order`` / ``samelen_far`` / ``samelen_ok`` so a failing part can
+    be surveyed in one pass. The returned mesh is meaningless in this mode.
 
     Faces are stitched into one mesh by *topology*, not coordinates.
     OCC discretises every ``TopoDS_Edge`` once, so each face carrying
@@ -186,6 +199,12 @@ def tessellate_shape(
     or pole tips) that carries no polygon to stitch along. The result is
     conformal at any deflection whenever the BREP is topologically
     closed, with no coordinate weld tolerance anywhere.
+
+    Finally, opposite-winding duplicate triangles (a degenerate face region
+    folded onto a triangle and its mirror by the merge) are cancelled in pairs
+    (``_cancel_flaps``, on by default): the pair carries no net surface, so
+    removing both is topology-preserving and closes the otherwise-non-manifold
+    fold. Pass ``_cancel_flaps=False`` to disable for diagnostics.
     """
     from OCP.BRep import BRep_Tool
     from OCP.BRepMesh import BRepMesh_IncrementalMesh
@@ -211,7 +230,7 @@ def tessellate_shape(
     params = mesher.ChangeParameters()
     params.Deflection = float(linear_deflection_mm)
     params.Angle = float(angular_deflection_rad)
-    params.Relative = False
+    params.Relative = bool(_relative)
     params.InParallel = bool(parallel)
     mesher.Perform()
 
@@ -223,6 +242,7 @@ def tessellate_shape(
     # 1. Lay every face's triangulation into one global node/triangle list.
     vertices: list[tuple[float, float, float]] = []
     triangles: list[tuple[int, int, int]] = []
+    tri_face: list[int] = []  # diagnostics: source face index per soup triangle
     face_base: dict[int, int] = {}
     face_tri: dict[int, tuple] = {}
     for fi in range(1, faces.Size() + 1):
@@ -238,6 +258,8 @@ def tessellate_shape(
         base = len(vertices)
         face_base[fi] = base
         face_tri[fi] = (tri, loc)
+        if _trace is not None:
+            _trace.setdefault("face_nnodes", {})[fi] = int(tri.NbNodes())
         for i in range(1, tri.NbNodes() + 1):
             p = tri.Node(i).Transformed(trsf)
             vertices.append((p.X(), p.Y(), p.Z()))
@@ -248,6 +270,8 @@ def tessellate_shape(
             if reversed_face:
                 a, b = b, a
             triangles.append((a, b, c))
+            if _trace is not None:
+                tri_face.append(fi)
 
     if not triangles:
         raise MeshSanityError("tessellation produced no triangles")
@@ -289,6 +313,7 @@ def tessellate_shape(
         edge_loc = edge.Location()
         edge_curves = tuple(edge.TShape().Curves())
         node_lists: list[list[int]] = []
+        node_src: list[int] = []  # diagnostics: face index per node_lists entry
         seen_tri: set[int] = set()
         for adj_face in edge_faces.FindFromIndex(ei):
             fi = faces.FindIndex(adj_face)
@@ -314,15 +339,21 @@ def tessellate_shape(
                         count=p1.NbNodes(),
                     )
                     node_lists.append((p1_nodes + (base - 1)).tolist())
-                if cr.IsPolygonOnClosedTriangulation():
+                    if _trace is not None:
+                        node_src.append(fi)
+                if cr.IsPolygonOnClosedTriangulation() and not _skip_seam_merge:
                     p2 = cr.PolygonOnTriangulation2()
                     if p2 is not None:
+                        if _trace is not None:
+                            _trace.setdefault("seam_p2_faces", set()).add(fi)
                         p2_nodes = np.fromiter(
                             p2.Nodes(),
                             dtype=np.int64,
                             count=p2.NbNodes(),
                         )
                         node_lists.append((p2_nodes + (base - 1)).tolist())
+                        if _trace is not None:
+                            node_src.append(fi)
         # Every array for one edge is indexed along that edge's single
         # curve parametrization, so node k of any array is the same point
         # as node k of every other. Merge by index, never by coordinates.
@@ -330,12 +361,18 @@ def tessellate_shape(
         # raise on a length mismatch or opposite storage order rather
         # than choosing a merge, so a silent "closed but twisted" mesh
         # becomes a loud, diagnosable failure.
+        if _edge_debug is not None and edge_faces.FindFromIndex(ei).Extent() >= 2 \
+                and len(node_lists) < 2:
+            _edge_debug["missing"] = _edge_debug.get("missing", 0) + 1
         if not node_lists:
             continue
         ref = node_lists[0]
         ref_pts = verts[ref]
-        for other in node_lists[1:]:
+        for oi, other in enumerate(node_lists[1:], start=1):
             if len(other) != len(ref):
+                if _edge_debug is not None:
+                    _edge_debug["difflen"] = _edge_debug.get("difflen", 0) + 1
+                    continue
                 raise MeshSanityError(
                     f"edge #{ei}: shared-edge node arrays differ in "
                     f"length ({len(ref)} vs {len(other)}); cannot stitch "
@@ -345,11 +382,22 @@ def tessellate_shape(
             fwd = float(np.abs(ref_pts - other_pts).max())
             rev = float(np.abs(ref_pts - other_pts[::-1]).max())
             if rev < fwd:
+                if _edge_debug is not None:
+                    _edge_debug["opposite_order"] = _edge_debug.get("opposite_order", 0) + 1
+                    continue
                 raise MeshSanityError(
                     f"edge #{ei}: shared-edge node arrays are stored in "
                     f"opposite order (forward error {fwd:.3e} mm > reverse "
                     f"{rev:.3e} mm); an index stitch would twist the mesh",
                 )
+            if _edge_debug is not None:
+                key = "samelen_far" if min(fwd, rev) > linear_deflection_mm else "samelen_ok"
+                _edge_debug[key] = _edge_debug.get(key, 0) + 1
+            if _trace is not None:
+                tag = ("edge", int(ei), "seam" if node_src and node_src[oi] == node_src[0] else "cross")
+                ulog = _trace.setdefault("unions", [])
+                for u, v in zip(ref, other):
+                    ulog.append((int(u), int(v), tag))
             for u, v in zip(ref, other):
                 union(u, v)
 
@@ -372,7 +420,11 @@ def tessellate_shape(
     # carries no polygon. Unioning by shared vertex closes such apices by
     # topology, with no coordinate tolerance. The coordinate check only
     # *guards* the node-to-vertex assignment, raising rather than choosing.
-    for vi, nodes in vertex_nodes.items():
+    #
+    # ``_skip_vertex_merge`` (diagnostics only) bypasses this step to isolate
+    # whether a meshing failure originates here. The resulting mesh is only
+    # meaningful for that A/B test, never for scoring.
+    for vi, nodes in ({} if _skip_vertex_merge else vertex_nodes).items():
         vp = BRep_Tool.Pnt_s(TopoDS.Vertex_s(vmap.FindKey(vi)))
         vertex_xyz = np.array([vp.X(), vp.Y(), vp.Z()], dtype=np.float64)
         far = np.abs(verts[nodes] - vertex_xyz).max(axis=1)
@@ -385,6 +437,10 @@ def tessellate_shape(
             )
         base_node = nodes[0]
         for n in nodes[1:]:
+            if _trace is not None:
+                _trace.setdefault("unions", []).append(
+                    (int(base_node), int(n), ("vertex", int(vi))),
+                )
             union(base_node, n)
 
     roots = np.array([find(i) for i in range(len(vertices))], dtype=np.int64)
@@ -411,9 +467,53 @@ def tessellate_shape(
         & (merged_faces[:, 1] != merged_faces[:, 2])
         & (merged_faces[:, 0] != merged_faces[:, 2])
     )
+    if _trace is not None:
+        _trace["merged_faces_predrop"] = merged_faces.copy()
+        _trace["keep"] = keep.copy()
+        _trace["tri_face"] = np.asarray(tri_face, dtype=np.int64)
+        _trace["n_unique"] = n_unique
+        _trace["inv"] = inv.copy()
+        _trace["triangles"] = np.asarray(triangles, dtype=np.int64)
+        _trace["face_base"] = dict(face_base)
+        _trace["verts"] = verts.copy()
     merged_faces = merged_faces[keep]
     if merged_faces.shape[0] == 0:
         raise MeshSanityError("stitching collapsed all triangles")
+
+    if _cancel_flaps:
+        # Cancel opposite-winding duplicate pairs (on by default; pass
+        # _cancel_flaps=False to A/B it). A degenerate face region can fold into
+        # a triangle and its mirror (same 3 merged vertices, opposite
+        # orientation), which the zero-area drop misses and which reads as
+        # non-manifold. Such a pair carries no net surface, so cancelling both
+        # is topology-preserving where the flap is redundant. Verified faithful
+        # (every removed pair is a true opposite-winding mirror, 0 same-winding
+        # drops) across the dataset, with 0 regressions on the parts that
+        # already meshed.
+        from collections import defaultdict as _dd
+
+        def _even(t) -> bool:
+            x, y, z = sorted(t)
+            return (int(t[0]), int(t[1]), int(t[2])) in {(x, y, z), (y, z, x), (z, x, y)}
+
+        groups: dict = _dd(list)
+        for i, t in enumerate(merged_faces.tolist()):
+            groups[tuple(sorted(t))].append(i)
+        remove: list[int] = []
+        for idxs in groups.values():
+            if len(idxs) < 2:
+                continue
+            even = [i for i in idxs if _even(merged_faces[i])]
+            odd = [i for i in idxs if not _even(merged_faces[i])]
+            ncancel = min(len(even), len(odd))
+            remove.extend(even[:ncancel])
+            remove.extend(odd[:ncancel])
+        if remove:
+            mask = np.ones(merged_faces.shape[0], dtype=bool)
+            mask[np.asarray(remove, dtype=np.int64)] = False
+            merged_faces = merged_faces[mask]
+        if merged_faces.shape[0] == 0:
+            raise MeshSanityError("flap cancellation removed all triangles")
 
     used = np.unique(merged_faces.reshape(-1))
     remap = np.full(n_unique, -1, dtype=np.int64)

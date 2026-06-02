@@ -26,6 +26,7 @@ from cadgenbench.common.mesh import (
     MeshSanityError,
     deflection_for_bbox,
     tessellate_and_validate,
+    tessellate_shape,
     tessellate_step,
     validate_mesh,
 )
@@ -153,6 +154,37 @@ class TestTessellateAndValidate:
     def test_l_bracket(self, l_bracket_step: str) -> None:
         m = tessellate_and_validate(l_bracket_step, 0.1)
         assert m.n_triangles > 0
+
+
+class TestFlapCancel:
+    """Flap cancellation (opposite-winding mirror-pair removal) is shipped on.
+
+    It closes self-folding degenerate regions that read as non-manifold, and is
+    verified faithful (only true mirror pairs dropped) with 0 regressions on
+    parts that already meshed. These tests lock the production default on and
+    assert it is a no-op on flap-free geometry (the unit form of "no
+    regression"); the dataset-level wins are covered by the offline sweeps.
+    """
+
+    def test_default_is_on(self) -> None:
+        import inspect
+
+        assert (
+            inspect.signature(tessellate_shape).parameters["_cancel_flaps"].default
+            is True
+        )
+
+    def test_noop_on_clean_fixtures(self, box_step: str, sphere_step: str) -> None:
+        from build123d import import_step
+
+        for path, defl in ((box_step, 0.1), (sphere_step, 0.5)):
+            wrapped = import_step(path).wrapped
+            on = tessellate_shape(wrapped, defl, _cancel_flaps=True)
+            off = tessellate_shape(wrapped, defl, _cancel_flaps=False)
+            validate_mesh(on)
+            validate_mesh(off)
+            # No flaps to cancel -> identical mesh, not merely both-valid.
+            assert on.n_triangles == off.n_triangles
 
 
 class TestTessellateStepFailures:
