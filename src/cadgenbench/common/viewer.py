@@ -16,7 +16,7 @@
 
 Tessellates the STEP file with :func:`cadgenbench.common.mesh.tessellate_step`,
 hands the welded triangle mesh to a :class:`pyvista.Plotter`, draws
-shaded triangles + dihedral-angle feature edges, and returns PNG bytes
+shaded triangles, and returns PNG bytes
 per requested view. Camera presets are shared with the rest of the
 benchmark via :mod:`cadgenbench.common.camera_presets`. Projection is
 parallel (orthographic) across all views, the canonical CAD-drawing
@@ -84,13 +84,7 @@ __all__ = [
 # OCC value lands too dark, so brighten the base RGB and let directional
 # lighting carve out the shading. Edge colour matches tcv's ``edgeColor: 0x333333``.
 DEFAULT_BODY_RGB: tuple[float, float, float] = (0.85, 0.87, 0.90)
-EDGE_RGB: tuple[float, float, float] = (0.20, 0.20, 0.20)
 BACKGROUND_RGB: tuple[float, float, float] = (1.0, 1.0, 1.0)
-
-# Dihedral threshold above which a mesh edge counts as a feature edge and
-# gets drawn. 30 deg matches :mod:`cadgenbench.eval.feature_edges` (tau_sharp).
-FEATURE_EDGE_ANGLE_DEG: float = 30.0
-EDGE_LINE_WIDTH: float = 1.5
 
 # Margin (multiplier on the projected bbox half-extent) when fitting the
 # part to the frame. > 1 leaves whitespace around the silhouette.
@@ -160,19 +154,11 @@ def render_mesh(
     bbox_min = mesh.vertices.min(axis=0)
     bbox_max = mesh.vertices.max(axis=0)
     body = _mesh_to_polydata(mesh)
-    edges = body.extract_feature_edges(
-        feature_angle=FEATURE_EDGE_ANGLE_DEG,
-        boundary_edges=True,
-        feature_edges=True,
-        non_manifold_edges=False,
-        manifold_edges=False,
-    )
 
     out: list[RenderedImage] = []
     for view in views:
         png = _render_scene(
             shapes=[(body, body_rgb, 1.0)],
-            edge_meshes=[edges],
             bbox_min=bbox_min,
             bbox_max=bbox_max,
             view=view,
@@ -337,7 +323,6 @@ def render_mesh_overlay(
     validate_views(views)
 
     shapes: list[tuple[pv.PolyData, tuple[float, float, float], float]] = []
-    edge_meshes: list[pv.PolyData] = []
     bbox_min = np.array([np.inf] * 3, dtype=np.float64)
     bbox_max = np.array([-np.inf] * 3, dtype=np.float64)
     for mesh, rgba in zip(meshes, colors):
@@ -345,15 +330,6 @@ def render_mesh_overlay(
             raise ValueError("render_mesh_overlay: a mesh has zero triangles")
         body = _mesh_to_polydata(mesh)
         shapes.append((body, (rgba[0], rgba[1], rgba[2]), float(rgba[3])))
-        edge_meshes.append(
-            body.extract_feature_edges(
-                feature_angle=FEATURE_EDGE_ANGLE_DEG,
-                boundary_edges=True,
-                feature_edges=True,
-                non_manifold_edges=False,
-                manifold_edges=False,
-            )
-        )
         bbox_min = np.minimum(bbox_min, mesh.vertices.min(axis=0))
         bbox_max = np.maximum(bbox_max, mesh.vertices.max(axis=0))
 
@@ -361,7 +337,6 @@ def render_mesh_overlay(
     for view in views:
         png = _render_scene(
             shapes=shapes,
-            edge_meshes=edge_meshes,
             bbox_min=bbox_min,
             bbox_max=bbox_max,
             view=view,
@@ -451,14 +426,13 @@ _RENDER_LOCK = threading.Lock()
 def _render_scene(
     *,
     shapes: list[tuple[pv.PolyData, tuple[float, float, float], float]],
-    edge_meshes: list[pv.PolyData],
     bbox_min: np.ndarray,
     bbox_max: np.ndarray,
     view: str,
     width: int,
     height: int,
 ) -> bytes:
-    """Render one frame: shaded triangles + feature-edge overlay -> PNG bytes."""
+    """Render one frame: shaded triangles -> PNG bytes."""
     # VTK/OpenGL is not thread-safe and there is a single GL context per
     # process. Baseline fixtures and compare-llms models both run as threads,
     # so without serialisation concurrent renders contend on (or crash) the
@@ -478,12 +452,9 @@ def _render_scene(
                     show_edges=False,
                     ambient=0.45,
                     diffuse=0.65,
-                    specular=0.10,
-                    specular_power=15,
+                specular=0.10,
+                specular_power=15,
                 )
-            for edges in edge_meshes:
-                if edges.n_points > 0:
-                    pl.add_mesh(edges, color=EDGE_RGB, line_width=EDGE_LINE_WIDTH)
 
             eye, target, up = camera_placement(view, bbox_min, bbox_max)
             cam = pl.camera
