@@ -553,7 +553,7 @@ def _render_gt_metrics_pills(result: dict) -> str:
         )
     parts.append("</div>")
 
-    component_keys = ("shape_point_cloud_f1", "shape_volume_iou", "shape_feature_edge_f1")
+    component_keys = ("shape_point_cloud_f1", "shape_volume_iou")
     components = [(k, gt_m.get(k)) for k in component_keys if gt_m.get(k) is not None]
     if components:
         comp_parts: list[str] = []

@@ -8,7 +8,6 @@ import pytest
 from cadgenbench.eval.shape_similarity import (
     MetricContext,
     compute_metrics,
-    shape_feature_edge_f1,
     shape_point_cloud_f1,
     shape_volume_iou,
 )
@@ -157,65 +156,17 @@ class TestShapeVolumeIoU:
 
 
 # ---------------------------------------------------------------------------
-# shape_feature_edge_f1
-# ---------------------------------------------------------------------------
-
-class TestShapeFeatureEdgeF1:
-
-    def test_identical_box_one(self) -> None:
-        """Same box on both sides -> all real edges match, F1 ≈ 1."""
-        a = _ctx_with_step(10, 20, 30)
-        score = shape_feature_edge_f1(a, a)
-        assert score is not None
-        assert score == pytest.approx(1.0, abs=1e-6)
-
-    def test_sphere_pair_both_empty_one(self) -> None:
-        """Sphere has zero sharp edges; both-empty must return 1.0 per spec."""
-        from pathlib import Path as _P
-
-        sphere = _P(__file__).parent.parent / "fixtures" / "sphere.step"
-        if not sphere.exists():
-            pytest.skip("sphere.step fixture missing")
-        from cadgenbench.common.validity import analyze_step
-
-        a_analysis = analyze_step(sphere)
-        ctx = MetricContext(
-            step_path=sphere,
-            validation=a_analysis.validation,
-            measurements=a_analysis.measurements,
-        )
-        score = shape_feature_edge_f1(ctx, ctx)
-        assert score is not None
-        assert score == pytest.approx(1.0)
-
-    def test_mismatched_geometry_lower_score(self) -> None:
-        """A 10x10x10 cube vs a 10x10x50 column -> some edges line up, many don't."""
-        a = _ctx_with_step(10, 10, 10)
-        b = _ctx_with_step(10, 10, 50)
-        score = shape_feature_edge_f1(a, b)
-        self_score = shape_feature_edge_f1(a, a)
-        assert score is not None and self_score is not None
-        assert score < self_score - 0.05
-
-    def test_returns_none_without_gt_step(self) -> None:
-        a = _ctx_with_step(10, 10, 10)
-        b = MetricContext()
-        assert shape_feature_edge_f1(a, b) is None
-
-
-# ---------------------------------------------------------------------------
 # compute_metrics
 # ---------------------------------------------------------------------------
 
 class TestComputeMetrics:
 
     def test_identical_step_full_context(self) -> None:
-        """Same STEP on both sides -> all three shape sub-metrics report."""
+        """Same STEP on both sides -> both shape sub-metrics report."""
         a = _ctx_with_step(10, 10, 10)
         scores, errors = compute_metrics(a, a)
         assert "shape_point_cloud_f1" in scores
         assert "shape_volume_iou" in scores
-        assert "shape_feature_edge_f1" in scores
         assert errors == {}
 
     def test_empty_context(self) -> None:

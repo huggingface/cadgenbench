@@ -26,14 +26,6 @@ Reported shape metrics:
   two outward unit normals dot above ``0.9`` (≈25° tolerance).
 - ``shape_volume_iou``:
   Volumetric IoU of candidate and GT solids.
-- ``shape_feature_edge_f1``:
-  Symmetric Chamfer F1 over mesh feature-edge sample points. A mesh
-  edge is "kept" when its dihedral exceeds ``tau_sharp`` (default 30°);
-  kept edges are sampled at spacing ``0.2%`` of the GT bounding-box
-  diagonal, and the candidate / GT point arrays are matched with a
-  hit threshold of ``1%`` of the GT bbox diagonal. Picks up 3D
-  creases, hole rims, and slot openings without depending on any view
-  or renderer.
 - ``shape_similarity_score``:
   arithmetic mean of available component scores.
 
@@ -211,19 +203,6 @@ def shape_volume_iou(candidate: MetricContext, gt: MetricContext) -> float | Non
     return _clamp01(inter / union)
 
 
-FEATURE_EDGE_F1_THRESHOLD_FRACTION = 0.01
-
-
-def shape_feature_edge_f1(
-    candidate: MetricContext, gt: MetricContext,
-) -> float | None:
-    """Symmetric mesh-feature-edge F1 in ``[0, 1]`` (threshold = 1% of GT bbox diag)."""
-    stats = _feature_edge_f1_stats(candidate, gt)
-    if stats is None:
-        return None
-    return _clamp01(stats["f1"])
-
-
 # ---------------------------------------------------------------------------
 # Registry and display metadata
 # ---------------------------------------------------------------------------
@@ -231,7 +210,6 @@ def shape_feature_edge_f1(
 DEFAULT_METRICS: dict[str, MetricFn] = {
     "shape_point_cloud_f1": shape_point_cloud_f1,
     "shape_volume_iou": shape_volume_iou,
-    "shape_feature_edge_f1": shape_feature_edge_f1,
 }
 
 
@@ -249,7 +227,6 @@ METRIC_DISPLAY: dict[str, MetricMeta] = {
     "shape_similarity_score": MetricMeta("Shape Similarity", ".3f"),
     "shape_point_cloud_f1":   MetricMeta("Point Cloud F1", ".3f"),
     "shape_volume_iou":       MetricMeta("Volume IoU", ".3f"),
-    "shape_feature_edge_f1":  MetricMeta("Feature Edge F1", ".3f"),
     # interface_match (jig sub-volumes)
     "interface_match_score":  MetricMeta("Interface Match", ".3f"),
     # topo_match (Betti agreement)
@@ -480,21 +457,9 @@ def _compute_default_scores_and_diagnostics(
             scores["shape_volume_iou"] = _clamp01(inter / union)
         _add_volume_diagnostics(diagnostics, volume_stats)
 
-    try:
-        fe_stats = _feature_edge_f1_stats(candidate, gt)
-    except Exception as exc:
-        logger.error("Metric shape_feature_edge_f1 raised; scoring it 0", exc_info=True)
-        scores["shape_feature_edge_f1"] = 0.0
-        errors["shape_feature_edge_f1"] = f"{type(exc).__name__}: {exc}"
-        fe_stats = None
-    if fe_stats is not None:
-        scores["shape_feature_edge_f1"] = _clamp01(fe_stats["f1"])
-        _add_feature_edge_diagnostics(diagnostics, fe_stats)
-
     component_keys = (
         "shape_point_cloud_f1",
         "shape_volume_iou",
-        "shape_feature_edge_f1",
     )
     component_values = [scores[k] for k in component_keys if scores.get(k) is not None]
     if component_values:
@@ -514,9 +479,6 @@ def _compute_diagnostics(candidate: MetricContext, gt: MetricContext) -> dict[st
     stats = _volume_overlap_stats(candidate, gt)
     if stats is not None:
         _add_volume_diagnostics(diagnostics, stats)
-    fe_stats = _feature_edge_f1_stats(candidate, gt)
-    if fe_stats is not None:
-        _add_feature_edge_diagnostics(diagnostics, fe_stats)
     return diagnostics
 
 
@@ -539,20 +501,6 @@ def _add_volume_diagnostics(
     diagnostics["volume_intersection"] = stats[0]
     diagnostics["volume_union"] = stats[1]
     diagnostics["volume_symmetric_difference"] = stats[2]
-
-
-def _add_feature_edge_diagnostics(
-    diagnostics: dict[str, float],
-    fe_stats: dict[str, float],
-) -> None:
-    diagnostics["feature_edge_f1"] = fe_stats["f1"]
-    diagnostics["feature_edge_precision"] = fe_stats["precision"]
-    diagnostics["feature_edge_recall"] = fe_stats["recall"]
-    diagnostics["feature_edge_threshold"] = fe_stats["threshold"]
-    diagnostics["feature_edge_n_points_candidate"] = fe_stats["n_points_candidate"]
-    diagnostics["feature_edge_n_points_gt"] = fe_stats["n_points_gt"]
-    diagnostics["feature_edge_n_kept_candidate"] = fe_stats["n_kept_candidate"]
-    diagnostics["feature_edge_n_kept_gt"] = fe_stats["n_kept_gt"]
 
 
 def _point_cloud_f1_stats(
@@ -649,111 +597,6 @@ def _volume_overlap_stats(
         return None
     vol_sym_diff = max(0.0, vol_union - vol_inter)
     return vol_inter, vol_union, vol_sym_diff
-
-
-def _feature_edge_f1_stats(
-    candidate: MetricContext, gt: MetricContext,
-) -> dict[str, float] | None:
-    """Symmetric mesh-feature-edge F1 + diagnostics.
-
-    Extracts the dihedral-based feature edges from the candidate and GT
-    welded meshes via :func:`cadgenbench.eval.feature_edges.extract_feature_edge_points`
-    using the GT's bounding-box diagonal to derive sample spacing and the
-    F1 hit threshold. Both threshold and spacing are fractions of the GT
-    diagonal:
-
-    - spacing = ``0.2%`` of GT diag (≈500 samples on a 100 mm part).
-    - hit threshold = ``1%`` of GT diag (same convention as
-      :func:`shape_point_cloud_f1`).
-
-    Empty-array convention (per spec): if both candidate and GT have
-    zero kept feature edges the score is 1.0 (e.g. a perfectly-matched
-    pair of spheres); if exactly one is empty the score is 0.0.
-    """
-    from cadgenbench.eval.feature_edges import (
-        DEFAULT_SPACING_FRAC,
-        DEFAULT_TAU_SHARP_DEG,
-        DEFAULT_TAU_SMOOTH_DEG,
-        extract_feature_edge_points,
-    )
-
-    diag = _bbox_diagonal(gt)
-    if diag is None or diag <= 0:
-        return None
-
-    cand_mesh = candidate.get_mesh()
-    gt_mesh = gt.get_mesh()
-    if cand_mesh is None or gt_mesh is None:
-        return None
-
-    pts_cand = extract_feature_edge_points(
-        cand_mesh.vertices, cand_mesh.triangles,
-        bbox_diagonal=diag,
-        tau_sharp_deg=DEFAULT_TAU_SHARP_DEG,
-        tau_smooth_deg=DEFAULT_TAU_SMOOTH_DEG,
-        spacing_frac=DEFAULT_SPACING_FRAC,
-    )
-    pts_gt = extract_feature_edge_points(
-        gt_mesh.vertices, gt_mesh.triangles,
-        bbox_diagonal=diag,
-        tau_sharp_deg=DEFAULT_TAU_SHARP_DEG,
-        tau_smooth_deg=DEFAULT_TAU_SMOOTH_DEG,
-        spacing_frac=DEFAULT_SPACING_FRAC,
-    )
-    threshold = max(1e-6, FEATURE_EDGE_F1_THRESHOLD_FRACTION * diag)
-    n_cand = int(pts_cand.shape[0])
-    n_gt = int(pts_gt.shape[0])
-
-    if n_cand == 0 and n_gt == 0:
-        return {
-            "f1": 1.0,
-            "precision": 1.0,
-            "recall": 1.0,
-            "threshold": threshold,
-            "n_points_candidate": 0,
-            "n_points_gt": 0,
-            "n_kept_candidate": 0,
-            "n_kept_gt": 0,
-        }
-    if n_cand == 0 or n_gt == 0:
-        return {
-            "f1": 0.0,
-            "precision": 0.0,
-            "recall": 0.0,
-            "threshold": threshold,
-            "n_points_candidate": n_cand,
-            "n_points_gt": n_gt,
-            "n_kept_candidate": 0 if n_cand == 0 else 1,
-            "n_kept_gt": 0 if n_gt == 0 else 1,
-        }
-
-    from scipy.spatial import cKDTree
-
-    tree_cand = cKDTree(pts_cand)
-    tree_gt = cKDTree(pts_gt)
-    cand_to_gt = tree_gt.query(pts_cand)[0]
-    gt_to_cand = tree_cand.query(pts_gt)[0]
-
-    precision = float((cand_to_gt <= threshold).mean())
-    recall = float((gt_to_cand <= threshold).mean())
-    if precision + recall == 0:
-        f1 = 0.0
-    else:
-        f1 = float((2.0 * precision * recall) / (precision + recall))
-
-    return {
-        "f1": f1,
-        "precision": precision,
-        "recall": recall,
-        "threshold": threshold,
-        "n_points_candidate": n_cand,
-        "n_points_gt": n_gt,
-        # "n_kept_*" is "non-zero kept-edges side?" up to here; callers
-        # that need the actual kept-edge count should use
-        # :func:`cadgenbench.eval.feature_edges.extract_feature_edges_debug`.
-        "n_kept_candidate": 1,
-        "n_kept_gt": 1,
-    }
 
 
 def _ensure_renders(ctx: MetricContext, renders_dir: Path) -> None:

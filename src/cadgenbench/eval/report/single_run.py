@@ -358,7 +358,7 @@ def _render_fixture_card(fix: dict, idx: int) -> str:
         p.append("</div>")
 
     # Shape component breakdown (compact, muted), right under the headline.
-    component_keys = ("shape_point_cloud_f1", "shape_volume_iou", "shape_feature_edge_f1")
+    component_keys = ("shape_point_cloud_f1", "shape_volume_iou")
     components = [(k, gt_m.get(k)) for k in component_keys if gt_m.get(k) is not None]
     if components:
         parts: list[str] = []

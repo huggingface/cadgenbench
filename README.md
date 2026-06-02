@@ -75,7 +75,7 @@ orthogonal axes:
 | Metric | What it captures |
 |---|---|
 | **Validity** | Is the BREP well-formed, watertight, tessellable? Gate. Failure zeroes the rest. |
-| **Shape similarity** | Geometry distance (point-cloud F1, volume IoU, feature-edge F1 on dihedral mesh edges). |
+| **Shape similarity** | Geometry distance (point-cloud F1, volume IoU). |
 | **Interface match** | Mating-feature correctness via authored keep-in / keep-out sub-volumes. |
 | **Topology match** | Betti numbers (b0, b1, b2) of the tessellated boundary. |
 

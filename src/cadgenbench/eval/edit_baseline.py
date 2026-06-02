@@ -128,7 +128,6 @@ def compute_edit_baseline(input_step: str | Path, gt_step: str | Path) -> dict:
         "shape_similarity_score": b_shape,
         "shape_point_cloud_f1": scores.get("shape_point_cloud_f1"),
         "shape_volume_iou": scores.get("shape_volume_iou"),
-        "shape_feature_edge_f1": scores.get("shape_feature_edge_f1"),
         "alignment_rmse": round(float(ar.rmse), 4),
         "headroom": round(1.0 - b_shape, 6),
         "cadgenbench_version": __version__,

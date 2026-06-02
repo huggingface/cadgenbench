@@ -31,6 +31,5 @@ benchmark_*.html
 results_*.html
 compare_*.html
 
-# Debug outputs (regenerable via in-module helpers, e.g.
-# cadgenbench.eval.feature_edges.write_feature_edge_overlay_png).
+# Debug outputs (regenerable via in-module helpers).
 outputs/

@@ -60,7 +60,6 @@ DISPLAYED_METRICS: tuple[str, ...] = (
     "shape_similarity_score",
     "shape_point_cloud_f1",
     "shape_volume_iou",
-    "shape_feature_edge_f1",
 )
 
 

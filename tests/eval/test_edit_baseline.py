@@ -146,9 +146,9 @@ def test_check_baseline_fresh_raises_on_mismatch() -> None:
 def test_compute_baseline_identical_input_gt_scores_near_perfect() -> None:
     # input == GT (a degenerate "no edit") scores ~1 on shape similarity:
     # the no-op problem in its most extreme form. It does not hit exactly
-    # 1.0 because of tessellation residue on volume / feature-edge F1, so
-    # the tiny EDIT_HEADROOM_FLOOR (numerical-stability guard, not a
-    # "meaningful edit" threshold) does not by itself reject a no-edit.
+    # 1.0 because of tessellation residue on volume IoU, so the tiny
+    # EDIT_HEADROOM_FLOOR (numerical-stability guard, not a "meaningful
+    # edit" threshold) does not by itself reject a no-edit.
     gt = FIXTURES_DIR / "test_1" / "gt.step"
     baseline = compute_edit_baseline(gt, gt)
     assert baseline["cadgenbench_version"] == __version__

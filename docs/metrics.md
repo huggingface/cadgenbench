@@ -109,17 +109,16 @@ Any failure ⇒ `is_valid = False` ⇒ `cad_score = 0`, with a human-readable li
 
 ### 2. Shape Similarity
 
-Arithmetic mean of three sub-metrics, each in $[0, 1]$:
+Arithmetic mean of two sub-metrics, each in $[0, 1]$:
 
 ```
-shape_similarity = mean(point_cloud_f1, volume_iou, feature_edge_f1)
+shape_similarity = mean(point_cloud_f1, volume_iou)
 ```
 
 - **`shape_point_cloud_f1`**: normal-weighted symmetric F1 of 50 k surface points per shape; hit requires distance within 1 % of GT bbox diagonal *and* matched-pair normals within ≈25°.
 - **`shape_volume_iou`**: $\mathrm{vol}(A \cap B) / \mathrm{vol}(A \cup B)$.
-- **`shape_feature_edge_f1`**: symmetric Chamfer F1 over mesh feature-edge sample points (dihedral $\ge 30°$ kept, $\le 5°$ dropped, in-between excluded; spacing 0.2 % of GT bbox diagonal; hit threshold 1 % of GT bbox diagonal).
 
-The three together cancel each other's blind spots. Point-cloud F1 is dominated by big flat faces; volume IoU is invariant to feature position; feature-edge F1 picks up holes, slots, and creases regardless of view.
+The two cancel each other's blind spots. Point-cloud F1 is dominated by big flat faces and is sensitive to surface position; volume IoU is invariant to feature position but captures occupied-volume error.
 
 → See [more details below](./metrics/shape_similarity.md).
 
@@ -227,10 +226,9 @@ This fixture has no interface specification, so the interface term drops out and
 | Validity | ✅ valid, watertight, single solid | gate passes |
 | `shape_point_cloud_f1` | `0.672` | bulk surface roughly right |
 | `shape_volume_iou` | `0.558` | candidate is ~30 % off in occupied volume |
-| `shape_feature_edge_f1` | `0.404` | weakest sub-metric; feature edges are in the wrong places |
-| **`shape_similarity_score`** | **`0.545`** | mean of the three sub-metrics |
+| **`shape_similarity_score`** | **`0.615`** | mean of the two sub-metrics |
 | `topology_match` | `0.939` | $s_0 = 1.000$ ($b_0$ match), $s_1 = 0.818$ ($b_1 = 8$ vs GT $10$ → $9/11$), $s_2 = 1.000$ ($b_2$ match) |
-| **`cad_score`** | **`0.742`** | $(0.545 + 0.939) / 2$ |
+| **`cad_score`** | **`0.777`** | $(0.615 + 0.939) / 2$ |
 
 ### Example 2: Interface Match catches what Shape Similarity misses
 
@@ -247,10 +245,10 @@ Visually indistinguishable. The interface-match overlay makes the problem obviou
 | Component | Value | Notes |
 | --- | --- | --- |
 | Validity | ✅ valid, watertight | gate passes |
-| `shape_similarity_score` | `0.924` | pc-F1 0.944, vol-IoU 0.918, feature-edge-F1 0.910 |
+| `shape_similarity_score` | `0.931` | pc-F1 0.944, vol-IoU 0.918 |
 | `topology_match` | `1.000` | $(b_0, b_1, b_2) = (1, 4, 0)$ exact match |
 | `interface_match` | **`0.0915`** | per-group min over the four `KOR` sub-volume IoUs: 0.092, 0.103, 0.098, 0.102 |
-| **`cad_score`** | **`0.672`** | $(0.924 + 1.000 + 0.0915) / 3$ |
+| **`cad_score`** | **`0.674`** | $(0.931 + 1.000 + 0.0915) / 3$ |
 
 ### Example 3: Topology Match catches what Shape Similarity misses
 
@@ -263,9 +261,9 @@ The candidate captures the silhouette of the fixture (cylindrical flange + centr
 | Component | Value | Notes |
 | --- | --- | --- |
 | Validity | ✅ valid, watertight | gate passes |
-| `shape_similarity_score` | `0.415` | pc-F1 0.499, vol-IoU 0.364, feature-edge-F1 0.383 |
+| `shape_similarity_score` | `0.432` | pc-F1 0.499, vol-IoU 0.364 |
 | `topology_match` | **`0.626`** | $s_0 = 1.000$ ($b_0 = 1$ match), $s_1 = 0.545$ ($b_1 = 5$ vs GT $10$ → $6/11$), $s_2 = 0.333$ ($b_2 = 2$ vs GT $0$ → $1/3$) |
-| **`cad_score`** | **`0.521`** | $(0.415 + 0.626) / 2$ |
+| **`cad_score`** | **`0.529`** | $(0.432 + 0.626) / 2$ |
 
 ---
 
