@@ -177,13 +177,44 @@ def execute_code(
 # pool is created lazily and shared across all agent threads in the process.
 _RENDER_POOL = None
 _RENDER_POOL_LOCK = threading.Lock()
+_RENDER_POOL_ATEXIT_DONE = False
+
+
+def _shutdown_render_pool() -> None:
+    """Force-terminate the render pool's workers so the owning process can exit.
+
+    A plain ``ProcessPoolExecutor`` registers an ``atexit`` that *joins* its
+    workers (``wait=True``); if a render was abandoned (e.g. the agent hit its
+    wall-clock timeout mid-render) that join blocks forever, so the process
+    never exits. Under the nested pools used by ``baseline compare-llms``
+    (model pool -> fixture pool -> this render pool) that stalls the parent's
+    ``as_completed`` and the comparison HTML is never produced. We terminate
+    the worker processes outright instead of joining. Registered *after* the
+    executor's own atexit (see ``_get_render_pool``) so LIFO ordering runs this
+    first, leaving the executor's join nothing live to wait on. Best-effort.
+    """
+    global _RENDER_POOL
+    pool = _RENDER_POOL
+    _RENDER_POOL = None
+    if pool is None:
+        return
+    try:
+        pool.shutdown(wait=False, cancel_futures=True)
+    except Exception:  # noqa: BLE001
+        pass
+    for proc in list(getattr(pool, "_processes", {}).values()):
+        try:
+            proc.terminate()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _get_render_pool():  # type: ignore[no-untyped-def]
-    global _RENDER_POOL
+    global _RENDER_POOL, _RENDER_POOL_ATEXIT_DONE
     if _RENDER_POOL is None:
         with _RENDER_POOL_LOCK:
             if _RENDER_POOL is None:
+                import atexit
                 import multiprocessing as mp
                 import os
                 from concurrent.futures import ProcessPoolExecutor
@@ -192,6 +223,12 @@ def _get_render_pool():  # type: ignore[no-untyped-def]
                     max_workers=min(os.cpu_count() or 4, 8),
                     mp_context=mp.get_context("spawn"),
                 )
+                # Register AFTER the executor import above so this runs first
+                # at interpreter exit (atexit is LIFO) and kills workers before
+                # the executor's own blocking join can hang.
+                if not _RENDER_POOL_ATEXIT_DONE:
+                    atexit.register(_shutdown_render_pool)
+                    _RENDER_POOL_ATEXIT_DONE = True
     return _RENDER_POOL
 
 
