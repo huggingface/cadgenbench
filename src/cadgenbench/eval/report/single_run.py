@@ -733,6 +733,27 @@ document.querySelectorAll('.sortable').forEach(function(th) {
     rows.forEach(function(r) { tbody.appendChild(r); });
   });
 });
+
+// Deep-link: opening the report at `#fixture=<name>` (or `#idx=<n>`)
+// jumps straight to that fixture's detail card instead of the summary
+// view. The leaderboard gallery links thumbnails this way so a click
+// lands on the right fixture. Inert (stays on the summary view) when
+// there is no hash or the name doesn't match a fixture.
+function openHashTarget() {
+  const hash = (window.location.hash || '').replace(/^#/, '');
+  if (!hash) return;
+  const params = new URLSearchParams(hash);
+  const names = window._fixtureNames || [];
+  let idx = -1;
+  if (params.has('fixture')) {
+    idx = names.indexOf(params.get('fixture'));
+  } else if (params.has('idx')) {
+    idx = parseInt(params.get('idx'), 10);
+  }
+  if (idx >= 0 && idx < total) showDetail(idx);
+}
+openHashTarget();
+window.addEventListener('hashchange', openHashTarget);
 """
 
 
