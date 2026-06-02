@@ -135,9 +135,19 @@ cadgenbench baseline run --all --parallel 4 \
     --model anthropic/claude-opus-4-7
 ```
 
-Output lands at `results/<timestamp>_<model_slug>/<fixture>/output.step`,
-ready to zip and submit on the Space. `cadgenbench baseline --help`
-lists the full flag set.
+Output lands at `results/<timestamp>_<model_slug>/<fixture>/output.step`.
+`cadgenbench baseline --help` lists the full flag set.
+
+Bundle a run directory into a submission zip (top-level `meta.json` +
+one `output.step` per fixture, per the submission contract):
+
+```bash
+cadgenbench baseline package results/20260602_120000_claude-opus-4-7 \
+    --submitter "Your Name" --name "My agent v1" --agree
+```
+
+Writes `<run_dir>.zip`, ready to upload on the Space's **Submit** tab.
+`agree_to_publish` is `false` until you pass `--agree`.
 
 ## Dataset
 

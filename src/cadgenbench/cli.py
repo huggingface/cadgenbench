@@ -95,6 +95,9 @@ def _register_baseline_subcommand(
         from cadgenbench.baseline.compare_llms import (
             add_subparser as add_baseline_compare_llms,
         )
+        from cadgenbench.baseline.package import (
+            add_subparser as add_baseline_package,
+        )
     except ImportError:
         return None
 
@@ -104,6 +107,7 @@ def _register_baseline_subcommand(
     baseline_sub = baseline_p.add_subparsers(dest="baseline_action")
     add_baseline_run(baseline_sub)
     add_baseline_compare_llms(baseline_sub)
+    add_baseline_package(baseline_sub)
     return baseline_p
 
 

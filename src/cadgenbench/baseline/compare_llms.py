@@ -47,28 +47,22 @@ from cadgenbench.baseline._cli import (
 )
 from cadgenbench.baseline.llm import LLMClient
 from cadgenbench.baseline.types import AgentConfig
+from cadgenbench.common.baseline_models import (
+    DEFAULT_COMPARE_LABELS,
+    DEFAULT_COMPARE_MODELS,
+)
 from cadgenbench.eval.report.compare_runs import (
     _discover_run,
     _run_label,
     generate_html,
 )
 
-
-# Three-way default LLM trio for ``compare-llms`` when ``--models`` is
-# omitted: current flagship from each of Anthropic, Google, OpenAI as of
-# May 2026. Override with ``--models`` to pick something else. Kept here
-# (not in default_config.yaml) because it's specific to the compare-llms
-# subcommand, not a general AgentConfig knob.
-DEFAULT_COMPARE_MODELS: tuple[str, ...] = (
-    "anthropic/claude-opus-4-7",
-    "gemini/gemini-3.1-pro-preview",
-    "openai/gpt-5.5",
-)
-DEFAULT_COMPARE_LABELS: tuple[str, ...] = (
-    "Claude Opus 4.7",
-    "Gemini 3.1 Pro",
-    "GPT-5.5",
-)
+# The default LLM trio for ``compare-llms`` (and the orchestrator's
+# ``run_baselines`` fan-out) lives in ``cadgenbench.common.baseline_models``
+# so it can be imported without the heavy ``[baseline]`` extras. Re-exported
+# here to keep the existing ``compare_llms.DEFAULT_COMPARE_*`` import sites
+# working. ``__all__`` advertises them as part of this module's surface.
+__all__ = ["DEFAULT_COMPARE_MODELS", "DEFAULT_COMPARE_LABELS"]
 
 
 def _shutdown_child_pools() -> None:
