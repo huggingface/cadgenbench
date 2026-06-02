@@ -30,10 +30,6 @@ Public API (in evaluation order):
 - :func:`interface_score_iou`   : pose-searched IoU per sub-volume
                                   across the whole fixture.
 - :func:`interface_score`       : single-number aggregated score.
-- :func:`disagreement_volume`,
-  :func:`score_candidate`       : cheap binary-style discriminator
-                                  used by the visualiser; signed
-                                  disagreement volume rather than IoU.
 """
 from __future__ import annotations
 
@@ -109,80 +105,15 @@ def discover_sub_volumes(fixture_dir: str | Path) -> list[SubVolume]:
 # Scoring thresholds
 # ---------------------------------------------------------------------------
 
-# Below this volume (mm^3) treat a disagreement as numerical noise.
-DEFAULT_DISAGREEMENT_EPSILON = 1.0
-
 # Per-sub-volume IoU pass threshold.
 DEFAULT_IOU_THRESHOLD = 0.95
 
-
-# ---------------------------------------------------------------------------
-# Disagreement scoring (cheap binary-style discriminator)
-# ---------------------------------------------------------------------------
-
-
-def disagreement_volume(part_step: str | Path, sv: SubVolume) -> float:
-    """Return the disagreement volume (mm^3) between a candidate part and
-    one sub-volume.
-
-    Disagreement is the volume of the part of `R` where the candidate
-    disagrees with the spec:
-
-    - For ``fit_type == "KOR"`` (keep-out region):  ``vol(R ∩ candidate_solid)``
-      (candidate has solid material where it should be empty).
-    - For ``fit_type == "KIR"`` (keep-in region): ``vol(R \\ candidate_solid)``
-      (candidate is missing material that should be present).
-
-    A correct candidate returns 0. The function is the simplest
-    discrimination signal usable before the full IoU + pose-search
-    metric is in place.
-
-    Computed with the ``manifold3d`` mesh kernel (no OCCT Booleans): the
-    part and sub-volume are tessellated once each at the part's
-    deflection (shared scale) and intersected/subtracted as manifolds.
-    """
-    from cadgenbench.eval.booleans import (
-        intersect,
-        manifold_volume,
-        subtract,
-    )
-
-    part_artifacts = StepArtifacts(Path(part_step))
-    deflection = part_artifacts.deflection()
-    part_manifold = part_artifacts.manifold(deflection)
-    sub_volume_manifold = StepArtifacts(sv.path).manifold(deflection)
-
-    if sv.fit_type == "KOR":
-        result = intersect(sub_volume_manifold, part_manifold)
-    elif sv.fit_type == "KIR":
-        result = subtract(sub_volume_manifold, part_manifold)
-    else:  # pragma: no cover - construction-time guarantee
-        raise ValueError(
-            f"Unknown fit_type {sv.fit_type!r} on {sv.path.name}"
-        )
-
-    return manifold_volume(result)
-
-
-def score_candidate(
-    part_step: str | Path,
-    fixture_dir: str | Path,
-) -> dict[str, float]:
-    """Score one candidate against every sub-volume in *fixture_dir*.
-
-    Returns ``{SubVolume.name: disagreement_mm3}`` for every sub-volume
-    discovered. The mapping is suitable for the GT self-test (every
-    value should be ≈ 0) and for ranking broken candidates.
-
-    Raises :class:`FileNotFoundError` if *fixture_dir* has no sub-volumes.
-    """
-    fixture_dir = Path(fixture_dir)
-    sub_volumes = discover_sub_volumes(fixture_dir)
-    if not sub_volumes:
-        raise FileNotFoundError(
-            f"No jig_<id>__<index>__<fit>.step files in {fixture_dir}",
-        )
-    return {sv.name: disagreement_volume(part_step, sv) for sv in sub_volumes}
+# Per-sub-volume IoU at or above this saturates to 1.0, absorbing
+# sub-millimetre tessellation residue so an authoring-equivalent submission
+# scores 1.0 cleanly; real geometric errors drop well below it. The
+# visualiser reuses (1 - SATURATION_THRESHOLD) as its "too small to draw"
+# fraction of vol(R).
+SATURATION_THRESHOLD = 0.99
 
 
 # ---------------------------------------------------------------------------
@@ -221,12 +152,6 @@ _ZERO_POSE: tuple[float, float, float, float, float, float] = (
 TRANSLATION_FRACTION_OF_BBOX = 0.01
 DEFAULT_MAX_ROTATION_DEG = 1.0
 DEFAULT_N_SAMPLES = 32
-
-# IoU >= this saturates to 1.0 per sub-volume, absorbing sub-millimetre
-# tessellation residue so an authoring-equivalent submission scores 1.0
-# cleanly. Real geometric errors drop IoU well below 0.99 and are
-# unaffected.
-SATURATION_THRESHOLD = 0.99
 
 # Inflated-AABB margin around R: floor + fraction-of-longest-extent.
 _INFLATED_MARGIN_FLOOR_MM = 2.0
@@ -316,13 +241,18 @@ class InterfaceMatchArtifacts:
     @property
     def gt_manifold(self):
         assert self.gt_artifacts is not None
-        return self.gt_artifacts.manifold(self.deflection_mm)
+        return self.gt_artifacts.manifold()
 
     def sub_volume_artifact(self, sv: SubVolume) -> StepArtifacts:
         assert self._sub_volume_artifacts is not None
         key = Path(sv.path)
         if key not in self._sub_volume_artifacts:
-            self._sub_volume_artifacts[key] = StepArtifacts(key)
+            # Mesh sub-volumes at the GT's scale (shared with the candidate)
+            # rather than their own tiny canonical deflection, so interface
+            # Booleans stay scale-consistent.
+            self._sub_volume_artifacts[key] = StepArtifacts(
+                key, deflection_override=self.deflection_mm,
+            )
         return self._sub_volume_artifacts[key]
 
     def cache_for(self, sv: SubVolume) -> _SubVolumeCache:
@@ -365,7 +295,7 @@ def _build_sub_volume_cache(
     from cadgenbench.common.mesh import tessellate_and_validate
 
     R_mesh = (
-        sv_artifacts.mesh(deflection_mm)
+        sv_artifacts.mesh()
         if sv_artifacts is not None
         else tessellate_and_validate(sv.path, deflection_mm)
     )
@@ -522,8 +452,7 @@ def iou_at_pose(
     :func:`best_iou_in_context` on top of this primitive.
     """
     artifacts = InterfaceMatchArtifacts(gt_step=Path(gt_step), sub_volumes=[sv])
-    defl = artifacts.deflection_mm
-    candidate_manifold = StepArtifacts(part_step).manifold(defl)
+    candidate_manifold = StepArtifacts(part_step).manifold()
     cache = artifacts.cache_for(sv)
     return _iou_with_cache(cache, candidate_manifold, _ZERO_POSE)
 
@@ -628,9 +557,8 @@ def best_iou_in_context(
         max_rotation_deg=max_rotation_deg,
     )
 
-    defl = interface_artifacts.deflection_mm
     candidate_artifacts = candidate_artifacts or StepArtifacts(part_step)
-    candidate_manifold = candidate_artifacts.manifold(defl)
+    candidate_manifold = candidate_artifacts.manifold()
     caches = [interface_artifacts.cache_for(sv) for sv in sub_volumes]
     candidate_regions = [
         _candidate_region_for_cache(c, candidate_manifold)

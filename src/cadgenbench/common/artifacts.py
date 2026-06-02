@@ -35,6 +35,7 @@ class StepArtifacts:
 
     step_path: Path | str
     mesh_cache_dir: Path | str | None = None
+    deflection_override: float | None = None
     _wrapped: object | None = field(default=None, init=False, repr=False)
     _analysis: ValidityResult | None = field(default=None, init=False, repr=False)
     _meshes: dict[float, object] = field(default_factory=dict, init=False, repr=False)
@@ -77,19 +78,25 @@ class StepArtifacts:
         return self._analysis
 
     def deflection(self) -> float:
-        """Default tessellation deflection derived from this STEP's bbox."""
+        """Tessellation deflection for this part.
+
+        ``deflection_override`` (set at construction) wins when present —
+        used to mesh small sub-volumes at their parent GT's scale so a
+        cross-solid Boolean shares one tessellation scale on both
+        operands. Otherwise it is derived from this part's own bbox.
+        """
+        if self.deflection_override is not None:
+            return float(self.deflection_override)
         from cadgenbench.common.mesh import deflection_for_bbox
 
         return deflection_for_bbox(self.analysis.measurements.bounding_box.diagonal)
 
-    def mesh(self, linear_deflection_mm: float | None = None):
+    def mesh(self):
         """The part's one validated mesh, produced via the robust path + cached.
 
         The deflection is chosen internally from the part's own bbox and
-        escalated as needed by :func:`robust_tessellate_shape`; callers
-        don't pass one (any argument is ignored, kept transiently for
-        compatibility while call sites are migrated). Asking for a mesh
-        always returns the same cached, already-valid mesh.
+        escalated as needed by :func:`robust_tessellate_shape`. Asking for
+        a mesh always returns the same cached, already-valid mesh.
         """
         from cadgenbench.common.mesh import MeshSanityError, robust_tessellate_shape
 
@@ -121,7 +128,7 @@ class StepArtifacts:
             self._store_mesh_cache(deflection, mesh)
         return self._meshes[deflection]
 
-    def manifold(self, linear_deflection_mm: float | None = None):
+    def manifold(self):
         """``manifold3d.Manifold`` for the part's cached validated mesh."""
         from cadgenbench.eval.booleans import mesh_to_manifold
 
@@ -130,7 +137,7 @@ class StepArtifacts:
             self._manifolds[deflection] = mesh_to_manifold(self.mesh())
         return self._manifolds[deflection]
 
-    def betti(self, linear_deflection_mm: float | None = None):
+    def betti(self):
         """Betti numbers for the part's cached validated mesh."""
         from cadgenbench.eval.topo_match import compute_betti_from_mesh
 

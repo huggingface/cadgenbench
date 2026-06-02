@@ -135,13 +135,7 @@ class MetricContext:
         from cadgenbench.common.mesh import deflection_for_bbox
 
         if self.artifacts is not None:
-            if self.linear_deflection_mm is not None:
-                defl = float(self.linear_deflection_mm)
-            elif self.measurements is not None:
-                defl = deflection_for_bbox(self.measurements.bounding_box.diagonal)
-            else:
-                defl = self.artifacts.deflection()
-            self._mesh = self.artifacts.mesh(defl)
+            self._mesh = self.artifacts.mesh()
             return self._mesh
         from cadgenbench.common.mesh import tessellate_and_validate
 

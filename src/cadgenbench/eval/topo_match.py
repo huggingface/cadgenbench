@@ -220,11 +220,9 @@ def topo_match(
 
     gt_artifacts = gt_artifacts or StepArtifacts(gt_step)
     candidate_artifacts = candidate_artifacts or StepArtifacts(candidate_step)
-    gt_m = gt_artifacts.analysis.measurements
-    defl = deflection_for_bbox(gt_m.bounding_box.diagonal)
 
-    gt_betti = gt_artifacts.betti(defl)
-    cand_betti = candidate_artifacts.betti(defl)
+    gt_betti = gt_artifacts.betti()
+    cand_betti = candidate_artifacts.betti()
     score, per_axis_scores = topo_match_score(cand_betti, gt_betti)
     return TopoMatchResult(
         candidate=cand_betti,

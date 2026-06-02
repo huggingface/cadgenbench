@@ -46,7 +46,7 @@ from pathlib import Path
 
 from cadgenbench.common.mesh import Mesh
 from cadgenbench.eval.interface_match import (
-    DEFAULT_DISAGREEMENT_EPSILON,
+    SATURATION_THRESHOLD,
     SubVolume,
     discover_sub_volumes,
 )
@@ -91,20 +91,21 @@ def render_part_with_subvolumes(
 
     part_step = Path(part_step).resolve()
     part_artifacts = StepArtifacts(part_step)
-    deflection = part_artifacts.deflection()
-    part_manifold = part_artifacts.manifold(deflection)
+    part_manifold = part_artifacts.manifold()
 
-    meshes: list[Mesh] = [part_artifacts.mesh(deflection)]
+    meshes: list[Mesh] = [part_artifacts.mesh()]
     colors: list[tuple[float, float, float, float]] = [PART_COLOR]
     total_disagreement_vol = 0.0
     n_disagreements = 0
     for sv in sub_volumes:
-        sv_artifacts = StepArtifacts(sv.path)
-        meshes.append(sv_artifacts.mesh(deflection))
+        sv_artifacts = StepArtifacts(
+            sv.path, deflection_override=part_artifacts.deflection(),
+        )
+        meshes.append(sv_artifacts.mesh())
         colors.append(_color_for(sv))
 
         vol, disagreement_mesh = _disagreement_mesh(
-            part_manifold, sv_artifacts.manifold(deflection), sv.fit_type,
+            part_manifold, sv_artifacts.manifold(), sv.fit_type,
         )
         total_disagreement_vol += vol
         if disagreement_mesh is not None:
@@ -342,9 +343,10 @@ def _disagreement_mesh(
     - ``KIR`` (keep-in):  ``R \\ candidate`` (candidate is missing material).
 
     Computed with the ``manifold3d`` mesh kernel (no OCCT Booleans).
-    Returns ``(volume, mesh)``; ``mesh`` is ``None`` when the volume is
-    below :data:`cadgenbench.eval.interface_match.DEFAULT_DISAGREEMENT_EPSILON`,
-    i.e. nothing visually meaningful to highlight.
+    Returns ``(volume, mesh)``; ``mesh`` is ``None`` when the violation is
+    within ``(1 - SATURATION_THRESHOLD)`` of ``vol(R)`` (tessellation
+    residue, nothing meaningful to highlight) — the same tolerance the
+    scoring IoU saturates at.
     """
     from cadgenbench.eval.booleans import (
         intersect,
@@ -361,6 +363,7 @@ def _disagreement_mesh(
         raise ValueError(f"Unknown fit_type {fit_type!r}")
 
     volume = manifold_volume(result)
-    if volume < DEFAULT_DISAGREEMENT_EPSILON:
+    residue = (1.0 - SATURATION_THRESHOLD) * manifold_volume(sub_volume_manifold)
+    if volume < residue:
         return volume, None
     return volume, manifold_to_mesh(result)

@@ -3,7 +3,6 @@
 Two layers:
 
 1. **Public-API contract** -- :class:`SubVolume`, :func:`discover_sub_volumes`,
-   :func:`disagreement_volume`, :func:`score_candidate`,
    :func:`iou_at_pose`, :func:`best_iou_in_context`,
    :func:`interface_score_iou`, :func:`interface_score`. These are the primitives the
    metric, the visualiser, and any future verifier all share.
@@ -44,17 +43,14 @@ def _multiprocessing_available() -> bool:
     return True
 
 from cadgenbench.eval.interface_match import (
-    DEFAULT_DISAGREEMENT_EPSILON,
     DEFAULT_IOU_THRESHOLD,
     FIT_TYPES,
     SubVolume,
     best_iou_in_context,
     discover_sub_volumes,
-    disagreement_volume,
     interface_score,
     interface_score_iou,
     iou_at_pose,
-    score_candidate,
 )
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
@@ -115,13 +111,11 @@ class TestDiscovery:
 
 
 # ---------------------------------------------------------------------------
-# Discrimination on committed fixtures
+# Discrimination fixtures (shared parametrisation)
 # ---------------------------------------------------------------------------
 
-# Parametrisation: ``(fixture_dir, candidate_path, expect_pass)``.
-# - GT and ``correct.step`` are expected to pass (disagreement ≈ 0).
-# - Every ``broken_*.step`` is expected to fail (at least one
-#   sub-volume scores above the epsilon).
+# ``(fixture_dir, candidate_path, expect_pass)``: GT + correct.step pass,
+# every broken_*.step fails.
 def _discrimination_cases() -> list[tuple[Path, Path, bool]]:
     cases: list[tuple[Path, Path, bool]] = []
     for fixture_dir in sorted(JIG_FIXTURES_ROOT.glob("test_*")):
@@ -138,51 +132,6 @@ _CASES = _discrimination_cases()
 _CASE_IDS = [
     f"{fd.name}/{cp.name}" for fd, cp, _ in _CASES
 ] if _CASES else []
-
-
-class TestDiscrimination:
-
-    @pytest.mark.parametrize("fixture_dir, candidate, expect_pass", _CASES, ids=_CASE_IDS)
-    def test_discrimination(
-        self,
-        fixture_dir: Path,
-        candidate: Path,
-        expect_pass: bool,
-    ) -> None:
-        scores = score_candidate(candidate, fixture_dir)
-        max_disagreement = max(scores.values()) if scores else 0.0
-        if expect_pass:
-            assert max_disagreement < DEFAULT_DISAGREEMENT_EPSILON, (
-                f"{candidate.name} expected to pass but got "
-                f"{max_disagreement:.2f} mm^3 disagreement; scores={scores}"
-            )
-        else:
-            assert max_disagreement >= DEFAULT_DISAGREEMENT_EPSILON, (
-                f"{candidate.name} expected to fail but max disagreement "
-                f"is only {max_disagreement:.2f} mm^3 (epsilon "
-                f"{DEFAULT_DISAGREEMENT_EPSILON}); scores={scores}"
-            )
-
-    def test_score_candidate_keys_match_sub_volume_names(
-        self, fixture_dirs: list[Path],
-    ) -> None:
-        for fd in fixture_dirs:
-            expected = {sv.name for sv in discover_sub_volumes(fd)}
-            actual = set(score_candidate(fd / "gt.step", fd))
-            assert actual == expected, fd
-
-
-# ---------------------------------------------------------------------------
-# Per-sub-volume helpers
-# ---------------------------------------------------------------------------
-
-class TestDisagreementVolume:
-
-    def test_correct_candidate_zero_per_sub_volume(self) -> None:
-        d = JIG_FIXTURES_ROOT / "test_3"
-        correct = d / "candidates" / "correct.step"
-        for sv in discover_sub_volumes(d):
-            assert disagreement_volume(correct, sv) < DEFAULT_DISAGREEMENT_EPSILON
 
 
 # ---------------------------------------------------------------------------
@@ -333,7 +282,7 @@ class TestPoseSearch:
 _EXPECTED_SCORES = {
     ("test_1", "gt.step"):                                 1.000,
     ("test_1", "candidates/correct.step"):                 1.000,
-    ("test_1", "candidates/broken_1_small_hole.step"):     0.809,
+    ("test_1", "candidates/broken_1_small_hole.step"):     0.804,
     ("test_1", "candidates/broken_2_offset_hole.step"):    0.348,
     ("test_1", "candidates/broken_3_no_hole.step"):        0.000,
     ("test_2", "gt.step"):                                 1.000,
