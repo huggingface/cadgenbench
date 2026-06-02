@@ -198,15 +198,17 @@ def _shutdown_render_pool() -> None:
     _RENDER_POOL = None
     if pool is None:
         return
-    try:
-        pool.shutdown(wait=False, cancel_futures=True)
-    except Exception:  # noqa: BLE001
-        pass
-    for proc in list(getattr(pool, "_processes", {}).values()):
+    # Terminate workers BEFORE shutdown: ``shutdown`` clears ``_processes`` to
+    # None, so killing first is the only way the terminate actually lands.
+    for proc in list((getattr(pool, "_processes", None) or {}).values()):
         try:
             proc.terminate()
         except Exception:  # noqa: BLE001
             pass
+    try:
+        pool.shutdown(wait=False, cancel_futures=True)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _get_render_pool():  # type: ignore[no-untyped-def]
@@ -572,7 +574,8 @@ def run_agent(
             except Exception:
                 logger.warning("Incremental save failed", exc_info=True)
 
-    for turn_idx in range(config.max_iterations):
+    try:
+      for turn_idx in range(config.max_iterations):
         elapsed = time.monotonic() - t0
         if elapsed >= config.max_duration_s:
             stopped_reason = "timeout"
@@ -743,6 +746,17 @@ def run_agent(
             })
 
         _save_incremental()
+    finally:
+        # Deterministic teardown of this process's shared render pool while we
+        # are still alive. The wall-clock timeout can abandon work mid-render,
+        # leaving the spawn-based ``_RENDER_POOL`` with live workers; relying on
+        # ``atexit`` does NOT help inside a ``ProcessPoolExecutor`` worker
+        # (fixture grandchild), which is force-killed on shutdown and never
+        # runs atexit. That left the inner fixture pool's join — and therefore
+        # ``compare-llms``' ``as_completed`` — deadlocked forever. Killing the
+        # render workers here, before the worker is asked to exit, lets every
+        # fixture future resolve and the join complete. Best-effort.
+        _shutdown_render_pool()
 
     result = _build_result()
 

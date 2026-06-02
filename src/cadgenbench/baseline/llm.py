@@ -232,6 +232,36 @@ def _strip_thinking(content: str) -> str:
     return stripped
 
 
+def _fake_completion(model: str) -> CompletionResult:
+    """Canned completion for offline reproduction (CADGENBENCH_FAKE_LLM).
+
+    Emits a valid build123d block that exports ``output.step`` and never
+    signals ``[DONE]``, so the agent keeps rendering every turn until it hits
+    its wall-clock timeout, exercising the render-pool teardown path that the
+    nested ``compare-llms`` process pools used to deadlock on.
+    """
+    import random
+
+    dims = (random.randint(5, 40), random.randint(5, 40), random.randint(5, 40))
+    content = (
+        "Building the part now.\n\n"
+        "```python\n"
+        "from build123d import *\n"
+        f"b = Box({dims[0]}, {dims[1]}, {dims[2]})\n"
+        "export_step(b, 'output.step')\n"
+        "print('exported')\n"
+        "```\n"
+    )
+    return CompletionResult(
+        content=content,
+        prompt_tokens=10,
+        completion_tokens=20,
+        total_tokens=30,
+        model=model,
+        raw=None,
+    )
+
+
 class LLMClient:
     """Thin wrapper around LiteLLM with retry and token counting.
 
@@ -291,6 +321,12 @@ class LLMClient:
             litellm.APIError: On non-transient API errors.
             RuntimeError: After exhausting all retries on transient errors.
         """
+        # Offline test hook: when CADGENBENCH_FAKE_LLM is set, return a canned
+        # response with zero network. Lets the nested-process-pool teardown of
+        # ``compare-llms`` be reproduced locally in seconds (env vars propagate
+        # to spawned child/grandchild workers). Never enabled in normal runs.
+        if os.environ.get("CADGENBENCH_FAKE_LLM"):
+            return _fake_completion(self.model)
         # Several providers reject a non-default temperature: Anthropic's
         # adaptive-thinking models, OpenAI's GPT-5 family (only accepts
         # temperature=1), and any call where we've enabled reasoning_effort.

@@ -31,7 +31,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import sys
+import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime
@@ -86,12 +88,12 @@ def _shutdown_child_pools() -> None:
         from cadgenbench.baseline import agent as _agent
         pool = getattr(_agent, "_RENDER_POOL", None)
         if pool is not None:
-            pool.shutdown(wait=False, cancel_futures=True)
-            for proc in list(getattr(pool, "_processes", {}).values()):
+            for proc in list((getattr(pool, "_processes", None) or {}).values()):
                 try:
                     proc.terminate()
                 except Exception:  # noqa: BLE001
                     pass
+            pool.shutdown(wait=False, cancel_futures=True)
             _agent._RENDER_POOL = None
     except Exception:  # noqa: BLE001
         pass
@@ -106,6 +108,45 @@ def _shutdown_child_pools() -> None:
             _validity._MESH_POOL = None
     except Exception:  # noqa: BLE001
         pass
+
+
+def _terminate_pool_workers(pool: ProcessPoolExecutor) -> None:
+    """Hard-kill a model pool's worker processes without joining them.
+
+    A safety net for the comparison parent: if a model child somehow fails to
+    return its future (a teardown deadlock), the ``with`` block's implicit
+    ``shutdown(wait=True)`` would re-hang on the wedged child. We instead
+    ``terminate()`` the worker processes directly so the parent always makes
+    progress to the HTML step. Best-effort; never raises.
+    """
+    procs = getattr(pool, "_processes", None) or {}
+    for proc in list(procs.values()):
+        try:
+            proc.terminate()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _model_pool_backstop_s(
+    *,
+    n_fixtures: int,
+    parallel: int,
+    fixture_retries: int,
+    max_duration_s: float,
+    llm_timeout: float,
+    runner_timeout: float,
+) -> float:
+    """Generous wall-clock ceiling for a single model's full fixture run.
+
+    Sized so it only ever trips on a genuine teardown hang, never on a slow-
+    but-healthy run: per-fixture cap (wall-clock budget plus one stuck LLM/
+    script call plus render/eval/upload slack), times the number of
+    sequential fixture waves and retries, times a safety factor, plus a fixed
+    floor. Models run concurrently, so this also bounds the whole step.
+    """
+    per_fixture = max_duration_s + max(llm_timeout, runner_timeout) + 300.0
+    waves = math.ceil(max(1, n_fixtures) / max(1, parallel)) * (fixture_retries + 1)
+    return per_fixture * waves * 2.0 + 600.0
 
 
 def _run_model_process(
@@ -314,7 +355,22 @@ def run(args: argparse.Namespace) -> int:
     # CPU-heavy steps (e.g., tessellation/eval) while still overlapping LLM IO.
     print(f"Running {len(resolved_models)} models in parallel\n")
     run_dirs: list[Path | None] = [None] * len(resolved_models)
-    with ProcessPoolExecutor(max_workers=len(resolved_models)) as pool:
+
+    # Safety net: bound how long we wait on the model pool so a wedged child
+    # can never hang the whole comparison. The deterministic render-pool
+    # teardown in ``run_agent`` is the real fix; this guarantees the parent
+    # still produces an HTML from whatever finished even if a child wedges.
+    backstop_s = _model_pool_backstop_s(
+        n_fixtures=len(tasks),
+        parallel=parallel,
+        fixture_retries=fixture_retries,
+        max_duration_s=args.max_duration,
+        llm_timeout=args.llm_timeout,
+        runner_timeout=args.timeout,
+    )
+
+    pool = ProcessPoolExecutor(max_workers=len(resolved_models))
+    try:
         futures = {
             pool.submit(
                 _run_model_process,
@@ -330,18 +386,37 @@ def run(args: argparse.Namespace) -> int:
             ): i
             for i, m in enumerate(resolved_models)
         }
-        for future in as_completed(futures):
-            i = futures[future]
-            try:
-                idx, label, run_dir, results = future.result()
-                print(f"=== {label} done ===", flush=True)
-                _print_summary(results)
-                run_dirs[idx] = run_dir
-            except Exception:
-                logging.getLogger(__name__).exception(
-                    "Model %s raised; excluding it from the comparison",
-                    resolved_models[i],
-                )
+        pending = set(futures)
+        try:
+            for future in as_completed(futures, timeout=backstop_s):
+                pending.discard(future)
+                i = futures[future]
+                try:
+                    idx, label, run_dir, results = future.result()
+                    print(f"=== {label} done ===", flush=True)
+                    _print_summary(results)
+                    run_dirs[idx] = run_dir
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "Model %s raised; excluding it from the comparison",
+                        resolved_models[i],
+                    )
+        except TimeoutError:
+            abandoned = [resolved_models[futures[f]] for f in pending]
+            print(
+                f"\n⚠️ Backstop: {len(abandoned)} model(s) did not return within "
+                f"{backstop_s:.0f}s; force-terminating and proceeding with "
+                f"{sum(p is not None for p in run_dirs)} completed run(s). "
+                f"Abandoned: {abandoned}",
+                file=sys.stderr,
+            )
+    finally:
+        # Never block on a wedged child: hard-kill the workers first (while
+        # ``_processes`` is still populated), then cancel queued work without
+        # the ``with`` block's blocking join.
+        _terminate_pool_workers(pool)
+        pool.shutdown(wait=False, cancel_futures=True)
+
     run_dirs = [p for p in run_dirs if p is not None]
     if not run_dirs:
         print("All model runs failed; nothing to compare.", file=sys.stderr)
