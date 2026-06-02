@@ -82,25 +82,56 @@ def _inputs_dir_for(gt_dir: Path | None) -> Path | None:
     return cand if cand.exists() else None
 
 
-def _load_description(gt_dir: Path) -> tuple[str, list[Path]]:
+_STEP_SUFFIXES = (".step", ".stp")
+
+
+def _load_description(gt_dir: Path) -> tuple[str, list[Path], list[Path], bool]:
+    """Resolve the input column's text + media for a fixture.
+
+    Returns ``(text, image_files, shape_render_pngs, wants_shape)``:
+
+    - ``image_files``: input images to embed directly (e.g. the
+      generation-task drawing ``input.png``).
+    - ``shape_render_pngs``: canonical-view PNGs of an editing task's
+      starting shape. Editing fixtures ship the starting solid as
+      ``input.step``; the raw STEP can't be shown with ``<img>`` (it
+      renders as a broken image), so we display its pre-rendered views
+      from ``inputs/<fixture>/renders/`` exactly like the GT column.
+    - ``wants_shape``: the fixture declared a STEP input. Lets the
+      caller render an explicit "no input renders" note when the
+      render PNGs weren't shipped, instead of a silent blank.
+    """
     inputs_dir = _inputs_dir_for(gt_dir)
     if inputs_dir is None:
-        return "", []
+        return "", [], [], False
     desc_path = inputs_dir / "description.yaml"
     if not desc_path.exists():
-        return "", []
+        return "", [], [], False
     data = yaml.safe_load(desc_path.read_text()) or {}
     text = data.get("description", "")
-    input_files: list[Path] = []
+    image_files: list[Path] = []
+    wants_shape = False
     for name in data.get("input_files", []):
         p = inputs_dir / name
+        if p.suffix.lower() in _STEP_SUFFIXES:
+            # Shape input: rendered separately below, never embedded raw.
+            wants_shape = True
+            continue
         if p.exists():
-            input_files.append(p)
-    if not input_files:
+            image_files.append(p)
+    if not image_files and not wants_shape:
         p = inputs_dir / "input.png"
         if p.exists():
-            input_files.append(p)
-    return text, input_files
+            image_files.append(p)
+    shape_render_pngs: list[Path] = []
+    if wants_shape:
+        renders_dir = inputs_dir / "renders"
+        shape_render_pngs = [
+            renders_dir / f"{v}.png"
+            for v in VIEWS
+            if (renders_dir / f"{v}.png").exists()
+        ]
+    return text, image_files, shape_render_pngs, wants_shape
 
 
 def discover_run(run_dir: Path) -> dict:
@@ -332,13 +363,20 @@ def _render_fixture_card(fix: dict, idx: int) -> str:
     p.append('<div class="col">')
     p.append("<h3>Input</h3>")
     if gt_dir:
-        desc_text, input_imgs = _load_description(gt_dir)
+        desc_text, input_imgs, input_shape_pngs, wants_shape = _load_description(gt_dir)
         if desc_text:
             p.append(f'<p class="desc">{html.escape(desc_text)}</p>')
         for img_path in input_imgs:
             uri = _data_uri(img_path)
             if uri:
                 p.append(f'<img src="{uri}" alt="input" class="input-img" loading="lazy">')
+        # Editing tasks: show the starting shape's canonical views
+        # (same grid as GT/Output). Falls back to a note if the render
+        # PNGs weren't shipped with the input fixture.
+        if input_shape_pngs:
+            p.append(_images_html(input_shape_pngs))
+        elif wants_shape:
+            p.append('<p class="note">No input renders</p>')
         gt_pdf = gt_dir / "ground_truth.pdf"
         if gt_pdf.exists():
             uri = _data_uri(gt_pdf)

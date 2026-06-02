@@ -112,25 +112,47 @@ def _inputs_dir_for(gt_dir: Path | None) -> Path | None:
     return cand if cand.exists() else None
 
 
-def _load_description(gt_dir: Path) -> tuple[str, list[Path]]:
+_STEP_SUFFIXES = (".step", ".stp")
+
+
+def _load_description(gt_dir: Path) -> tuple[str, list[Path], list[Path], bool]:
+    """``(text, image_files, shape_render_pngs, wants_shape)`` for the input panel.
+
+    Editing fixtures ship the starting solid as ``input.step``; the raw
+    STEP can't be shown with ``<img>``, so we surface its canonical-view
+    PNGs from ``inputs/<fixture>/renders/`` (mirroring the GT renders)
+    instead. See the matching helper in ``single_run.py``.
+    """
     inputs_dir = _inputs_dir_for(gt_dir)
     if inputs_dir is None:
-        return "", []
+        return "", [], [], False
     desc_path = inputs_dir / "description.yaml"
     if not desc_path.exists():
-        return "", []
+        return "", [], [], False
     data = yaml.safe_load(desc_path.read_text()) or {}
     text = data.get("description", "")
-    input_files: list[Path] = []
+    image_files: list[Path] = []
+    wants_shape = False
     for name in data.get("input_files", []):
         p = inputs_dir / name
+        if p.suffix.lower() in _STEP_SUFFIXES:
+            wants_shape = True
+            continue
         if p.exists():
-            input_files.append(p)
-    if not input_files:
+            image_files.append(p)
+    if not image_files and not wants_shape:
         p = inputs_dir / "input.png"
         if p.exists():
-            input_files.append(p)
-    return text, input_files
+            image_files.append(p)
+    shape_render_pngs: list[Path] = []
+    if wants_shape:
+        renders_dir = inputs_dir / "renders"
+        shape_render_pngs = [
+            renders_dir / f"{v}.png"
+            for v in VIEWS
+            if (renders_dir / f"{v}.png").exists()
+        ]
+    return text, image_files, shape_render_pngs, wants_shape
 
 
 def _discover_run(run_dir: Path) -> dict:
@@ -478,13 +500,17 @@ def _render_input_panel(gt_dir: Path | None, runs_data: list) -> str:
     del runs_data  # only used for description fallback previously; now we always read from description.yaml
     p = ['<div class="input-section">', "<h3>Input</h3>"]
     if gt_dir:
-        desc_text, input_imgs = _load_description(gt_dir)
+        desc_text, input_imgs, input_shape_pngs, wants_shape = _load_description(gt_dir)
         if desc_text:
             p.append(f'<p class="desc">{html.escape(desc_text)}</p>')
         for img_path in input_imgs:
             uri = _data_uri(img_path)
             if uri:
                 p.append(f'<img src="{uri}" alt="input" class="input-img" loading="lazy">')
+        if input_shape_pngs:
+            p.append(_images_html(input_shape_pngs))
+        elif wants_shape:
+            p.append('<span class="note">no input renders</span>')
     p.append("</div>")
     return "\n".join(p)
 
