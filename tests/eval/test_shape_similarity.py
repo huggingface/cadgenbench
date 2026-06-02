@@ -97,14 +97,14 @@ class TestShapePointCloudF1:
         b = MetricContext()
         assert shape_point_cloud_f1(a, b) is None
 
-    def test_normal_gate_rejects_flipped_normals(self) -> None:
-        """Points coincide but normals are inverted -> F1 must drop to ~0.
+    def test_normal_gate_accepts_flipped_normals_via_absdot(self) -> None:
+        """Inverted normals at coincident points are ACCEPTED (|dot| gate).
 
-        Synthetic test: build a context from a real STEP, snapshot its
-        sampled points + normals, then build a second context that
-        shares the points but flips every normal. Per the spec, the F1
-        hit gate requires ``n_cand · n_gt > 0.9``, so a fully-inverted
-        candidate should fail every match even though distances are 0.
+        The hit gate matches on ``|n_cand · n_gt|`` (orientation-insensitive),
+        so a fully-inverted candidate at identical positions still scores ~1.
+        This is intentional: flipped/winding-convention differences are not a
+        shape difference, and genuine "wrong side" geometry is excluded upstream
+        by the watertight + manifold + winding gate, not here.
         """
         import numpy as np
 
@@ -117,7 +117,7 @@ class TestShapePointCloudF1:
         b._pc_normals = -1.0 * b._pc_normals  # noqa: SLF001
         flipped = shape_point_cloud_f1(a, b)
         assert flipped is not None
-        assert flipped < 0.05, flipped
+        assert flipped > 0.95, flipped  # |dot| -> flip accepted
         sanity = float(np.linalg.norm(
             a.point_cloud[:5] - b.point_cloud[:5], axis=1,
         ).max())

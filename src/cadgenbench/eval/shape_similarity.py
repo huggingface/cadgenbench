@@ -103,6 +103,7 @@ class MetricContext:
             mesh.triangles,
             n_points=self._pc_n_points,
             seed=self._pc_seed,
+            smooth_normals=True,
         )
         self._pc_points = pts
         self._pc_normals = nrm
@@ -178,12 +179,17 @@ MetricFn = Callable[[MetricContext, MetricContext], float | None]
 
 POINT_CLOUD_F1_THRESHOLD_FRACTION = 0.01
 # Normal-agreement gate on point-cloud F1 hits. A match requires the
-# candidate and GT surface normals at the matched pair to dot above
-# this threshold (cosine), i.e. surfaces in the same orientation
-# class. 0.9 ≈ 25° tolerance, generous enough to absorb tessellation
-# noise on smooth surfaces but tight enough to reject "right place,
-# wrong side" matches (e.g. an inverted-orientation copy of the part).
-POINT_CLOUD_F1_NORMAL_DOT_THRESHOLD = 0.9
+# candidate and GT surface normals at the matched pair to agree in
+# direction within this cosine, applied to the **absolute** dot product
+# (|dot|): we accept a point on the right surface regardless of which way
+# the facet is wound, which removes the whole orientation-sensitivity class
+# (winding-convention differences and flipped patches) that flat-facet,
+# signed-dot matching was fragile to. cos(30°) ≈ 0.866 keeps a generous
+# angular tolerance for residual smooth-normal-across-crease wobble.
+# (Combined with smooth_normals=True sampling, this makes the metric
+# continuous in the triangulation.) "Right place, wrong side" is still
+# excluded upstream by the watertight + manifold + winding gate.
+POINT_CLOUD_F1_NORMAL_DOT_THRESHOLD = 0.8660254037844387  # cos(30°)
 
 
 def shape_point_cloud_f1(candidate: MetricContext, gt: MetricContext) -> float | None:
@@ -588,11 +594,13 @@ def _point_cloud_f1_stats(
     a_to_b_dot = np.einsum("ij,ij->i", nrm_a, nrm_b[a_to_b_idx])
     b_to_a_dot = np.einsum("ij,ij->i", nrm_b, nrm_a[b_to_a_idx])
 
+    # |dot|: orientation-insensitive (accept the right surface regardless of
+    # winding direction); see POINT_CLOUD_F1_NORMAL_DOT_THRESHOLD.
     a_hit = (a_to_b_dist <= threshold) & (
-        a_to_b_dot > POINT_CLOUD_F1_NORMAL_DOT_THRESHOLD
+        np.abs(a_to_b_dot) > POINT_CLOUD_F1_NORMAL_DOT_THRESHOLD
     )
     b_hit = (b_to_a_dist <= threshold) & (
-        b_to_a_dot > POINT_CLOUD_F1_NORMAL_DOT_THRESHOLD
+        np.abs(b_to_a_dot) > POINT_CLOUD_F1_NORMAL_DOT_THRESHOLD
     )
 
     precision = float(a_hit.mean())

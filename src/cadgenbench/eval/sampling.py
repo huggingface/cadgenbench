@@ -117,6 +117,8 @@ def sample_points_and_normals_from_mesh(
     tris: np.ndarray,
     n_points: int = 10_000,
     seed: int | None = None,
+    *,
+    smooth_normals: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Area-weighted point sample of a pre-tessellated mesh with per-point normals.
 
@@ -124,10 +126,19 @@ def sample_points_and_normals_from_mesh(
     by :mod:`cadgenbench.common.mesh`), so the cross product of triangle
     edges points outward.
 
+    ``smooth_normals``: when True each point's normal is the barycentric blend
+    of **area-weighted vertex normals** instead of the flat facet normal. Flat
+    facet normals are discontinuous in the triangulation (two valid meshings of
+    a curved surface tilt their facets differently at the same point), so they
+    make normal-gated metrics tessellation-sensitive; the smooth normal tracks
+    the true surface and is largely mesh-independent.
+
     Returns:
         ``(points, normals)``: both ``(N, 3)`` float64 arrays.
     """
-    return _area_weighted_sample(verts, tris, n_points, seed, with_normals=True)
+    return _area_weighted_sample(
+        verts, tris, n_points, seed, with_normals=True, smooth_normals=smooth_normals,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -246,14 +257,16 @@ def _area_weighted_sample(
     seed: int | None,
     *,
     with_normals: bool = False,
+    smooth_normals: bool = False,
 ):
     """Uniformly sample points on a triangle mesh by area.
 
     With ``with_normals=False`` returns ``points`` only (``(N, 3)``).
-    With ``with_normals=True`` returns ``(points, normals)`` where each
-    normal is the unit triangle normal of the triangle the point was
-    drawn from. The caller is responsible for feeding in an
-    orientation-consistent mesh if outward-pointing normals matter.
+    With ``with_normals=True`` returns ``(points, normals)``. By default each
+    normal is the unit triangle (flat) normal of the source triangle; with
+    ``smooth_normals=True`` it is the barycentric blend of area-weighted vertex
+    normals (continuous in the triangulation). The caller is responsible for
+    feeding in an orientation-consistent mesh if outward-pointing normals matter.
     """
     rng = np.random.default_rng(seed)
 
@@ -286,6 +299,22 @@ def _area_weighted_sample(
     )
     if not with_normals:
         return points
+
+    if smooth_normals:
+        # Area-weighted vertex normals (cross = 2*area * unit facet normal, so
+        # accumulating it per vertex weights by area), then barycentric-blend
+        # them at each sample. Continuous in the triangulation.
+        vertex_normals = np.zeros_like(verts)
+        np.add.at(vertex_normals, tris[:, 0], cross)
+        np.add.at(vertex_normals, tris[:, 1], cross)
+        np.add.at(vertex_normals, tris[:, 2], cross)
+        vn = vertex_normals / np.maximum(
+            np.linalg.norm(vertex_normals, axis=1, keepdims=True), 1e-12,
+        )
+        t = tris[chosen]
+        normals = u[:, None] * vn[t[:, 0]] + v[:, None] * vn[t[:, 1]] + w[:, None] * vn[t[:, 2]]
+        normals /= np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-12)
+        return points, normals
 
     # Unit triangle normals; the area filter above already excluded any
     # zero-area triangles from the draw, so the denominator is positive.
