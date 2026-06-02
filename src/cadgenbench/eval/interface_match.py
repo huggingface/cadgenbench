@@ -208,7 +208,10 @@ class InterfaceMatchArtifacts:
     def __post_init__(self) -> None:
         self.gt_step = Path(self.gt_step)
         if self.gt_artifacts is None:
-            self.gt_artifacts = StepArtifacts(self.gt_step)
+            # Ground truth is pre-verified by the authoring gate, so it is
+            # trusted: its validity mesh gate is skipped and it is meshed once
+            # at its own deflection on demand.
+            self.gt_artifacts = StepArtifacts(self.gt_step, is_ground_truth=True)
         if self._sub_volume_artifacts is None:
             self._sub_volume_artifacts = {}
         if self._sub_volume_caches is None:
@@ -249,9 +252,12 @@ class InterfaceMatchArtifacts:
         if key not in self._sub_volume_artifacts:
             # Mesh sub-volumes at the GT's scale (shared with the candidate)
             # rather than their own tiny canonical deflection, so interface
-            # Booleans stay scale-consistent.
+            # Booleans stay scale-consistent. Trusted (pre-verified) parts, so
+            # the validity mesh gate is skipped — meshing them at their own
+            # deflection first would leave an OCC triangulation that BRepMesh
+            # refuses to coarsen, silently defeating the override above.
             self._sub_volume_artifacts[key] = StepArtifacts(
-                key, deflection_override=self.deflection_mm,
+                key, deflection_override=self.deflection_mm, is_ground_truth=True,
             )
         return self._sub_volume_artifacts[key]
 

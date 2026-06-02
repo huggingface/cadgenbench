@@ -282,7 +282,11 @@ class TestPoseSearch:
 _EXPECTED_SCORES = {
     ("test_1", "gt.step"):                                 1.000,
     ("test_1", "candidates/correct.step"):                 1.000,
-    ("test_1", "candidates/broken_1_small_hole.step"):     0.804,
+    # 0.809 (was 0.804): the sub-volume is now meshed once at the parent-GT
+    # deflection (the override), instead of being pre-tessellated at its own
+    # finer deflection by the validity gate and then left uncoarsened by
+    # BRepMesh. This is the override working as designed.
+    ("test_1", "candidates/broken_1_small_hole.step"):     0.809,
     ("test_1", "candidates/broken_2_offset_hole.step"):    0.348,
     ("test_1", "candidates/broken_3_no_hole.step"):        0.000,
     ("test_2", "gt.step"):                                 1.000,

@@ -18,8 +18,12 @@ from cadgenbench.common.measurements import BBox, Measurements, _measure_wrapped
 from cadgenbench.common.validity import (
     ValidationResult,
     ValidityResult,
+    _file_size_error,
     _load_step_wrapped,
+    _oversized_validity_result,
+    _raise_if_ground_truth,
     _validate_wrapped,
+    safeguarded_tessellate,
 )
 
 
@@ -36,6 +40,7 @@ class StepArtifacts:
     step_path: Path | str
     mesh_cache_dir: Path | str | None = None
     deflection_override: float | None = None
+    is_ground_truth: bool = False
     _wrapped: object | None = field(default=None, init=False, repr=False)
     _analysis: ValidityResult | None = field(default=None, init=False, repr=False)
     _meshes: dict[float, object] = field(default_factory=dict, init=False, repr=False)
@@ -64,11 +69,22 @@ class StepArtifacts:
             if cached is not None:
                 self._analysis = cached
             else:
+                # File-size pre-filter, before the STEP is parsed: refuse an
+                # oversized part rather than paying to load + measure it.
+                fs_error = _file_size_error(Path(self.step_path))
+                if fs_error is not None:
+                    _raise_if_ground_truth(
+                        fs_error, Path(self.step_path), self.is_ground_truth,
+                    )
+                    self._analysis = _oversized_validity_result(fs_error)
+                    return self._analysis
                 measurements = _measure_wrapped(self.wrapped)
                 validation = _validate_wrapped(
                     self.wrapped,
                     bbox_diagonal=measurements.bounding_box.diagonal,
                     mesh_cache=self._meshes,
+                    step_path=Path(self.step_path),
+                    is_ground_truth=self.is_ground_truth,
                 )
                 self._analysis = ValidityResult(
                     validation=validation,
@@ -92,20 +108,22 @@ class StepArtifacts:
         return deflection_for_bbox(self.analysis.measurements.bounding_box.diagonal)
 
     def mesh(self):
-        """The part's one validated mesh, produced via the robust path + cached.
+        """The part's one validated mesh at its deflection, produced once + cached.
 
-        The deflection is chosen internally from the part's own bbox and
-        escalated as needed by :func:`robust_tessellate_shape`. Asking for
-        a mesh always returns the same cached, already-valid mesh.
+        Each part is tessellated at exactly one deflection (its own, or the
+        ``deflection_override`` for a sub-volume) and cached, so every caller
+        reads the same mesh and nothing is ever re-meshed at a second
+        resolution. Meshing goes through :func:`safeguarded_tessellate`
+        (per-mesh timeout + triangle ceiling); a cache hit does no work.
         """
-        from cadgenbench.common.mesh import MeshSanityError, robust_tessellate_shape
+        from cadgenbench.common.mesh import MeshSanityError
 
-        # Negative cache: validity already ran the same robust meshing path
-        # and recorded the verdict. If the part is invalid there is no valid
-        # mesh to produce, so raise immediately rather than re-running the
-        # (escalating) ladder for every metric that asks. Valid parts had
-        # their mesh stored into ``self._meshes`` by the validity gate, so
-        # the lookup below is a cache hit and never re-meshes.
+        # Negative cache: analysis already recorded the validity verdict. An
+        # invalid part has no valid mesh, so raise immediately rather than
+        # tessellating. For an untrusted candidate the validity mesh gate also
+        # stored its mesh into ``self._meshes``, so the lookup below is a cache
+        # hit; trusted GT / jig parts skip that gate and are tessellated here
+        # on first request (once), then cached.
         validation = self.analysis.validation
         if not validation.is_valid:
             reason = (
@@ -123,7 +141,16 @@ class StepArtifacts:
             if cached is not None:
                 self._meshes[deflection] = cached
                 return cached
-            mesh = robust_tessellate_shape(self.wrapped, deflection)
+            # First (and only) tessellation of this part, at the one deflection
+            # it is ever meshed at. The shape has not been tessellated before
+            # (validity skips trusted parts), so this is deterministic
+            # regardless of whether process isolation is enabled.
+            mesh = safeguarded_tessellate(
+                self.step_path,
+                deflection,
+                wrapped=self.wrapped,
+                is_ground_truth=self.is_ground_truth,
+            )
             self._meshes[deflection] = mesh
             self._store_mesh_cache(deflection, mesh)
         return self._meshes[deflection]

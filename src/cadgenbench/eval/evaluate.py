@@ -188,7 +188,7 @@ def evaluate_result(
     aligned_step = result_dir / ALIGNED_STEP
     renders_dir = result_dir / RENDERS_DIR
 
-    gt_artifacts = StepArtifacts(gt_step)
+    gt_artifacts = StepArtifacts(gt_step, is_ground_truth=True)
     rmse = _align_or_reuse(
         raw_candidate, gt_step, aligned_step, renders_dir,
         data=data, force=force_align,
