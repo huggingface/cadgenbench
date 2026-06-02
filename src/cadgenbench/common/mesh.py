@@ -492,6 +492,69 @@ def validate_mesh(mesh: Mesh) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# Adaptive (escalating) tessellation
+# ---------------------------------------------------------------------------
+
+# Divisors applied to the *requested* deflection, coarsest first. Rung 1 is
+# the requested deflection itself (so a shape that already meshes is meshed
+# exactly as before); finer rungs are only reached when a coarser one fails
+# the manifold/closed checks. Stops at /32 — the finest that proved necessary
+# to clear false non-manifolds on real parts — so the ladder is bounded and
+# cannot run away to pathological triangle counts. The triangle-count ceiling
+# and the process-kill timeout are deliberately *not* here; they are a
+# separate safeguard layer.
+DEFLECTION_LADDER: tuple[int, ...] = (1, 4, 16, 32)
+
+
+def robust_tessellate_shape(
+    wrapped,  # type: ignore[no-untyped-def]
+    linear_deflection_mm: float,
+    *,
+    angular_deflection_rad: float = 0.5,
+    parallel: bool | None = None,
+    ladder: tuple[int, ...] = DEFLECTION_LADDER,
+) -> Mesh:
+    """Tessellate + validate, escalating to finer deflection on failure.
+
+    The single chokepoint both the validity gate and the metric mesh
+    accessor route through, so neither tessellates "raw" at a coarse
+    deflection. Tries the requested deflection first (ladder rung 1),
+    then ``requested / divisor`` for each finer rung, returning the first
+    :class:`Mesh` that passes :func:`validate_mesh`. The returned mesh's
+    ``linear_deflection_mm`` records the rung that actually succeeded
+    (for reproducibility), which may be finer than requested.
+
+    Backwards-compatible: a shape that already meshes at the requested
+    deflection is meshed identically (rung 1) and returns immediately.
+
+    Raises:
+        MeshSanityError: if no rung in *ladder* produces a closed
+            orientable manifold (the failure from the finest rung tried).
+    """
+    if not ladder:
+        raise ValueError("ladder must list at least one divisor")
+
+    last_exc: MeshSanityError | None = None
+    for divisor in ladder:
+        deflection = linear_deflection_mm / divisor
+        try:
+            mesh = tessellate_shape(
+                wrapped,
+                deflection,
+                angular_deflection_rad=angular_deflection_rad,
+                parallel=parallel,
+            )
+            validate_mesh(mesh)
+            return mesh
+        except MeshSanityError as exc:
+            last_exc = exc
+            continue
+
+    assert last_exc is not None  # ladder is non-empty, so we tried >=1 rung
+    raise last_exc
+
+
 def tessellate_and_validate(
     step_path: str | Path,
     linear_deflection_mm: float,
