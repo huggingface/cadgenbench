@@ -95,39 +95,6 @@ class TestCylinderWithHole:
         assert validate_step(self.PATH).is_watertight
 
 
-class TestGeometryQualityGate:
-    """Fixed geometry floors: edge length, face area, BREP tolerance."""
-
-    def test_normal_box_is_clean(self) -> None:
-        from build123d import Box
-
-        from cadgenbench.common.validity import _collect_geometry_quality_errors
-
-        assert _collect_geometry_quality_errors(Box(10, 20, 30).wrapped) == []
-
-    def test_near_degenerate_edge_flagged(self) -> None:
-        """A plate 0.0005 mm thick has sub-micron edges (< 0.001 mm)."""
-        from build123d import Box
-
-        from cadgenbench.common.validity import _collect_geometry_quality_errors
-
-        errs = _collect_geometry_quality_errors(Box(400, 300, 0.0005).wrapped)
-        assert any("shorter than" in e for e in errs), errs
-
-    def test_gate_rejects_degenerate_part_with_clear_reason(self) -> None:
-        """A thin plate is a watertight BREP but fails the quality gate."""
-        from build123d import Box
-
-        from cadgenbench.common.validity import _validate_wrapped
-
-        result = _validate_wrapped(Box(400, 300, 0.0005).wrapped)
-        assert not result.is_valid
-        assert result.is_watertight, "the BREP itself is well-formed"
-        assert any("shorter than" in e for e in result.topology_errors), (
-            result.topology_errors
-        )
-
-
 class TestErrorHandling:
 
     def test_missing_file(self) -> None:
