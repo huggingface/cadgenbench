@@ -152,10 +152,26 @@ def align_points(
     target: np.ndarray,
     icp_max_iter: int = 50,
     icp_tolerance: float = 1e-6,
+    pca_top_k: int = 12,
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    """Align two (N, 3) point clouds.  Returns ``(R, t, rmse)``."""
-    R_coarse, t_coarse = _pca_align(source, target)
-    return _icp(source, target, R_coarse, t_coarse, icp_max_iter, icp_tolerance)
+    """Align two (N, 3) point clouds.  Returns ``(R, t, rmse)``.
+
+    Multi-start: refines ICP from each of the top-*pca_top_k* PCA candidates
+    (of the 24 octahedral orientations) and keeps the lowest-RMSE result. A
+    single PCA start + one ICP locks onto a symmetry-equivalent but wrong
+    orientation on near-symmetric parts (the failure mode that produced
+    false-low metric scores); scoring multiple starts avoids that. Mirrors
+    :func:`align_step`'s ``refine=True`` path.
+    """
+    top_k = _pca_align_candidates(source, target)[:pca_top_k]
+    best: tuple[np.ndarray, np.ndarray, float] | None = None
+    for R_c, t_c in top_k:
+        R_cand, t_cand, rmse_cand = _icp(
+            source, target, R_c, t_c, icp_max_iter, icp_tolerance,
+        )
+        if best is None or rmse_cand < best[2]:
+            best = (R_cand, t_cand, rmse_cand)
+    return best  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
