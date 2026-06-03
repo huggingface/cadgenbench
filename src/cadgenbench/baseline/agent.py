@@ -30,6 +30,7 @@ import base64
 import logging
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -72,6 +73,49 @@ ARTIFACT_FILENAME = "output.step"
 # agent's working directory rather than inlined into the prompt
 # (editing tasks: the agent loads the seed STEP with ``import_step``).
 _WORKDIR_SEED_SUFFIXES = {".step", ".stp"}
+
+
+class AgentTimeoutError(TimeoutError):
+    """Raised when an agent step exceeds the fixture wall-clock budget."""
+
+
+class _WallClockAlarm:
+    """SIGALRM-backed deadline for blocking provider calls."""
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds = max(0.0, float(seconds))
+        self._old_handler = None
+        self._old_timer = None
+        self._enabled = (
+            self.seconds > 0
+            and threading.current_thread() is threading.main_thread()
+            and hasattr(signal, "SIGALRM")
+            and hasattr(signal, "setitimer")
+        )
+
+    def __enter__(self):
+        if not self._enabled:
+            return self
+        self._old_handler = signal.getsignal(signal.SIGALRM)
+        self._old_timer = signal.getitimer(signal.ITIMER_REAL)
+
+        def _raise_timeout(_signum, _frame):
+            raise AgentTimeoutError(
+                f"LLM call exceeded wall-clock budget ({self.seconds:.0f}s)"
+            )
+
+        signal.signal(signal.SIGALRM, _raise_timeout)
+        signal.setitimer(signal.ITIMER_REAL, self.seconds)
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        if self._enabled:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            if self._old_handler is not None:
+                signal.signal(signal.SIGALRM, self._old_handler)
+            if self._old_timer and self._old_timer[0] > 0:
+                signal.setitimer(signal.ITIMER_REAL, *self._old_timer)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -597,7 +641,16 @@ def run_agent(
         }
         if config.reasoning_effort is not None:
             complete_kwargs["reasoning_effort"] = config.reasoning_effort
-        completion = client.complete(messages, **complete_kwargs)
+        remaining_s = max(0.0, config.max_duration_s - (time.monotonic() - t0))
+        call_deadline_s = min(config.llm_timeout, remaining_s)
+        try:
+            with _WallClockAlarm(call_deadline_s):
+                completion = client.complete(messages, **complete_kwargs)
+        except AgentTimeoutError as exc:
+            stopped_reason = "timeout"
+            print(f" TIMEOUT ({exc})", flush=True)
+            _save_incremental()
+            break
         total_tokens += completion.total_tokens
         print(f" {completion.total_tokens} tok ({completion.prompt_tokens}+{completion.completion_tokens})", flush=True)
 

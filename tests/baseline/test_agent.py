@@ -398,6 +398,27 @@ class TestRunAgentTokenBudget:
         assert len(result.turns) == 2
 
 
+class TestRunAgentWallClockBudget:
+
+    def test_blocking_llm_call_times_out(self, tmp_path: Path) -> None:
+        class BlockingClient:
+            def complete(self, messages, **kwargs):  # noqa: ANN001
+                import time
+                time.sleep(60)
+                raise AssertionError("unreachable")
+
+        config = AgentConfig(max_duration_s=0.1, llm_timeout=30)
+        result = run_agent(
+            "Build a box",
+            config=config,
+            client=BlockingClient(),  # type: ignore[arg-type]
+            output_dir=tmp_path,
+        )
+
+        assert result.stopped_reason == "timeout"
+        assert not result.completed
+
+
 class TestRunAgentNoCodeBlocks:
 
     @patch("cadgenbench.baseline.agent._auto_validate_and_render", return_value=("", None))
