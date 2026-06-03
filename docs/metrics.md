@@ -13,17 +13,22 @@ For one candidate against one GT:
 
 1. **Validity gate.** If the candidate STEP isn't a valid, watertight,
    meshable solid, `cad_score = 0`.
-2. Otherwise, `cad_score` is the mean of three independent
+2. Otherwise, `cad_score` is a **weighted** mean of three independent
    $[0, 1]$ metrics:
 
 ```
-            0                                                          if not is_valid
+            0                                                              if not is_valid
 cad_score =
-            mean(shape_similarity, topology_match, interface_match)    otherwise
+            0.4·shape_similarity + 0.4·interface + 0.2·topology_match      otherwise
 ```
 
+Topology is weighted down (0.2): it is comparatively easy to score well
+on these parts, so it should not carry a full third of the headline.
+Absent axes drop out and the remaining weights renormalize (e.g. a
+fixture with no interface spec scores `(0.4·shape + 0.2·topology) / 0.6`).
+
 (This is the **generation** composition. **Editing** tasks renormalize
-the shape axis against the no-op input and reweight the mean — see
+the shape axis against the no-op input and reweight differently — see
 [§ Editing tasks](#editing-tasks-no-op-renormalization) below.)
 
 | Component | Range | What it asks | Deep dive |
@@ -69,14 +74,14 @@ We instruct submissions to centre their models at $(0, 0, 0)$ and give rules for
 ┌────────────────┐  ┌────────────────┐  ┌────────────────┐
 │ Shape          │  │ Topology       │  │ Interface      │
 │ Similarity     │  │ Match          │  │ Match          │
-│ (mean of 3     │  │ (Betti b₀b₁b₂  │  │ (per-group     │
+│ (mean of 2     │  │ (Betti b₀b₁b₂  │  │ (per-group     │
 │  sub-metrics)  │  │  agreement)    │  │  pose-searched │
 │                │  │                │  │  IoU)          │
 └────────┬───────┘  └────────┬───────┘  └────────┬───────┘
          │                   │                   │
          └───────────────────┼───────────────────┘
                              ▼
-                  mean → cad_score ∈ [0, 1]
+              weighted mean → cad_score ∈ [0, 1]
 ```
 
 ### Three orthogonal metrics
@@ -186,13 +191,18 @@ with absent axes dropping out and the remaining weights renormalizing:
 ```
             0                                                   if not is_valid
 cad_score =
-            0.5·s_renorm + 0.25·topo_match + 0.25·interface     otherwise
+            0.5·s_renorm + 0.3·interface + 0.2·topo_match        otherwise
 ```
 
-A no-op therefore scores at most `0.5·0 + 0.25 + 0.25 = 0.5` (and less
-when the edit moves topology/interface, since the no-op then misses
-those too); any genuine shape improvement clears it. The validity gate
-still hard-zeros as for generation.
+Editing weights differ from generation (which uses 0.4 / 0.4 / 0.2):
+shape dominates at 0.5 because it is the axis that actually resolves most
+edits, while topology and interface are frequently non-discriminating on
+a given edit (the edit rarely changes Betti numbers or mating fit), so
+topology is toned down to 0.2. A no-op therefore scores at most
+`0.5·0 + 0.3 + 0.2 = 0.5` (and less when the edit moves
+topology/interface, since the no-op then misses those too); any genuine
+shape improvement clears it. The validity gate still hard-zeros as for
+generation.
 
 **`b_shape` is a fixture constant**, not a per-submission quantity: it
 depends only on `input.step`, `ground_truth.step`, and the
@@ -215,7 +225,7 @@ The renormalized + raw shape values are persisted under
 
 ### Example 1: Shape Similarity drives the score
 
-This fixture has no interface specification, so the interface term drops out and `cad_score = mean(shape_similarity, topology_match)`. The candidate captures the rough silhouette of the bracket but misplaces nearly every feature.
+This fixture has no interface specification, so the interface term drops out and the remaining weights renormalize: `cad_score = (0.4·shape_similarity + 0.2·topology_match) / 0.6`. The candidate captures the rough silhouette of the bracket but misplaces nearly every feature.
 
 | Ground truth | Candidate |
 | :--: | :--: |
@@ -228,7 +238,7 @@ This fixture has no interface specification, so the interface term drops out and
 | `shape_volume_iou` | `0.558` | candidate is ~30 % off in occupied volume |
 | **`shape_similarity_score`** | **`0.615`** | mean of the two sub-metrics |
 | `topology_match` | `0.939` | $s_0 = 1.000$ ($b_0$ match), $s_1 = 0.818$ ($b_1 = 8$ vs GT $10$ → $9/11$), $s_2 = 1.000$ ($b_2$ match) |
-| **`cad_score`** | **`0.777`** | $(0.615 + 0.939) / 2$ |
+| **`cad_score`** | **`0.723`** | $(0.4 \cdot 0.615 + 0.2 \cdot 0.939) / 0.6$ (no interface axis) |
 
 ### Example 2: Interface Match catches what Shape Similarity misses
 
@@ -248,7 +258,7 @@ Visually indistinguishable. The interface-match overlay makes the problem obviou
 | `shape_similarity_score` | `0.931` | pc-F1 0.944, vol-IoU 0.918 |
 | `topology_match` | `1.000` | $(b_0, b_1, b_2) = (1, 4, 0)$ exact match |
 | `interface_match` | **`0.0915`** | per-group min over the four `KOR` sub-volume IoUs: 0.092, 0.103, 0.098, 0.102 |
-| **`cad_score`** | **`0.674`** | $(0.931 + 1.000 + 0.0915) / 3$ |
+| **`cad_score`** | **`0.609`** | $0.4 \cdot 0.931 + 0.4 \cdot 0.0915 + 0.2 \cdot 1.000$ |
 
 ### Example 3: Topology Match catches what Shape Similarity misses
 
@@ -263,7 +273,7 @@ The candidate captures the silhouette of the fixture (cylindrical flange + centr
 | Validity | ✅ valid, watertight | gate passes |
 | `shape_similarity_score` | `0.432` | pc-F1 0.499, vol-IoU 0.364 |
 | `topology_match` | **`0.626`** | $s_0 = 1.000$ ($b_0 = 1$ match), $s_1 = 0.545$ ($b_1 = 5$ vs GT $10$ → $6/11$), $s_2 = 0.333$ ($b_2 = 2$ vs GT $0$ → $1/3$) |
-| **`cad_score`** | **`0.529`** | $(0.432 + 0.626) / 2$ |
+| **`cad_score`** | **`0.497`** | $(0.4 \cdot 0.432 + 0.2 \cdot 0.626) / 0.6$ (no interface axis) |
 
 ---
 

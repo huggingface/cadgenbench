@@ -21,7 +21,7 @@ from cadgenbench.eval.edit_baseline import (
     renormalize_shape,
     write_edit_baseline,
 )
-from cadgenbench.eval.evaluate import _cad_score
+from cadgenbench.eval.evaluate import GENERATION_AXIS_WEIGHTS, _cad_score
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures" / "jig_metric"
 
@@ -63,10 +63,10 @@ def test_renorm_zero_headroom_defensive() -> None:
 _VALID = {"is_valid": True}
 
 
-def test_cad_score_generation_is_equal_mean() -> None:
-    scores = {"shape_similarity_score": 0.6}
+def test_cad_score_no_weights_is_equal_mean() -> None:
+    # weights=None ⇒ plain mean over present axes (the function default).
     got = _cad_score(
-        scores=scores,
+        scores={"shape_similarity_score": 0.6},
         interface_metrics={"score": 0.9},
         topology_metrics={"score": 0.3},
         validation=_VALID,
@@ -74,9 +74,21 @@ def test_cad_score_generation_is_equal_mean() -> None:
     assert got == pytest.approx((0.6 + 0.9 + 0.3) / 3)
 
 
+def test_cad_score_generation_weights() -> None:
+    # Generation: shape 0.4 / interface 0.4 / topology 0.2.
+    got = _cad_score(
+        scores={"shape_similarity_score": 0.6},
+        interface_metrics={"score": 0.9},
+        topology_metrics={"score": 0.3},
+        validation=_VALID,
+        weights=GENERATION_AXIS_WEIGHTS,
+    )
+    assert got == pytest.approx(0.4 * 0.6 + 0.4 * 0.9 + 0.2 * 0.3)
+
+
 def test_cad_score_editing_weights_and_shape_override() -> None:
     # Editing: shape axis is overridden with the renormalized value and
-    # weighted 0.5 / 0.25 / 0.25.
+    # weighted 0.5 / 0.3 / 0.2 (shape / interface / topology).
     got = _cad_score(
         scores={"shape_similarity_score": 0.95},  # raw, must be ignored
         interface_metrics={"score": 0.8},
@@ -85,11 +97,11 @@ def test_cad_score_editing_weights_and_shape_override() -> None:
         shape_score=0.0,  # renormalized no-op
         weights=EDITING_AXIS_WEIGHTS,
     )
-    assert got == pytest.approx(0.5 * 0.0 + 0.25 * 1.0 + 0.25 * 0.8)
+    assert got == pytest.approx(0.5 * 0.0 + 0.3 * 0.8 + 0.2 * 1.0)
 
 
 def test_cad_score_editing_reweights_when_interface_absent() -> None:
-    # No interface axis: shape 0.5 + topo 0.25 renormalize to 2:1.
+    # No interface axis: shape 0.5 + topo 0.2 renormalize over 0.7.
     got = _cad_score(
         scores={"shape_similarity_score": 0.95},
         interface_metrics={},
@@ -98,7 +110,7 @@ def test_cad_score_editing_reweights_when_interface_absent() -> None:
         shape_score=0.4,
         weights=EDITING_AXIS_WEIGHTS,
     )
-    assert got == pytest.approx((0.5 * 0.4 + 0.25 * 0.9) / 0.75)
+    assert got == pytest.approx((0.5 * 0.4 + 0.2 * 0.9) / 0.7)
 
 
 def test_cad_score_invalid_is_zero_regardless_of_weights() -> None:

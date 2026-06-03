@@ -29,8 +29,9 @@ anything at or below the no-op floors at ``0``. Topology and interface
 match stay **raw** (most edits leave them unchanged, and where they do
 not they already discriminate). For editing fixtures the per-fixture
 ``cad_score`` reweights the three axes :data:`EDITING_AXIS_WEIGHTS`
-(shape ``0.5``, topology ``0.25``, interface ``0.25``) instead of the
-equal mean used for generation. The validity gate still hard-zeros.
+(shape ``0.5``, interface ``0.3``, topology ``0.2``); generation uses
+``GENERATION_AXIS_WEIGHTS`` (shape ``0.4``, interface ``0.4``, topology
+``0.2``). The validity gate still hard-zeros.
 
 ``b_shape`` depends only on ``input.step`` + ``ground_truth.step`` +
 the shape / alignment implementation, so it is a **fixture constant**.
@@ -66,13 +67,15 @@ logger = logging.getLogger(__name__)
 EDIT_BASELINE_NAME = "edit_baseline.json"
 
 # Per-axis weights applied to ``cad_score`` for editing fixtures. Shape
-# is the axis that actually resolves most edits, so it dominates 2:1
-# over topology and interface (which are frequently non-discriminating
-# on a given edit). Generation fixtures keep the equal mean.
+# is the axis that actually resolves most edits, so it dominates; topology
+# and interface are frequently non-discriminating on a given edit (the edit
+# rarely changes Betti numbers or mating-interface fit), so topology in
+# particular is toned down. See ``GENERATION_AXIS_WEIGHTS`` for the
+# generation-task counterpart.
 EDITING_AXIS_WEIGHTS: dict[str, float] = {
     "shape": 0.5,
-    "topology": 0.25,
-    "interface": 0.25,
+    "interface": 0.3,
+    "topology": 0.2,
 }
 
 # Authoring gate: the edit must leave the shape metric at least this
@@ -97,7 +100,7 @@ def compute_edit_baseline(input_step: str | Path, gt_step: str | Path) -> dict:
     receives.
 
     Returns a JSON-serializable dict with the headline
-    ``shape_similarity_score`` (``b_shape``), its three sub-metrics, the
+    ``shape_similarity_score`` (``b_shape``), its two sub-metrics, the
     alignment ``rmse``, the derived ``headroom`` (``1 - b_shape``), and a
     ``cadgenbench_version`` stamp for staleness detection.
     """

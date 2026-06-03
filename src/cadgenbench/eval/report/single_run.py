@@ -302,10 +302,11 @@ def _render_fixture_card(fix: dict, idx: int) -> str:
         p.append('<div class="headline-metrics">')
         if cad_score is not None:
             cad_sub = (
-                "editing &middot; weighted 0.5 / 0.25 / 0.25 "
+                "editing &middot; weighted 0.5 / 0.3 / 0.2 "
                 "(shape renormalized vs no-op)"
                 if is_editing
-                else f"mean of {n_components} available component(s)"
+                else "weighted 0.4 / 0.4 / 0.2 over "
+                f"{n_components} available component(s)"
             )
             p.append(
                 f'<div class="headline-pill headline-cad">'

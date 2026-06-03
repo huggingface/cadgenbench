@@ -38,14 +38,16 @@ with these keys:
   ``docs/metrics/topo_match.md``.
 - ``cad_score``         , the **CAD Score**: single ``[0, 1]``
   headline number per fixture. For generation fixtures it is the
-  arithmetic mean of every available component score (shape similarity,
-  interface match, topology match), so each axis contributes equally
-  and only the ones actually computed for a fixture enter the mean. For
-  editing fixtures (those with a committed ``edit_baseline.json`` in
-  the GT dir) the shape axis is first renormalized against the no-op
-  baseline and the three axes are reweighted 0.5 / 0.25 / 0.25 (see
-  ``cadgenbench.eval.edit_baseline``). Zero when the candidate is not a
-  valid solid or no STEP was produced.
+  weighted mean of every available component score (shape similarity,
+  interface match, topology match) with weights
+  ``GENERATION_AXIS_WEIGHTS`` (shape 0.4 / interface 0.4 / topology
+  0.2); only the axes actually computed for a fixture enter the mean and
+  the weights renormalize over those present. For editing fixtures
+  (those with a committed ``edit_baseline.json`` in the GT dir) the
+  shape axis is first renormalized against the no-op baseline and the
+  axes are reweighted ``EDITING_AXIS_WEIGHTS`` (shape 0.5 / interface
+  0.3 / topology 0.2; see ``cadgenbench.eval.edit_baseline``). Zero when
+  the candidate is not a valid solid or no STEP was produced.
 - ``edit_metrics``      , editing fixtures only. The no-op baseline
   (``baseline_shape_similarity``), the raw and renormalized shape-axis
   values, the ``headroom`` (``1 - baseline``), and the per-axis
@@ -75,6 +77,16 @@ from cadgenbench.eval.edit_baseline import (
     read_edit_baseline,
     renormalize_shape,
 )
+
+# Per-axis weights applied to ``cad_score`` for generation fixtures.
+# Topology is toned down (it is comparatively easy to score well here, so
+# it should not carry a full third of the headline); shape and interface
+# split the rest. Weights renormalize over whichever axes are present.
+GENERATION_AXIS_WEIGHTS: dict[str, float] = {
+    "shape": 0.4,
+    "interface": 0.4,
+    "topology": 0.2,
+}
 from cadgenbench.eval.interface_match import (
     InterfaceMatchArtifacts,
     SubVolume,
@@ -245,10 +257,10 @@ def evaluate_result(
     # --- Editing-task renormalization -------------------------------------
     # A committed ``edit_baseline.json`` in the GT dir marks this as an
     # editing fixture: the shape axis is renormalized against the no-op
-    # baseline and the three axes are reweighted (see
-    # ``cadgenbench.eval.edit_baseline``). Its absence ⇒ generation rules
-    # (raw shape, equal-weight mean). The scorer never reads the
-    # inputs-side ``description.yaml`` for this.
+    # baseline and the axes are reweighted with ``EDITING_AXIS_WEIGHTS``
+    # (see ``cadgenbench.eval.edit_baseline``). Its absence ⇒ generation
+    # rules (raw shape, ``GENERATION_AXIS_WEIGHTS``). The scorer never
+    # reads the inputs-side ``description.yaml`` for this.
     edit_baseline = read_edit_baseline(gt_dir)
     if edit_baseline is None:
         data["cad_score"] = _cad_score(
@@ -256,6 +268,7 @@ def evaluate_result(
             interface_metrics=interface_metrics,
             topology_metrics=topology_metrics,
             validation=validation_dict,
+            weights=GENERATION_AXIS_WEIGHTS,
         )
     else:
         check_baseline_fresh(edit_baseline, gt_dir.name)
@@ -319,8 +332,12 @@ def _cad_score(
             :mod:`cadgenbench.eval.edit_baseline`); generation fixtures
             leave it ``None`` to use the raw ``shape_similarity_score``.
         weights: Per-axis weights keyed ``"shape" | "interface" |
-            "topology"``. ``None`` means equal weighting (the generation
-            default, i.e. a plain arithmetic mean over present axes).
+            "topology"``. ``None`` means equal weighting (a plain
+            arithmetic mean over present axes); callers pass
+            ``GENERATION_AXIS_WEIGHTS`` / ``EDITING_AXIS_WEIGHTS``. In all
+            cases the weights of the axes actually present renormalize, so
+            a missing axis (e.g. no jig sub-volumes) redistributes its
+            weight over the rest rather than diluting the mean.
     """
     if not validation.get("is_valid"):
         return 0.0
