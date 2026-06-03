@@ -345,7 +345,10 @@ def _validate_and_render_step(step_path: Path) -> tuple[str, bytes | None]:
     try:
         return _get_render_pool().submit(
             _validate_and_render_blob, str(step_path),
-        ).result()
+        ).result(timeout=120)
+    except concurrent.futures.TimeoutError:
+        _shutdown_render_pool()
+        return f"⚠️ Validation/render timed out for `{step_path.name}`.", None
     except Exception:
         return _validate_and_render_blob(str(step_path))
 
@@ -642,6 +645,11 @@ def run_agent(
         if config.reasoning_effort is not None:
             complete_kwargs["reasoning_effort"] = config.reasoning_effort
         remaining_s = max(0.0, config.max_duration_s - (time.monotonic() - t0))
+        if remaining_s <= 0.5:
+            stopped_reason = "timeout"
+            print(f"  {tag} Wall-clock timeout before LLM call", flush=True)
+            _save_incremental()
+            break
         call_deadline_s = min(config.llm_timeout, remaining_s)
         try:
             with _WallClockAlarm(call_deadline_s):
