@@ -199,7 +199,14 @@ def _per_betti_score(b_cand: int, b_gt: int) -> float:
     zero and gives "off by one near zero" graceful (rather than
     catastrophic) decay; for non-negative integers it is equivalent to
     ``(min(b_cand, b_gt) + 1) / (max(b_cand, b_gt) + 1)``.
+
+    A negative Betti is not a real count - it means the candidate's mesh
+    is degenerate (not a clean manifold). Score it ``0`` rather than feed
+    a non-positive argument into ``log``. GT is always clean, so this only
+    ever triggers on a broken candidate.
     """
+    if b_cand < 0 or b_gt < 0:
+        return 0.0
     return math.exp(-abs(math.log((b_cand + 1) / (b_gt + 1))))
 
 

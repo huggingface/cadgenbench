@@ -209,6 +209,15 @@ class TestTopoMatchScoreFn:
         )
         assert score == pytest.approx((2.0 + expected_b1) / 3.0)
 
+    def test_negative_betti_scores_zero_without_crashing(self) -> None:
+        # A degenerate candidate (b1 = -1 from a broken mesh) must not crash
+        # the log-ratio; its topology axis is zeroed and drags the mean down.
+        score, m = topo_match_score(self._mk(1, -1, 0), self._mk(1, 1, 0))
+        assert m["b1"] == 0.0
+        assert m["b0"] == pytest.approx(1.0)
+        assert m["b2"] == pytest.approx(1.0)
+        assert score == pytest.approx(2.0 / 3.0)
+
     def test_axis_score_is_symmetric(self) -> None:
         # Swapping candidate and GT must leave each per-axis score and
         # the aggregate unchanged.
