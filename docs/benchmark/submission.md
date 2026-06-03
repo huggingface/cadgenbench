@@ -9,12 +9,15 @@ the per-metric deep dives under [`docs/metrics/`](../metrics/).
 
 ## What you submit
 
-**One** STEP file per fixture, written into
+Create **one folder per fixture** under `results/<run_name>/`. When your
+system produces a candidate, write it to
 `results/<run_name>/<fixture_name>/output.step` (or `output.stp`).
 Nothing else is required. No description, no metadata, no sub-volumes.
 
-The grading pipeline picks the candidate STEP up, aligns it rigidly to
-the GT, and runs the four metric categories on it.
+The grading pipeline picks each candidate STEP up, aligns it rigidly to
+the GT, and runs the four metric categories on it. If a fixture folder has
+no `output.step`, that fixture is recorded as `status: "missing"` and
+contributes `cad_score = 0` to the aggregate.
 
 The submission contract is **task-agnostic**: a fixture with
 `task_type: generation` and one with `task_type: editing` both expect

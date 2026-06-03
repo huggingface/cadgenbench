@@ -22,11 +22,12 @@ The submission contract (mirrored from the leaderboard's ``submit.py``):
 
 - a top-level ``meta.json`` with keys ``submitter_name``, ``submission_name``,
   ``agent_url``, ``notes``, ``agree_to_publish``;
-- one folder per fixture, each containing ``output.step``.
+- one folder per fixture. A folder may omit ``output.step``; the evaluator
+  records that fixture as ``status="missing"`` and scores it zero.
 
-A baseline run dir already materialises ``<fixture>/output.step`` at each
-fixture root (see :meth:`AgentResult.save`), so packaging is just selecting
-those fixtures and writing ``meta.json`` alongside them in a zip.
+A baseline run dir already materialises one directory per attempted fixture
+(see :meth:`AgentResult.save`), so packaging preserves those directories and
+copies any produced candidate STEP files into the zip.
 
 Usage::
 
@@ -79,22 +80,25 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> None:
     p.set_defaults(handler=run)
 
 
-def _discover_fixture_steps(run_dir: Path) -> list[tuple[str, Path]]:
-    """Return ``(fixture_name, output_step_path)`` for each fixture in *run_dir*.
+def _discover_fixture_entries(run_dir: Path) -> list[tuple[str, Path | None]]:
+    """Return ``(fixture_name, output_step_path_or_none)`` for each fixture.
 
-    A fixture is any immediate subdirectory holding ``output.step`` (or
-    ``.stp``) at its root -- exactly what the evaluator and the leaderboard
-    look for.
+    A fixture is any immediate subdirectory. If it has ``output.step`` (or
+    ``.stp``) at its root, that file is packaged as ``output.step``. If it has
+    no candidate STEP, the directory is still preserved so the evaluator can
+    record ``status="missing"`` and assign zero credit for that fixture.
     """
-    found: list[tuple[str, Path]] = []
+    found: list[tuple[str, Path | None]] = []
     for child in sorted(run_dir.iterdir()):
         if not child.is_dir():
             continue
+        output_step: Path | None = None
         for name in _CANDIDATE_NAMES:
             step = child / name
             if step.is_file() and step.stat().st_size > 0:
-                found.append((child.name, step))
+                output_step = step
                 break
+        found.append((child.name, output_step))
     return found
 
 
@@ -121,11 +125,11 @@ def run(args: argparse.Namespace) -> int:
         print(f"Run dir not found: {run_dir}", file=sys.stderr)
         return 2
 
-    fixtures = _discover_fixture_steps(run_dir)
+    fixtures = _discover_fixture_entries(run_dir)
     if not fixtures:
         print(
-            f"No fixtures with output.step found under {run_dir}. "
-            "Did the baseline run produce any geometry?",
+            f"No fixture directories found under {run_dir}. "
+            "Did the baseline run write any fixture outputs?",
             file=sys.stderr,
         )
         return 1
@@ -146,10 +150,19 @@ def run(args: argparse.Namespace) -> int:
     with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("meta.json", json.dumps(meta, indent=2) + "\n")
         for fixture_name, step in fixtures:
-            zf.write(step, arcname=f"{fixture_name}/output.step")
+            # Explicit directory entry preserves missing-output fixtures after
+            # extraction; without it, an empty fixture folder disappears.
+            zf.writestr(f"{fixture_name}/", "")
+            if step is not None:
+                zf.write(step, arcname=f"{fixture_name}/output.step")
 
     size_kb = out_path.stat().st_size // 1024
-    print(f"Wrote {out_path} ({len(fixtures)} fixtures, {size_kb} KB)")
+    n_with_steps = sum(1 for _, step in fixtures if step is not None)
+    n_missing = len(fixtures) - n_with_steps
+    print(
+        f"Wrote {out_path} ({len(fixtures)} fixtures, "
+        f"{n_with_steps} with STEP, {n_missing} missing, {size_kb} KB)"
+    )
     print(f"  submitter_name : {submitter}")
     print(f"  submission_name: {submission_name}")
     print(f"  fixtures       : {', '.join(name for name, _ in fixtures)}")
