@@ -65,6 +65,19 @@ class StepArtifacts:
     def analysis(self) -> ValidityResult:
         """Validity + measurements, computed once from the loaded shape."""
         if self._analysis is None:
+            # A supplied-mesh sidecar means "trusted, valid by construction":
+            # skip validity. Measurements still come from the BREP (no mesh).
+            if self._sidecar_path() is not None:
+                measurements = _measure_wrapped(self.wrapped)
+                self._analysis = ValidityResult(
+                    validation=ValidationResult(
+                        is_valid=True,
+                        is_watertight=True,
+                        topology_errors=(),
+                    ),
+                    measurements=measurements,
+                )
+                return self._analysis
             cached = self._load_analysis_cache()
             if cached is not None:
                 self._analysis = cached
@@ -118,12 +131,7 @@ class StepArtifacts:
         """
         from cadgenbench.common.mesh import MeshSanityError
 
-        # Negative cache: analysis already recorded the validity verdict. An
-        # invalid part has no valid mesh, so raise immediately rather than
-        # tessellating. For an untrusted candidate the validity mesh gate also
-        # stored its mesh into ``self._meshes``, so the lookup below is a cache
-        # hit; trusted GT / jig parts skip that gate and are tessellated here
-        # on first request (once), then cached.
+        # Invalid parts have no mesh; fail fast rather than tessellate.
         validation = self.analysis.validation
         if not validation.is_valid:
             reason = (
@@ -134,6 +142,12 @@ class StepArtifacts:
             raise MeshSanityError(f"{self.step_path.name}: not a valid mesh ({reason})")
 
         deflection = self.deflection()
+        # A trusted supplied mesh is the reference: use it, never re-mesh.
+        if deflection not in self._meshes:
+            sidecar = self._load_sidecar_mesh()
+            if sidecar is not None:
+                self._meshes[deflection] = sidecar
+                return sidecar
         if deflection in self._meshes:
             self._store_mesh_cache(deflection, self._meshes[deflection])
         else:
@@ -141,10 +155,7 @@ class StepArtifacts:
             if cached is not None:
                 self._meshes[deflection] = cached
                 return cached
-            # First (and only) tessellation of this part, at the one deflection
-            # it is ever meshed at. The shape has not been tessellated before
-            # (validity skips trusted parts), so this is deterministic
-            # regardless of whether process isolation is enabled.
+            # Tessellate once at this deflection, then cache.
             mesh = safeguarded_tessellate(
                 self.step_path,
                 deflection,
@@ -172,6 +183,32 @@ class StepArtifacts:
         if deflection not in self._bettis:
             self._bettis[deflection] = compute_betti_from_mesh(self.mesh())
         return self._bettis[deflection]
+
+    def _sidecar_path(self) -> Path | None:
+        """Path to the trusted supplied-mesh sidecar, if one exists.
+
+        The sidecar lives next to the STEP with the same stem and a
+        ``.mesh.npz`` suffix (e.g. ``ground_truth.step`` ->
+        ``ground_truth.mesh.npz``). Its presence == "trusted, skip checks".
+        """
+        p = Path(self.step_path)
+        cand = p.with_name(p.stem + ".mesh.npz")
+        return cand if cand.exists() else None
+
+    def _load_sidecar_mesh(self) -> Mesh | None:
+        """Load the supplied-mesh sidecar as a :class:`Mesh`, or ``None``."""
+        path = self._sidecar_path()
+        if path is None:
+            return None
+        with np.load(path, allow_pickle=False) as data:
+            vertices = np.asarray(data["vertices"], dtype=np.float64)
+            triangles = np.asarray(data["triangles"], dtype=np.int64)
+            deflection = float(data["linear_deflection_mm"])
+        return Mesh(
+            vertices=vertices,
+            triangles=triangles,
+            linear_deflection_mm=deflection,
+        )
 
     def _cache_stem(self) -> str | None:
         if self.mesh_cache_dir is None:

@@ -22,13 +22,8 @@ cad_score =
             0.4·shape_similarity + 0.4·interface + 0.2·topology_match      otherwise
 ```
 
-Topology is weighted down (0.2): it is comparatively easy to score well
-on these parts, so it should not carry a full third of the headline.
-Absent axes drop out and the remaining weights renormalize (e.g. a
-fixture with no interface spec scores `(0.4·shape + 0.2·topology) / 0.6`).
-
 (This is the **generation** composition. **Editing** tasks renormalize
-the shape axis against the no-op input and reweight differently — see
+the shape axis against the no-op input and reweight differently. See
 [§ Editing tasks](#editing-tasks-no-op-renormalization) below.)
 
 | Component | Range | What it asks | Deep dive |
