@@ -353,7 +353,11 @@ class LLMClient:
                 # native Anthropic params directly. LiteLLM forwards unknown
                 # top-level kwargs into the Anthropic request body.
                 kwargs["thinking"] = {"type": "adaptive"}
-                kwargs["output_config"] = {"effort": effort}
+                # Anthropic adaptive-thinking models do not accept
+                # `minimal`; use the closest supported low-effort setting.
+                kwargs["output_config"] = {
+                    "effort": "low" if effort == "minimal" else effort
+                }
             else:
                 # OpenAI / Gemini / others: let LiteLLM translate.
                 kwargs["reasoning_effort"] = effort
@@ -454,7 +458,7 @@ class LLMClient:
     # the only supported thinking mode; Opus 4.6 and Sonnet 4.6 also accept
     # it and have deprecated the legacy enabled+budget_tokens format.
     _ANTHROPIC_ADAPTIVE_PATTERNS = (
-        "opus-4-7", "opus-4-6", "sonnet-4-6", "claude-mythos",
+        "opus-4-8", "opus-4-7", "opus-4-6", "sonnet-4-6", "claude-mythos",
     )
 
     # Models that reject a non-default `temperature` kwarg outright. Covers
