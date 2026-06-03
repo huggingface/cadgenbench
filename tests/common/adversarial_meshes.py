@@ -16,6 +16,11 @@ Fixtures:
                                 trips the closed check.
 - ``flipped_winding_mesh``   , closed cube with one triangle's winding
                                 flipped; trips the orientation check.
+- ``pinch_vertex_mesh``      , two tetrahedra sharing a single apex
+                                vertex; passes the manifold/closed/
+                                orientation checks but trips the
+                                vertex-manifold check (two sheets meet
+                                at one point).
 
 The meshes are deliberately tiny (≤ 12 triangles) so the failure modes
 are obvious by eye.
@@ -131,6 +136,42 @@ def flipped_winding_mesh() -> Mesh:
     return Mesh(vertices=m.vertices, triangles=f, linear_deflection_mm=0.01)
 
 
+def pinch_vertex_mesh() -> Mesh:
+    """Two closed tetrahedra meeting at one shared apex vertex (index 3).
+
+    Each tetrahedron is on its own a closed orientable manifold, and the
+    two share no edge - only the single apex point. So every undirected
+    edge is still in exactly 2 triangles (manifold + closed) and winding
+    is consistent, yet the surface is *not* a 2-manifold: the apex is a
+    pinch where two sheets touch. Its link is two disjoint triangles
+    ({0,1,2} and {4,5,6}) rather than one cycle, so it trips only the
+    vertex-manifold check. Welding two such vertices into one is exactly
+    how a coarse tessellation drives the Euler characteristic odd.
+    """
+    v = np.array(
+        [
+            [0.0, 0.0, 0.0],  # 0  tetra A base
+            [1.0, 0.0, 0.0],  # 1  tetra A base
+            [0.5, 1.0, 0.0],  # 2  tetra A base
+            [0.5, 0.5, 1.0],  # 3  shared apex
+            [0.0, 0.0, 2.0],  # 4  tetra B base
+            [1.0, 0.0, 2.0],  # 5  tetra B base
+            [0.5, 1.0, 2.0],  # 6  tetra B base
+        ],
+        dtype=np.float64,
+    )
+    f = np.array(
+        [
+            # tetra A (base 0,1,2 below the apex), outward-wound
+            [0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3],
+            # tetra B (base 4,5,6 above the apex), outward-wound
+            [4, 5, 6], [4, 3, 5], [5, 3, 6], [6, 3, 4],
+        ],
+        dtype=np.int64,
+    )
+    return Mesh(vertices=v, triangles=f, linear_deflection_mm=0.01)
+
+
 # ---------------------------------------------------------------------------
 # Visualisation helper (matplotlib; safe to run from any environment)
 # ---------------------------------------------------------------------------
@@ -151,6 +192,10 @@ ALL_FIXTURES: dict[str, tuple[Mesh, str]] = {
     "flipped_winding": (
         flipped_winding_mesh(),
         "Orientation: cube with one triangle's winding reversed",
+    ),
+    "pinch_vertex": (
+        pinch_vertex_mesh(),
+        "Vertex-manifold: two tetrahedra meeting at a single apex (vertex 3)",
     ),
 }
 

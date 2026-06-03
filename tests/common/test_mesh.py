@@ -30,11 +30,13 @@ from cadgenbench.common.mesh import (
     tessellate_step,
     validate_mesh,
 )
+from cadgenbench.common.mesh import _nonmanifold_vertices
 from tests.common.adversarial_meshes import (
     cube_mesh,
     flipped_winding_mesh,
     nonmanifold_t_mesh,
     open_tetrahedron_mesh,
+    pinch_vertex_mesh,
 )
 
 
@@ -101,6 +103,54 @@ class TestOrientationGate:
     def test_flipped_triangle_raises(self) -> None:
         with pytest.raises(MeshSanityError, match=re.compile(r"orientation", re.I)):
             validate_mesh(flipped_winding_mesh())
+
+
+class TestVertexManifoldGate:
+    """Two tetrahedra sharing one apex pass edges 1-3 but trip vertex check.
+
+    This is the pinch that drove fixture 203's odd Euler characteristic:
+    edge-manifold + closed + winding-consistent, yet not a 2-manifold.
+    """
+
+    def test_pinch_raises(self) -> None:
+        with pytest.raises(
+            MeshSanityError, match=re.compile(r"non[- ]?manifold vertex", re.I)
+        ):
+            validate_mesh(pinch_vertex_mesh())
+
+    def test_error_points_at_shared_apex(self) -> None:
+        try:
+            validate_mesh(pinch_vertex_mesh())
+        except MeshSanityError as exc:
+            # The only shared (pinch) vertex is index 3.
+            assert "vertex 3" in str(exc), exc
+        else:  # pragma: no cover - sanity
+            pytest.fail("expected MeshSanityError")
+
+    def test_detector_finds_exactly_the_apex(self) -> None:
+        bad = _nonmanifold_vertices(pinch_vertex_mesh())
+        assert bad.tolist() == [3]
+
+    def test_clean_mesh_has_no_pinch(self) -> None:
+        # A genuine closed manifold must not be flagged (no false positive).
+        assert _nonmanifold_vertices(cube_mesh()).size == 0
+
+    def test_pinch_passes_the_first_three_gates(self) -> None:
+        """Isolation: the fixture only fails on the vertex check.
+
+        If it tripped manifold/closed/orientation the message would differ;
+        asserting the vertex wording proves checks 1-3 all passed first.
+        """
+        try:
+            validate_mesh(pinch_vertex_mesh())
+        except MeshSanityError as exc:
+            msg = str(exc)
+            assert "non-manifold vertex" in msg
+            assert "3 triangles" not in msg  # not the edge-manifold failure
+            assert "not closed" not in msg
+            assert "orientation" not in msg
+        else:  # pragma: no cover - sanity
+            pytest.fail("expected MeshSanityError")
 
 
 class TestEmptyMesh:

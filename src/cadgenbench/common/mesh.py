@@ -46,6 +46,9 @@ Pipeline:
    - ``is_watertight``: every edge incident to exactly 2 triangles.
    - ``is_winding_consistent``: shared edges traversed in opposite
      orientations by their two incident triangles.
+   - vertex-manifold: no vertex where two surface sheets meet at a
+     single point (a "pinch"), which the edge-only checks above cannot
+     see yet silently corrupts the Euler characteristic.
 
 Any failure surfaces to ``validation.topology_errors`` and cascades
 ``is_valid = False`` → ``cad_score = 0``. The module never silently
@@ -527,15 +530,20 @@ def tessellate_shape(
 
 
 def validate_mesh(mesh: Mesh) -> None:
-    """Verify *mesh* is a closed orientable manifold.
+    """Verify *mesh* is a closed orientable 2-manifold.
 
-    Three checks, applied in order; the first to fail raises:
+    Four checks, applied in order; the first to fail raises:
 
-    1. **Manifold**, every undirected edge appears in ≤ 2 triangles.
+    1. **Manifold edges**, every undirected edge appears in ≤ 2 triangles.
     2. **Closed**, every undirected edge appears in *exactly* 2
        triangles (equivalently :math:`3F = 2E`).
     3. **Orientation-consistent**, for every shared edge ``(a, b)``,
        the two incident triangles list it in opposite orders.
+    4. **Manifold vertices**, no vertex where ≥ 2 surface sheets meet
+       at a single point. Edge checks 1-3 all pass for two cones glued
+       at their apex, yet that pinch is not a 2-manifold and flips the
+       Euler characteristic's parity (the cause of negative Betti
+       numbers downstream). Run last because it assumes 1-2 hold.
 
     Implemented on top of :class:`trimesh.Trimesh` checks so we benefit
     from trimesh's robust edge-counting.
@@ -590,6 +598,66 @@ def validate_mesh(mesh: Mesh) -> None:
             "is traversed in the same direction by both incident "
             "triangles",
         )
+
+    pinched = _nonmanifold_vertices(mesh)
+    if pinched.size:
+        raise MeshSanityError(
+            f"mesh non-manifold vertex: {pinched.size} vertex/vertices where "
+            f"≥2 surface sheets meet at a single point (e.g. vertex "
+            f"{int(pinched[0])}); edge-manifold and closed but not a "
+            "2-manifold surface",
+        )
+
+
+def _nonmanifold_vertices(mesh: Mesh) -> np.ndarray:
+    """Return the indices of pinch vertices (≥2 sheets meeting at a point).
+
+    Precondition: *mesh* is already edge-manifold and closed (checks 1-2
+    of :func:`validate_mesh`), so every vertex's *link* - the neighbours
+    joined by the edge opposite each incident triangle - is a disjoint
+    union of cycles. The vertex is a 2-manifold point iff that link is a
+    *single* cycle; ≥2 cycles is a pinch the edge-only checks miss.
+
+    One global graph classifies every vertex at once. Its nodes are the
+    directed half-edges ``v→u``; at each triangle corner ``v`` with
+    opposite edge ``(p, q)`` the two half-edges ``v→p`` and ``v→q`` are
+    joined. Joins only ever connect half-edges sharing a source ``v``, so
+    each connected component belongs to one vertex and counts one link
+    cycle; a vertex owning >1 component is non-manifold. Fully vectorised
+    (no per-vertex Python loop): O(F) work plus one sparse
+    connected-components call.
+    """
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    tris = mesh.triangles
+    n_v = mesh.n_vertices
+    # Per corner v, the opposite edge's two endpoints (p, q): the two
+    # half-edges v→p and v→q to be joined.
+    src = np.concatenate([tris[:, 0], tris[:, 1], tris[:, 2]])
+    p = np.concatenate([tris[:, 1], tris[:, 2], tris[:, 0]])
+    q = np.concatenate([tris[:, 2], tris[:, 0], tris[:, 1]])
+
+    # Stable id per directed half-edge (source, dest); the v→p list alone
+    # already covers every directed edge (each is some corner's "first").
+    half = np.concatenate([np.stack([src, p], 1), np.stack([src, q], 1)])
+    keys = half[:, 0] * (n_v + 1) + half[:, 1]
+    node = np.unique(keys, return_inverse=True)[1]
+    n_nodes = int(node.max()) + 1
+    m = src.size
+
+    graph = coo_matrix(
+        (np.ones(m, dtype=np.int8), (node[:m], node[m:])),
+        shape=(n_nodes, n_nodes),
+    )
+    n_comp, label = connected_components(graph, directed=False)
+
+    # Distinct component labels per source vertex; >1 ⇒ pinch.
+    node_src = np.empty(n_nodes, dtype=np.int64)
+    node_src[node[:m]] = src
+    vtx_comp = np.unique(node_src * n_comp + label)  # one entry per (vertex, cycle)
+    owners, cycles = np.unique(vtx_comp // n_comp, return_counts=True)
+    return owners[cycles > 1]
 
 
 # ---------------------------------------------------------------------------
