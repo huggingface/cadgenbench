@@ -81,9 +81,25 @@ test_4/
 
 For each mating group independently:
 
-1. **Rigid alignment.** ICP-align the candidate to the GT ([`src/cadgenbench/eval/alignment.py`](../../src/cadgenbench/eval/alignment.py)).
+1. **Rigid alignment.** Align the candidate to the GT with the production
+   rotation + translation aligner
+   ([`src/cadgenbench/eval/alignment.py`](../../src/cadgenbench/eval/alignment.py)).
 
-2. **Bounded pose search.** The GT is perfectly labelled by construction; the candidate is inferred and carries a residual after rigid alignment that scales with part size (ICP RMSE grows with the diagonal). The IoU should reflect feature fit, not that residual. So the group's GT-specified pose is perturbed by ±1° per axis and ±1 % of the GT bounding-box diagonal per translation axis (e.g. ±1 mm on a 100 mm part, ±5 mm on a 500 mm part), and 32 poses are sampled by default. All sub-volumes in the group move together. The zero-perturbation pose is always sampled, so the per-sub-volume IoU is monotone in the search budget. The sampler is a deterministic Sobol low-discrepancy sequence (no random component, no seed). Feature correspondences are ambiguous on symmetric bolt patterns, missing features, and mixed interfaces; bulk ICP minimises whole-surface distance rather than interface fit; and any correspondence-based variant would couple the metric to a BREP face structure we don't want to assume. A future pass could replace the Sobol scan with a local optimiser (Nelder-Mead / Powell) on the IoU surface itself.
+2. **Bounded pose search.** The GT is perfectly labelled by construction; the
+   candidate is inferred and still carries a small residual after rigid bulk
+   alignment. The IoU should reflect feature fit, not that residual. So the
+   group's GT-specified pose is perturbed by ±1° per axis and ±1 % of the GT
+   bounding-box diagonal per translation axis (e.g. ±1 mm on a 100 mm part,
+   ±5 mm on a 500 mm part), and 32 poses are sampled by default. All
+   sub-volumes in the group move together. The zero-perturbation pose is always
+   sampled, so the per-sub-volume IoU is monotone in the search budget. The
+   sampler is a deterministic Sobol low-discrepancy sequence (no random
+   component, no seed). Feature correspondences are ambiguous on symmetric bolt
+   patterns, missing features, and mixed interfaces; bulk alignment optimizes
+   whole-shape agreement rather than interface fit; and any correspondence-based
+   variant would couple the metric to a BREP face structure we don't want to
+   assume. A future pass could replace the Sobol scan with a local optimiser
+   (Nelder-Mead / Powell) on the IoU surface itself.
 
 3. **Per-sub-volume IoU.** For each sub-volume `R` in the group, the candidate region `C` is measured inside a verification region `bbox_R` made of `R` itself plus a thin shell of opposite-material around it:
 

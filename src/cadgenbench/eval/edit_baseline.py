@@ -54,7 +54,6 @@ from __future__ import annotations
 
 import json
 import logging
-import tempfile
 from pathlib import Path
 
 from cadgenbench import __version__
@@ -93,11 +92,10 @@ def compute_edit_baseline(input_step: str | Path, gt_step: str | Path) -> dict:
     """Score the no-op (``input.step`` against the GT) and return the baseline dict.
 
     The input is aligned to the GT through the **exact same path** a
-    candidate goes through in :func:`cadgenbench.eval.evaluate.evaluate_result`
-    (``align_step`` with ``refine=True, pca_top_k=12``, then
-    :func:`compare_step_files` with ``align=False``), so ``b_shape`` is
-    apples-to-apples with the score any submission's ``output.step``
-    receives.
+    candidate goes through in :func:`cadgenbench.eval.evaluate.evaluate_result`:
+    rigid alignment with the production candidate selector, then shape scoring.
+    This keeps ``b_shape`` apples-to-apples with the score any submission's
+    ``output.step`` receives.
 
     Returns a JSON-serializable dict with the headline
     ``shape_similarity_score`` (``b_shape``), its two sub-metrics, the
@@ -107,16 +105,13 @@ def compute_edit_baseline(input_step: str | Path, gt_step: str | Path) -> dict:
     input_step = Path(input_step)
     gt_step = Path(gt_step)
 
-    from cadgenbench.eval.alignment import align_step
-
-    with tempfile.TemporaryDirectory() as td:
-        aligned = Path(td) / "input_aligned.step"
-        ar = align_step(
-            input_step, gt_step, output=aligned, refine=True, pca_top_k=12,
-        )
-        comparison = compare_step_files(
-            aligned, gt_step, align=False, alignment_rmse=ar.rmse,
-        )
+    # Align + score in one call. When the input carries a trusted mesh sidecar
+    # (the benchmark case), compare_step_files aligns the *cached* mesh and
+    # never re-tessellates the STEP — so an input our mesher can't cleanly
+    # tessellate no longer derails the no-op baseline. For an untrusted input
+    # it falls back to the STEP-export alignment path.
+    comparison = compare_step_files(input_step, gt_step, align=True)
+    ar_rmse = comparison.alignment_rmse
 
     scores = comparison.scores
     b_shape = scores.get("shape_similarity_score")
@@ -131,7 +126,7 @@ def compute_edit_baseline(input_step: str | Path, gt_step: str | Path) -> dict:
         "shape_similarity_score": b_shape,
         "shape_point_cloud_f1": scores.get("shape_point_cloud_f1"),
         "shape_volume_iou": scores.get("shape_volume_iou"),
-        "alignment_rmse": round(float(ar.rmse), 4),
+        "alignment_rmse": round(float(ar_rmse), 4) if ar_rmse is not None else None,
         "headroom": round(1.0 - b_shape, 6),
         "cadgenbench_version": __version__,
     }

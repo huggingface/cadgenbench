@@ -417,7 +417,7 @@ def _align_or_reuse(
     from cadgenbench.eval.alignment import align_step
 
     aligned_step.parent.mkdir(parents=True, exist_ok=True)
-    ar = align_step(raw_candidate, gt_step, output=aligned_step, refine=True, pca_top_k=12)
+    ar = align_step(raw_candidate, gt_step, output=aligned_step, pca_top_k=12)
 
     # The cached candidate renders are stale once the aligned geometry moves.
     shutil.rmtree(renders_dir, ignore_errors=True)

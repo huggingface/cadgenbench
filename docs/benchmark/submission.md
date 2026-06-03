@@ -159,11 +159,12 @@ pipeline runs.
 
 ## Canonical pose: recommended, not enforced
 
-The grading pipeline always aligns your candidate to the GT before
-scoring (PCA over surface point clouds, plus an optional ICP refine).
-Alignment is robust on most parts but can be ambiguous on
-rotationally- or mirror-symmetric shapes, where the principal axes
-have multiple "valid" orderings.
+The grading pipeline always rigidly aligns your candidate to the GT before
+scoring. Alignment uses rotation + translation only: identity, PCA multi-start,
+and Open3D FGR candidates are refined with Open3D multi-scale ICP, then selected
+by downstream-like shape agreement rather than ICP residual. Alignment is robust
+on most parts but can still be ambiguous on rotationally- or mirror-symmetric
+shapes, where several poses are genuinely equivalent.
 
 You can sidestep that risk by emitting your candidate in the same
 canonical pose the benchmark GT uses:
@@ -176,8 +177,7 @@ canonical pose the benchmark GT uses:
    $-Z$. Parts without an obvious reference face: rules 1-2 suffice.
 
 These rules are **recommended** for candidates, not enforced.
-Following them is the easiest way to keep alignment RMSE low on
-symmetric parts.
+Following them is the easiest way to keep alignment stable on symmetric parts.
 
 ## What gets scored
 

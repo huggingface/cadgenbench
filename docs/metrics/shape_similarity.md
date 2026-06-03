@@ -21,7 +21,14 @@ F1 and IoU are preferred over a mean Chamfer distance because they are rate-base
 
 For one candidate against one GT:
 
-1. **Rigid alignment.** ICP-align the candidate to the GT ([`alignment.py`](../../src/cadgenbench/eval/alignment.py)). Persists `aligned/output_aligned.step` and the RMSE; both are reused on re-runs.
+1. **Rigid alignment.** Align the candidate to the GT with rotation +
+   translation only ([`alignment.py`](../../src/cadgenbench/eval/alignment.py)).
+   The aligner generates identity, PCA multi-start, and Open3D FGR candidates,
+   refines them with Open3D multi-scale point-to-plane ICP, then selects by
+   downstream-like shape agreement (bidirectional F1, capped symmetric Chamfer,
+   RMSE). For normal submissions it persists `aligned/output_aligned.step` and
+   the RMSE; both are reused on re-runs. Trusted mesh sidecars are transformed
+   in memory and are not re-tessellated.
 2. **Tessellate.** Both shapes are meshed at a shared deflection derived from the GT bounding-box diagonal so candidate and GT live at one scale (gate-validated closed orientable manifold, see [`mesh.py`](../../src/cadgenbench/common/mesh.py)).
 3. **Compute the two sub-metrics** (below).
 4. **Average them** into `shape_similarity_score`.

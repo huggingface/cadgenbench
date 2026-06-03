@@ -292,7 +292,6 @@ def compare_step_files(
     candidate_renders_dir: str | Path | None = None,
     gt_renders_dir: str | Path | None = None,
     metrics: dict[str, MetricFn] | None = None,
-    refine: bool = False,
     candidate_artifacts: StepArtifacts | None = None,
     gt_artifacts: StepArtifacts | None = None,
 ) -> ComparisonResult:
@@ -317,8 +316,6 @@ def compare_step_files(
             viewer's default views.  Existing PNGs are left alone.
         metrics: Optional custom metric registry.  Defaults to
             :data:`DEFAULT_METRICS`.
-        refine: Forwarded to :func:`align_step`.
-
     Returns:
         :class:`ComparisonResult` with scores, alignment RMSE (if known), and
         the path to the aligned STEP file (if produced).
@@ -330,19 +327,34 @@ def compare_step_files(
     aligned_path: Path | None = None
     rmse: float | None = alignment_rmse
     step_for_metrics = candidate_step
+    aligned_mesh = None  # set on the trusted-candidate path (no STEP round-trip)
 
     if align:
-        from cadgenbench.eval.alignment import align_step
+        cand_art = candidate_artifacts or StepArtifacts(candidate_step)
+        if cand_art.has_sidecar:
+            # Trusted candidate: align its cached mesh and score from that.
+            # Never write an aligned STEP or re-tessellate — the supplied mesh
+            # is the reference (a rigid transform keeps it valid).
+            from cadgenbench.eval.alignment import align_cached_mesh
 
-        ar = align_step(
-            candidate_step, gt_step,
-            output=aligned_output,
-            refine=refine,
-        )
-        step_for_metrics = ar.output_path
-        aligned_path = ar.output_path
-        rmse = ar.rmse
-        candidate_artifacts = None
+            car = align_cached_mesh(cand_art, gt_artifacts)
+            aligned_mesh = car.mesh
+            rmse = car.rmse
+            candidate_artifacts = cand_art
+            step_for_metrics = candidate_step
+        else:
+            # Untrusted candidate (e.g. a submission): align via STEP export,
+            # then re-tessellate the aligned geometry. Unchanged behavior.
+            from cadgenbench.eval.alignment import align_step
+
+            ar = align_step(
+                candidate_step, gt_step,
+                output=aligned_output,
+            )
+            step_for_metrics = ar.output_path
+            aligned_path = ar.output_path
+            rmse = ar.rmse
+            candidate_artifacts = None
 
     cand_renders = Path(candidate_renders_dir) if candidate_renders_dir else None
     gt_renders = Path(gt_renders_dir) if gt_renders_dir else None
@@ -366,8 +378,12 @@ def compare_step_files(
         measurements=cand_analysis.measurements,
         renders_dir=cand_renders,
         linear_deflection_mm=shared_deflection,
-        artifacts=candidate_artifacts,
+        # On the trusted path the mesh is injected below; passing artifacts
+        # would make get_mesh() return the *un-aligned* cached mesh instead.
+        artifacts=None if aligned_mesh is not None else candidate_artifacts,
     )
+    if aligned_mesh is not None:
+        ctx_candidate._mesh = aligned_mesh
     ctx_gt = MetricContext(
         step_path=gt_step,
         validation=gt_analysis.validation,

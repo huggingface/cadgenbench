@@ -195,6 +195,15 @@ class StepArtifacts:
         cand = p.with_name(p.stem + ".mesh.npz")
         return cand if cand.exists() else None
 
+    @property
+    def has_sidecar(self) -> bool:
+        """True iff this part carries a trusted supplied-mesh sidecar.
+
+        Callers use this to keep the part on the trusted-mesh path
+        (transform the cached mesh) rather than re-tessellating its STEP.
+        """
+        return self._sidecar_path() is not None
+
     def _load_sidecar_mesh(self) -> Mesh | None:
         """Load the supplied-mesh sidecar as a :class:`Mesh`, or ``None``."""
         path = self._sidecar_path()

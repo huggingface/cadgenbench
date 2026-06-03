@@ -45,7 +45,15 @@ the shape axis against the no-op input and reweight differently. See
 
 ## Coordinate convention & alignment
 
-We instruct submissions to centre their models at $(0, 0, 0)$ and give rules for orientation (longest axis, mounting frame), but in any case rigidly align the outputs to the GT before scoring: PCA on surface-point clouds with all 24 octahedral rotation candidates, then ICP refinement.
+We instruct submissions to centre their models at $(0, 0, 0)$ and give
+rules for orientation (longest axis, mounting frame), but in any case
+rigidly align the outputs to the GT before scoring. Alignment is rotation
++ translation only, never scale. The production aligner generates identity,
+PCA multi-start, and Open3D FGR candidates, refines them with Open3D
+multi-scale point-to-plane ICP, then selects the final pose by
+downstream-like shape agreement (bidirectional F1, capped symmetric
+Chamfer, RMSE) rather than ICP residual. Trusted mesh sidecars are aligned
+in memory and are not re-tessellated.
 
 ---
 
@@ -290,6 +298,6 @@ The trade-off is **tessellation residue**: a candidate that is geometrically ide
   - [`shape_similarity.py`](../src/cadgenbench/eval/shape_similarity.py)
   - [`topo_match.py`](../src/cadgenbench/eval/topo_match.py)
   - [`interface_match.py`](../src/cadgenbench/eval/interface_match.py)
-- Geometry utilities: [`align.py`](../src/cadgenbench/eval/alignment.py), [`measurements.py`](../src/cadgenbench/common/measurements.py), [`sampling.py`](../src/cadgenbench/eval/sampling.py), [`mesh.py`](../src/cadgenbench/common/mesh.py)
+- Geometry utilities: [`alignment.py`](../src/cadgenbench/eval/alignment.py), [`measurements.py`](../src/cadgenbench/common/measurements.py), [`sampling.py`](../src/cadgenbench/eval/sampling.py), [`mesh.py`](../src/cadgenbench/common/mesh.py)
 - Headless renderer: [`src/cadgenbench/common/viewer.py`](../src/cadgenbench/common/viewer.py)
 - Entry points: `cadgenbench baseline run` ([`src/cadgenbench/baseline/_cli.py`](../src/cadgenbench/baseline/_cli.py)) and `cadgenbench evaluate` ([`src/cadgenbench/eval/_cli.py`](../src/cadgenbench/eval/_cli.py))

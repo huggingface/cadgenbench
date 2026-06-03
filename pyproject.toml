@@ -20,6 +20,7 @@ dependencies = [
     "manifold3d",
     "numpy",
     "scipy",
+    "open3d",
     "Pillow",
     "pyyaml",
     # Headless STEP -> PNG renderer (used by both eval reports and the
