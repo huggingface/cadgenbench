@@ -27,6 +27,7 @@ Stopping conditions (agent is unaware of these):
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import logging
 import re
 import shutil
@@ -48,9 +49,9 @@ from cadgenbench.baseline.types import (
     TurnRecord,
     save_conversation,
 )
-from cadgenbench.common.validity import analyze_step
+from cadgenbench.common.artifacts import StepArtifacts
 from cadgenbench.baseline.llm import LLMClient
-from cadgenbench.common.viewer import render_mesh, render_step
+from cadgenbench.common.viewer import render_mesh
 
 logger = logging.getLogger(__name__)
 
@@ -289,9 +290,10 @@ def _validate_and_render_blob(step_path_str: str) -> tuple[str, bytes | None]:
     step_path = Path(step_path_str)
     name = step_path.name
     lines: list[str] = [f"### Auto-validation of {name}"]
-    mesh_cache: dict[float, object] = {}
+    artifacts = StepArtifacts(step_path)
+    cached_mesh = None
     try:
-        a = analyze_step(step_path, mesh_cache=mesh_cache)
+        a = artifacts.analysis
         v, m = a.validation, a.measurements
         bb = m.bounding_box
         lines += [
@@ -307,6 +309,8 @@ def _validate_and_render_blob(step_path_str: str) -> tuple[str, bytes | None]:
         ]
         if v.topology_errors:
             lines.append(f"Errors:     {v.topology_errors[:3]}")
+        if v.is_valid:
+            cached_mesh = artifacts.mesh()
     except Exception as exc:
         lines.append(f"Validation error: {exc}")
 
@@ -314,14 +318,12 @@ def _validate_and_render_blob(step_path_str: str) -> tuple[str, bytes | None]:
     lines.append("")
     lines.append(f"### Iso render of {name}")
     try:
-        # Reuse the validity gate's tessellation when it produced one (valid
-        # parts); otherwise tessellate here (the part never reached the mesh
-        # gate, e.g. an invalid BREP).
-        cached_mesh = next(iter(mesh_cache.values()), None)
+        # Reuse the validated mesh when available. StepArtifacts honors trusted
+        # .mesh.npz sidecars, which is critical for editing input previews.
         if cached_mesh is not None:
             images = render_mesh(cached_mesh, views=["iso"])
         else:
-            images = render_step(step_path, views=["iso"])
+            images = render_mesh(StepArtifacts(step_path).mesh(), views=["iso"])
         if images:
             iso_bytes = images[0].data
             lines.append("(see attached image below)")
