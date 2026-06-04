@@ -36,6 +36,19 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+
+def _as_text(value: Any) -> str:
+    """Coerce captured stream output to ``str`` for ``write_text``.
+
+    Subprocess stdout/stderr can arrive as ``bytes`` (e.g. when a fixture is
+    interrupted by the wall-clock timeout before the runner decodes it).
+    Writing bytes via :meth:`Path.write_text` raises ``TypeError: data must be
+    str, not bytes`` and aborts the incremental save, losing the artefact.
+    """
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value if isinstance(value, str) else str(value)
+
 # Load defaults from the YAML next to this module. Done once at import
 # time; values become AgentConfig field defaults below.
 _DEFAULTS: dict[str, Any] = yaml.safe_load(
@@ -189,11 +202,11 @@ class AgentResult:
             turn_dir.mkdir(exist_ok=True)
 
             for i, exe in enumerate(rec.code_executions):
-                (turn_dir / f"code_{i}.py").write_text(exe.code)
+                (turn_dir / f"code_{i}.py").write_text(_as_text(exe.code))
                 if exe.stdout:
-                    (turn_dir / f"stdout_{i}.txt").write_text(exe.stdout)
+                    (turn_dir / f"stdout_{i}.txt").write_text(_as_text(exe.stdout))
                 if exe.stderr:
-                    (turn_dir / f"stderr_{i}.txt").write_text(exe.stderr)
+                    (turn_dir / f"stderr_{i}.txt").write_text(_as_text(exe.stderr))
 
         if self.work_dir and self.work_dir.exists() and self.turns:
             last_turn_dir = out / f"turn_{self.turns[-1].turn}"
