@@ -74,7 +74,7 @@ from cadgenbench.common.artifacts import (
     sidecar_path_for,
     write_mesh_sidecar,
 )
-from cadgenbench.common.profiling import phase
+from cadgenbench.common.profiling import note, phase
 from cadgenbench.common.validity import analyze_step
 from cadgenbench.eval.edit_baseline import (
     EDITING_AXIS_WEIGHTS,
@@ -220,6 +220,17 @@ def evaluate_result(
 
     aligned_step = result_dir / ALIGNED_STEP
     renders_dir = result_dir / RENDERS_DIR
+
+    # Mesh sizes drive the align cost (selector/sampling scale with vertices);
+    # log them so slow fixtures can be correlated with geometry. Both meshes are
+    # already cached (candidate from the validity gate, GT from its sidecar).
+    cand_mesh = raw_artifacts.mesh()
+    gt_mesh = gt_artifacts.mesh()
+    note(
+        f"meshsize cand_v={len(cand_mesh.vertices)} cand_t={len(cand_mesh.triangles)} "
+        f"gt_v={len(gt_mesh.vertices)} gt_t={len(gt_mesh.triangles)}",
+        tag=name,
+    )
 
     with phase("align", tag=name):
         rmse = _align_or_reuse(

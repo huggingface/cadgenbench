@@ -65,3 +65,18 @@ def phase(label: str, *, tag: str | None = None) -> Iterator[None]:
             f"[eval:phase] pid={os.getpid()} {tag_part}{label} {dt:.2f}s",
             file=sys.stderr, flush=True,
         )
+
+
+def note(message: str, *, tag: str | None = None) -> None:
+    """Emit a one-off ``[eval:phase]`` annotation line (env-gated like :func:`phase`).
+
+    For logging a measured value (e.g. mesh size) rather than a duration, so
+    slow runs can be correlated with geometry without a redeploy.
+    """
+    if not profile_enabled():
+        return
+    tag_part = f"{tag} " if tag else ""
+    print(
+        f"[eval:phase] pid={os.getpid()} {tag_part}{message}",
+        file=sys.stderr, flush=True,
+    )

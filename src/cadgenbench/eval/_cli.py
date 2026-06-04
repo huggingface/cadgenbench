@@ -53,6 +53,34 @@ _MP_CONTEXT = mp.get_context("spawn")
 
 DEFAULT_WORKERS = min(8, os.cpu_count() or 1)
 
+# Native thread-pool knobs read by Open3D (OpenMP) and NumPy/SciPy (BLAS).
+_THREAD_ENV_VARS = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+)
+
+
+def _cap_worker_threads(n_workers: int) -> int:
+    """Cap each spawned worker's native thread pools to avoid CPU oversubscription.
+
+    Open3D (OpenMP) and NumPy/SciPy (BLAS) each default to *all* cores, so
+    ``n_workers`` worker processes on a ``C``-vCPU box spawn ~``n_workers * C``
+    threads. That oversubscription — not the algorithm — was the dominant cost
+    in the eval ``align`` phase (per-fixture align was flat regardless of mesh
+    size and ~4-5x faster when a worker ran alone). The pool uses a spawn
+    context, so setting these in the parent before dispatch is inherited and
+    read fresh by each worker's native libs at import. User-set values win.
+    Returns the per-worker thread budget actually applied.
+    """
+    cpu = os.cpu_count() or 1
+    per_worker = max(1, cpu // max(1, n_workers))
+    for var in _THREAD_ENV_VARS:
+        os.environ.setdefault(var, str(per_worker))
+    return per_worker
+
 
 def add_subparser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``cadgenbench evaluate`` subcommand."""
@@ -221,6 +249,11 @@ def _process_run(
     if n_workers == 1:
         results = [_eval_one(w) for w in work]
     else:
+        per_worker_threads = _cap_worker_threads(n_workers)
+        print(
+            f"  (capping native threads to {per_worker_threads}/worker "
+            f"across {os.cpu_count()} vCPUs to avoid oversubscription)"
+        )
         with ProcessPoolExecutor(
             max_workers=n_workers, mp_context=_MP_CONTEXT,
         ) as ex:
