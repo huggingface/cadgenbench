@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import multiprocessing as mp
 import os
 import sys
@@ -51,7 +52,45 @@ from pathlib import Path
 # since 3.8; this line is the Linux fix.
 _MP_CONTEXT = mp.get_context("spawn")
 
-DEFAULT_WORKERS = min(8, os.cpu_count() or 1)
+
+def _effective_cpu_count() -> int:
+    """Best-effort *allocated* CPU count for this (possibly containerized) process.
+
+    ``os.cpu_count()`` reports the host node, which on HF Jobs is the whole
+    machine (e.g. 48 vCPUs) rather than the flavor's allocation (e.g. 12 for
+    a10g-large). Sizing thread caps off the host number leaves the box
+    oversubscribed. Prefer the cgroup CPU quota, then the affinity mask, and
+    fall back to the host count — taking the smallest signal.
+    """
+    candidates: list[int] = []
+    # cgroup v2: "<quota> <period>" (quota == "max" means unlimited).
+    try:
+        parts = Path("/sys/fs/cgroup/cpu.max").read_text().split()
+        if parts and parts[0] != "max":
+            quota, period = int(parts[0]), int(parts[1])
+            if quota > 0 and period > 0:
+                candidates.append(max(1, math.ceil(quota / period)))
+    except Exception:  # noqa: BLE001 - missing/parse errors just skip this signal
+        pass
+    # cgroup v1.
+    try:
+        quota = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read_text())
+        period = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read_text())
+        if quota > 0 and period > 0:
+            candidates.append(max(1, math.ceil(quota / period)))
+    except Exception:  # noqa: BLE001
+        pass
+    # CPU affinity mask (Linux only; macOS has no sched_getaffinity).
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            candidates.append(len(os.sched_getaffinity(0)))
+        except Exception:  # noqa: BLE001
+            pass
+    candidates.append(os.cpu_count() or 1)
+    return max(1, min(candidates))
+
+
+DEFAULT_WORKERS = min(8, _effective_cpu_count())
 
 # Native thread-pool knobs read by Open3D (OpenMP) and NumPy/SciPy (BLAS).
 _THREAD_ENV_VARS = (
@@ -70,12 +109,13 @@ def _cap_worker_threads(n_workers: int) -> int:
     ``n_workers`` worker processes on a ``C``-vCPU box spawn ~``n_workers * C``
     threads. That oversubscription — not the algorithm — was the dominant cost
     in the eval ``align`` phase (per-fixture align was flat regardless of mesh
-    size and ~4-5x faster when a worker ran alone). The pool uses a spawn
-    context, so setting these in the parent before dispatch is inherited and
-    read fresh by each worker's native libs at import. User-set values win.
+    size and dropped ~70x once capped). The budget is sized off the *allocated*
+    CPUs (:func:`_effective_cpu_count`), not the host node. The pool uses a
+    spawn context, so setting these in the parent before dispatch is inherited
+    and read fresh by each worker's native libs at import. User-set values win.
     Returns the per-worker thread budget actually applied.
     """
-    cpu = os.cpu_count() or 1
+    cpu = _effective_cpu_count()
     per_worker = max(1, cpu // max(1, n_workers))
     for var in _THREAD_ENV_VARS:
         os.environ.setdefault(var, str(per_worker))
@@ -251,8 +291,9 @@ def _process_run(
     else:
         per_worker_threads = _cap_worker_threads(n_workers)
         print(
-            f"  (capping native threads to {per_worker_threads}/worker "
-            f"across {os.cpu_count()} vCPUs to avoid oversubscription)"
+            f"  (capping native threads to {per_worker_threads}/worker across "
+            f"{_effective_cpu_count()} allocated vCPUs [host={os.cpu_count()}] "
+            f"to avoid oversubscription)"
         )
         with ProcessPoolExecutor(
             max_workers=n_workers, mp_context=_MP_CONTEXT,
