@@ -616,22 +616,31 @@ def _volume_overlap_stats(
 
 
 def _ensure_renders(ctx: MetricContext, renders_dir: Path) -> None:
-    """Write canonical-view PNGs for *ctx* into *renders_dir*.
+    """Write canonical-view PNGs and the turntable WebP for *ctx*.
 
     Reuses the welded mesh already cached on the context (computed at
     the shared GT-derived deflection) so we never tessellate twice for
-    the same fixture.
+    the same fixture. The rotating WebP backs the leaderboard gallery; the
+    static PNG views back the per-fixture report.
     """
-    from cadgenbench.common.viewer import DEFAULT_VIEWS as RENDER_VIEWS, render_mesh
+    from cadgenbench.common.viewer import (
+        DEFAULT_VIEWS as RENDER_VIEWS,
+        render_mesh,
+        render_mesh_turntable_webp,
+    )
 
     renders_dir.mkdir(parents=True, exist_ok=True)
     missing = [v for v in RENDER_VIEWS if not (renders_dir / f"{v}.png").exists()]
-    if not missing:
+    webp_path = renders_dir / "rotating.webp"
+    if not missing and webp_path.exists():
         return
     mesh = ctx.get_mesh()
     if mesh is None:
         raise RuntimeError(
             f"Cannot render {ctx.step_path}: tessellation produced no mesh.",
         )
-    for img in render_mesh(mesh, views=missing):
-        (renders_dir / f"{img.name}.png").write_bytes(img.data)
+    if missing:
+        for img in render_mesh(mesh, views=missing):
+            (renders_dir / f"{img.name}.png").write_bytes(img.data)
+    if not webp_path.exists():
+        webp_path.write_bytes(render_mesh_turntable_webp(mesh))

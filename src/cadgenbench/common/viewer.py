@@ -55,6 +55,7 @@ from PIL import Image
 from cadgenbench.common.camera_presets import (
     CAMERA_PRESETS,
     DEFAULT_VIEWS,
+    DISTANCE_FACTOR,
     camera_placement,
     validate_views,
 )
@@ -69,12 +70,21 @@ from cadgenbench.common.profiling import phase
 __all__ = [
     "CAMERA_PRESETS",
     "DEFAULT_VIEWS",
+    "DIFF_ADDED_RGB",
+    "DIFF_GHOST_RGB",
+    "DIFF_REMOVED_RGB",
+    "MeshDiff",
     "OVERLAY_PALETTE",
     "RenderedImage",
+    "mesh_diff",
     "render_mesh",
+    "render_mesh_diff",
+    "render_mesh_diff_turntable_webp",
     "render_mesh_overlay",
+    "render_mesh_turntable_webp",
     "render_overlay",
     "render_step",
+    "render_step_turntable_webp",
     "render_steps",
 ]
 
@@ -103,6 +113,21 @@ OVERLAY_PALETTE: tuple[tuple[float, float, float, float], ...] = (
     (1.00, 0.85, 0.00, 1.00),  # solid yellow (good for highlights)
     (0.20, 0.70, 0.30, 0.60),  # translucent green
 )
+
+# Edit-diff look (see :func:`render_mesh_diff`). The body is ghosted
+# translucent so internal changes show through; added / removed material is
+# painted opaque on top. Blue = candidate surplus, red = candidate deficit.
+DIFF_GHOST_RGB: tuple[float, float, float] = (0.74, 0.77, 0.82)
+DIFF_REMOVED_RGB: tuple[float, float, float] = (0.90, 0.16, 0.16)  # in GT, missing from candidate
+DIFF_ADDED_RGB: tuple[float, float, float] = (0.13, 0.45, 0.96)    # in candidate, absent from GT
+DIFF_GHOST_ALPHA: float = 0.16
+# Default surface-deviation tolerance (mm): a vertex must lie more than this
+# far OUTSIDE the other solid to count as added/removed, which keeps coincident
+# surfaces and tessellation noise from lighting up.
+DIFF_TOL_MM: float = 0.5
+# Float the highlighted patch out along its own normals by this many mm so it
+# sits proud of the ghost shell and never z-fights the coincident base surface.
+DIFF_OFFSET_MM: float = 0.2
 
 
 @dataclass(frozen=True)
@@ -202,6 +227,281 @@ def render_step(
     step_path = Path(step_path)
     mesh = _tessellate(step_path)
     return render_mesh(mesh, views, width=width, height=height)
+
+
+def render_mesh_turntable_webp(
+    mesh: Mesh,
+    *,
+    frames: int = 120,
+    width: int = 512,
+    height: int = 384,
+    duration_ms: int = 150,
+    quality: int = 68,
+    body_rgb: tuple[float, float, float] = DEFAULT_BODY_RGB,
+) -> bytes:
+    """Render a smooth Z-up turntable as an animated WebP for a welded mesh.
+
+    Frames share the exact shaded look of the canonical PNG views (same
+    material, lighting and parallel projection as :func:`render_mesh`); the
+    only difference is the camera orbits the Z axis at a fixed orthographic
+    scale. The animation is encoded as truecolor WebP (no palette banding,
+    inter-frame compression) which is both smoother and smaller than the
+    GIF equivalent: at the defaults a full orbit is 120 frames over ~18s and
+    a typical part lands around ~360 KB.
+    """
+    if mesh.n_triangles == 0:
+        raise ValueError("render_mesh_turntable_webp: mesh has zero triangles")
+    if frames < 2:
+        raise ValueError("render_mesh_turntable_webp: frames must be >= 2")
+
+    bbox_min = mesh.vertices.min(axis=0)
+    bbox_max = mesh.vertices.max(axis=0)
+    body = _mesh_to_polydata(mesh)
+    pngs = _render_turntable_frames(
+        shapes=[(body, body_rgb, 1.0)],
+        bbox_min=bbox_min,
+        bbox_max=bbox_max,
+        frames=frames,
+        width=width,
+        height=height,
+    )
+    return _encode_webp(pngs, duration_ms=duration_ms, quality=quality)
+
+
+def _encode_webp(pngs: list[bytes], *, duration_ms: int, quality: int) -> bytes:
+    """Encode PNG frames into a looping animated WebP.
+
+    WebP is truecolor (no 256-colour palette, so the grey shading ramp keeps
+    its contrast) and compresses frame-to-frame deltas like a video codec, so
+    a high frame count stays small. ``method=6`` is the slowest/best WebP
+    compression effort, worth it for a write-once artifact.
+    """
+    frames = [Image.open(io.BytesIO(png)).convert("RGB") for png in pngs]
+    buf = io.BytesIO()
+    frames[0].save(
+        buf,
+        format="WEBP",
+        save_all=True,
+        append_images=frames[1:],
+        duration=duration_ms,
+        loop=0,
+        quality=quality,
+        method=6,
+    )
+    return buf.getvalue()
+
+
+def render_step_turntable_webp(
+    step_path: str | Path,
+    *,
+    frames: int = 120,
+    width: int = 512,
+    height: int = 384,
+    duration_ms: int = 150,
+    quality: int = 68,
+) -> bytes:
+    """Render a turntable WebP directly from a STEP file (tessellates once).
+
+    Prefer :func:`render_mesh_turntable_webp` when a welded mesh is already in
+    hand (e.g. the eval's aligned candidate mesh, or a GT part loaded from its
+    trusted ``.mesh.npz`` sidecar) so no STEP round-trip / re-tessellation is
+    paid.
+    """
+    mesh = _tessellate(Path(step_path))
+    return render_mesh_turntable_webp(
+        mesh,
+        frames=frames,
+        width=width,
+        height=height,
+        duration_ms=duration_ms,
+        quality=quality,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Edit-diff rendering
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class MeshDiff:
+    """Classified surface difference between a candidate mesh and the GT.
+
+    Small edits (a moved hole, a shortened internal boss, a 2.5 mm thickening)
+    are visually invisible in a plain shaded render, so a no-op candidate that
+    echoes the input looks identical to a correct edit. This splits the two
+    surfaces into the material that genuinely differs, classified by *signed*
+    distance to the other solid so coincident or interior surfaces never light
+    up:
+
+    Attributes:
+        removed: Sub-mesh of the GT surface lying more than ``tol_mm`` outside
+            the candidate solid (present in GT, missing from the candidate).
+            ``None`` when nothing qualifies. Drawn red.
+        added: Sub-mesh of the candidate surface lying more than ``tol_mm``
+            outside the GT solid (present in the candidate, absent from GT).
+            ``None`` when nothing qualifies. Drawn blue.
+        fraction_removed: Share of GT triangles flagged removed, in ``[0, 1]``.
+        fraction_added: Share of candidate triangles flagged added, in
+            ``[0, 1]``.
+        max_deviation_mm: Largest outward signed distance, in mm, over both
+            directions. The magnitude the colour saturation throws away; a
+            no-op on a "remove three holes" task reads ~0, a correct edit's
+            residual is small, a wrong edit is large.
+    """
+
+    removed: Mesh | None
+    added: Mesh | None
+    fraction_removed: float
+    fraction_added: float
+    max_deviation_mm: float
+
+
+def mesh_diff(
+    gt_mesh: Mesh,
+    candidate_mesh: Mesh,
+    *,
+    tol_mm: float = DIFF_TOL_MM,
+) -> MeshDiff:
+    """Classify the added / removed material between candidate and GT.
+
+    Both meshes must already be in the same frame (the eval aligns the
+    candidate to GT before scoring; the GT mesh comes from its trusted
+    ``.mesh.npz`` sidecar). Signed distance is computed with Open3D's
+    ``RaycastingScene``; a positive value means the query point lies outside
+    the reference solid.
+
+    Args:
+        gt_mesh: Ground-truth welded mesh.
+        candidate_mesh: Candidate welded mesh, aligned into the GT frame.
+        tol_mm: Outward-distance threshold (mm) above which a vertex counts as
+            added / removed. Below it, coincident surfaces and tessellation
+            noise stay unflagged.
+
+    Returns:
+        A :class:`MeshDiff`.
+    """
+    s_cand = _signed_distance(candidate_mesh.vertices, gt_mesh)
+    s_gt = _signed_distance(gt_mesh.vertices, candidate_mesh)
+    added, frac_added = _subset_mesh(candidate_mesh, s_cand, tol_mm)
+    removed, frac_removed = _subset_mesh(gt_mesh, s_gt, tol_mm)
+    max_dev = float(max(s_cand.max(initial=0.0), s_gt.max(initial=0.0)))
+    return MeshDiff(
+        removed=removed,
+        added=added,
+        fraction_removed=frac_removed,
+        fraction_added=frac_added,
+        max_deviation_mm=max_dev,
+    )
+
+
+def render_mesh_diff(
+    gt_mesh: Mesh,
+    candidate_mesh: Mesh,
+    views: Sequence[str] | None = None,
+    *,
+    width: int = 1024,
+    height: int = 768,
+    tol_mm: float = DIFF_TOL_MM,
+    ghost_rgb: tuple[float, float, float] = DIFF_GHOST_RGB,
+) -> list[RenderedImage]:
+    """Render the candidate as a ghost body with added/removed material lit up.
+
+    The candidate is drawn translucent (so internal changes show through) and
+    the :func:`mesh_diff` added (blue) / removed (red) sub-meshes are painted
+    opaque on top, floated proud of the shell so they never z-fight.
+
+    Args:
+        gt_mesh: Ground-truth welded mesh.
+        candidate_mesh: Candidate welded mesh, aligned into the GT frame.
+        views: Camera preset names. Defaults to :data:`DEFAULT_VIEWS`.
+        width: Image width in pixels.
+        height: Image height in pixels.
+        tol_mm: Surface-deviation tolerance passed to :func:`mesh_diff`.
+        ghost_rgb: Body colour for the translucent ghost.
+
+    Returns:
+        One :class:`RenderedImage` per requested view, in input order.
+
+    Raises:
+        ValueError: Unknown camera preset, or empty candidate mesh.
+    """
+    if candidate_mesh.n_triangles == 0:
+        raise ValueError("render_mesh_diff: candidate mesh has zero triangles")
+    if views is None:
+        views = DEFAULT_VIEWS
+    validate_views(views)
+
+    diff = mesh_diff(gt_mesh, candidate_mesh, tol_mm=tol_mm)
+    shapes = _diff_shapes(candidate_mesh, diff, ghost_rgb)
+    bbox_min, bbox_max = _diff_bbox(gt_mesh, candidate_mesh)
+    pngs = _render_views(
+        shapes=shapes,
+        bbox_min=bbox_min,
+        bbox_max=bbox_max,
+        views=views,
+        width=width,
+        height=height,
+    )
+    return [
+        RenderedImage(name=view, data=png, width=width, height=height)
+        for view, png in zip(views, pngs)
+    ]
+
+
+def render_mesh_diff_turntable_webp(
+    gt_mesh: Mesh,
+    candidate_mesh: Mesh,
+    *,
+    frames: int = 120,
+    width: int = 512,
+    height: int = 384,
+    duration_ms: int = 150,
+    quality: int = 68,
+    tol_mm: float = DIFF_TOL_MM,
+    ghost_rgb: tuple[float, float, float] = DIFF_GHOST_RGB,
+) -> bytes:
+    """Render a Z-up turntable of the edit diff as an animated WebP.
+
+    Motion is what sells a small or internal edit: the changed material orbits
+    into view from every angle even when a single still would occlude it. Same
+    ghost-body + opaque added/removed look as :func:`render_mesh_diff`, encoded
+    truecolor (no palette banding) and small (~200 KB) via :func:`_encode_webp`.
+
+    Args:
+        gt_mesh: Ground-truth welded mesh.
+        candidate_mesh: Candidate welded mesh, aligned into the GT frame.
+        frames: Number of orbit frames (>= 2).
+        width: Frame width in pixels.
+        height: Frame height in pixels.
+        duration_ms: Per-frame duration in the encoded WebP.
+        quality: WebP quality in ``[0, 100]``.
+        tol_mm: Surface-deviation tolerance passed to :func:`mesh_diff`.
+        ghost_rgb: Body colour for the translucent ghost.
+
+    Returns:
+        Encoded animated-WebP bytes.
+
+    Raises:
+        ValueError: Empty candidate mesh, or ``frames`` < 2.
+    """
+    if candidate_mesh.n_triangles == 0:
+        raise ValueError("render_mesh_diff_turntable_webp: candidate mesh has zero triangles")
+    if frames < 2:
+        raise ValueError("render_mesh_diff_turntable_webp: frames must be >= 2")
+
+    diff = mesh_diff(gt_mesh, candidate_mesh, tol_mm=tol_mm)
+    shapes = _diff_shapes(candidate_mesh, diff, ghost_rgb)
+    bbox_min, bbox_max = _diff_bbox(gt_mesh, candidate_mesh)
+    pngs = _render_turntable_frames(
+        shapes=shapes,
+        bbox_min=bbox_min,
+        bbox_max=bbox_max,
+        frames=frames,
+        width=width,
+        height=height,
+    )
+    return _encode_webp(pngs, duration_ms=duration_ms, quality=quality)
 
 
 def render_steps(
@@ -385,6 +685,86 @@ def _mesh_to_polydata(mesh: Mesh) -> pv.PolyData:
     return pv.PolyData(v, cells.reshape(-1))
 
 
+def _signed_distance(points: np.ndarray, target: Mesh) -> np.ndarray:
+    """Signed distance from each point to the *target* solid.
+
+    Positive outside the solid, negative inside. Uses Open3D's
+    ``RaycastingScene`` (lazy import, matching :mod:`cadgenbench.eval.alignment`).
+    """
+    import open3d as o3d  # noqa: PLC0415
+
+    tri = o3d.t.geometry.TriangleMesh(
+        o3d.core.Tensor(np.ascontiguousarray(target.vertices), dtype=o3d.core.Dtype.Float32),
+        o3d.core.Tensor(
+            np.ascontiguousarray(target.triangles, dtype=np.int32),
+            dtype=o3d.core.Dtype.Int32,
+        ),
+    )
+    scene = o3d.t.geometry.RaycastingScene()
+    scene.add_triangles(tri)
+    query = o3d.core.Tensor(
+        np.ascontiguousarray(points, dtype=np.float32), dtype=o3d.core.Dtype.Float32,
+    )
+    return scene.compute_signed_distance(query).numpy().astype(np.float64)
+
+
+def _subset_mesh(
+    mesh: Mesh, signed: np.ndarray, tol_mm: float,
+) -> tuple[Mesh | None, float]:
+    """Extract the triangles with any vertex more than *tol_mm* outside.
+
+    Returns the compacted sub-mesh (vertices re-indexed) and the fraction of
+    triangles kept. ``(None, 0.0)`` when nothing qualifies.
+    """
+    cell_far = (signed > tol_mm)[mesh.triangles].any(axis=1)
+    if not cell_far.any():
+        return None, 0.0
+    tris = mesh.triangles[cell_far]
+    used = np.unique(tris)
+    remap = np.full(mesh.n_vertices, -1, dtype=np.int64)
+    remap[used] = np.arange(used.shape[0])
+    sub = Mesh(
+        vertices=mesh.vertices[used],
+        triangles=remap[tris].astype(np.int64),
+        linear_deflection_mm=mesh.linear_deflection_mm,
+    )
+    return sub, float(cell_far.mean())
+
+
+def _diff_subpoly(mesh: Mesh) -> pv.PolyData:
+    """Polydata for a highlight sub-mesh, floated out along its own normals."""
+    poly = _mesh_to_polydata(mesh)
+    if DIFF_OFFSET_MM:
+        poly = poly.compute_normals(
+            point_normals=True, cell_normals=False, auto_orient_normals=True,
+        )
+        poly.points = poly.points + poly.point_data["Normals"] * DIFF_OFFSET_MM
+    return poly
+
+
+def _diff_shapes(
+    candidate_mesh: Mesh,
+    diff: MeshDiff,
+    ghost_rgb: tuple[float, float, float],
+) -> list[tuple[pv.PolyData, tuple[float, float, float], float]]:
+    """Build the ghost-body + added/removed shape list for the diff renderers."""
+    shapes: list[tuple[pv.PolyData, tuple[float, float, float], float]] = [
+        (_mesh_to_polydata(candidate_mesh), ghost_rgb, DIFF_GHOST_ALPHA),
+    ]
+    if diff.removed is not None:
+        shapes.append((_diff_subpoly(diff.removed), DIFF_REMOVED_RGB, 1.0))
+    if diff.added is not None:
+        shapes.append((_diff_subpoly(diff.added), DIFF_ADDED_RGB, 1.0))
+    return shapes
+
+
+def _diff_bbox(gt_mesh: Mesh, candidate_mesh: Mesh) -> tuple[np.ndarray, np.ndarray]:
+    """Union bounding box of both meshes (so neither is clipped)."""
+    bbox_min = np.minimum(gt_mesh.vertices.min(axis=0), candidate_mesh.vertices.min(axis=0))
+    bbox_max = np.maximum(gt_mesh.vertices.max(axis=0), candidate_mesh.vertices.max(axis=0))
+    return bbox_min, bbox_max
+
+
 def _parallel_scale_for_view(
     bbox_min: np.ndarray,
     bbox_max: np.ndarray,
@@ -534,4 +914,86 @@ def _render_views(
             Image.fromarray(arr).save(buf, format="PNG", optimize=True)
             pngs.append(buf.getvalue())
 
+    return pngs
+
+
+def _render_turntable_frames(
+    *,
+    shapes: list[tuple[pv.PolyData, tuple[float, float, float], float]],
+    bbox_min: np.ndarray,
+    bbox_max: np.ndarray,
+    frames: int,
+    width: int,
+    height: int,
+) -> list[bytes]:
+    """Render one complete orbit around the Z axis as PNG frame bytes."""
+    pngs: list[bytes] = []
+    target = (bbox_min + bbox_max) * 0.5
+    diagonal = float(np.linalg.norm(bbox_max - bbox_min))
+    distance = max(diagonal * DISTANCE_FACTOR, 1e-6)
+    elevation = np.deg2rad(32.0)
+    start_azimuth = np.deg2rad(-45.0)
+    directions = [
+        np.array(
+            [
+                np.cos(start_azimuth + (2.0 * np.pi * i / frames)) * np.cos(elevation),
+                np.sin(start_azimuth + (2.0 * np.pi * i / frames)) * np.cos(elevation),
+                np.sin(elevation),
+            ],
+            dtype=np.float64,
+        )
+        for i in range(frames)
+    ]
+    up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    # Keep the orthographic scale fixed across the whole orbit. Computing a
+    # fresh fit per frame makes long/flat parts appear to breathe toward and
+    # away from the camera as their projected bbox changes.
+    parallel_scale = max(
+        _parallel_scale_for_view(
+            bbox_min, bbox_max,
+            eye=target + direction * distance,
+            target=target,
+            up=up,
+            window_w=width,
+            window_h=height,
+        )
+        for direction in directions
+    )
+    with _RENDER_LOCK, _cross_process_render_lock(), phase(
+        f"render turntable n={frames}",
+    ):
+        for direction in directions:
+            eye = target + direction * distance
+
+            pl = pv.Plotter(off_screen=True, window_size=(width, height))
+            try:
+                pl.set_background(BACKGROUND_RGB)
+                for body, rgb, alpha in shapes:
+                    pl.add_mesh(
+                        body,
+                        color=rgb,
+                        opacity=alpha,
+                        smooth_shading=False,
+                        show_edges=False,
+                        ambient=0.45,
+                        diffuse=0.65,
+                        specular=0.10,
+                        specular_power=15,
+                    )
+
+                cam = pl.camera
+                cam.position = tuple(map(float, eye))
+                cam.focal_point = tuple(map(float, target))
+                cam.up = tuple(map(float, up))
+                cam.parallel_projection = True
+                cam.parallel_scale = parallel_scale
+                arr = np.asarray(
+                    pl.screenshot(return_img=True, transparent_background=False)
+                )
+            finally:
+                pl.close()
+
+            buf = io.BytesIO()
+            Image.fromarray(arr).save(buf, format="PNG", optimize=True)
+            pngs.append(buf.getvalue())
     return pngs

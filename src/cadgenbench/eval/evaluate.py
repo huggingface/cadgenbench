@@ -409,10 +409,13 @@ def evaluate_candidate_only(candidate_step: Path, result_dir: Path) -> None:
     renders_dir = result_dir / RENDERS_DIR
     renders_dir.mkdir(parents=True, exist_ok=True)
     try:
-        from cadgenbench.common.viewer import render_step
+        from cadgenbench.common.viewer import render_step, render_step_turntable_webp
 
         for img in render_step(str(candidate_step)):
             (renders_dir / f"{img.name}.png").write_bytes(img.data)
+        (renders_dir / "rotating.webp").write_bytes(
+            render_step_turntable_webp(str(candidate_step))
+        )
     except Exception:
         logger.warning("Render of %s failed", candidate_step, exc_info=True)
 
