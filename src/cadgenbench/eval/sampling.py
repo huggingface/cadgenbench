@@ -209,7 +209,14 @@ def _tessellate(
     from OCP.TopLoc import TopLoc_Location
     from OCP.TopoDS import TopoDS
 
-    BRepMesh_IncrementalMesh(shape, linear_deflection, False, angular_deflection, True)
+    from cadgenbench.common.profiling import phase  # noqa: PLC0415
+
+    # Separate meshing timer for the alignment point-cloud path (distinct OCC
+    # tessellation from cadgenbench.common.mesh.tessellate_shape).
+    with phase(f"mesh.align d={linear_deflection:.4g}"):
+        BRepMesh_IncrementalMesh(
+            shape, linear_deflection, False, angular_deflection, True,
+        )
 
     all_verts: list[np.ndarray] = []
     all_tris: list[np.ndarray] = []

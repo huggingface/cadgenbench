@@ -69,7 +69,12 @@ import logging
 import shutil
 from pathlib import Path
 
-from cadgenbench.common.artifacts import StepArtifacts
+from cadgenbench.common.artifacts import (
+    StepArtifacts,
+    sidecar_path_for,
+    write_mesh_sidecar,
+)
+from cadgenbench.common.profiling import phase
 from cadgenbench.common.validity import analyze_step
 from cadgenbench.eval.edit_baseline import (
     EDITING_AXIS_WEIGHTS,
@@ -145,6 +150,7 @@ def evaluate_result(
     result_dir = Path(result_dir)
     gt_dir = Path(gt_dir)
     result_json = result_dir / "result.json"
+    name = result_dir.name  # profiling tag (see cadgenbench.common.profiling)
 
     gt_step = gt_dir / GT_STEP_NAME
     if not gt_step.exists():
@@ -176,8 +182,23 @@ def evaluate_result(
     # short-circuit here both to avoid the crash and to keep
     # ``evaluate_result`` exit-clean: per-fixture validity failures
     # never bubble out to the caller.
-    raw_artifacts = StepArtifacts(raw_candidate)
-    validation_dict = _validation_dict(raw_candidate, artifacts=raw_artifacts)
+    # One deflection per fixture, derived from the GT bbox, drives every
+    # tessellation on both sides (validity, shape, topology, interface,
+    # render, and the ICP point clouds). Computing it up front lets the
+    # candidate be meshed exactly once (here, at the validity gate) and
+    # reused everywhere — a rigid alignment only moves that one mesh.
+    from cadgenbench.common.mesh import deflection_for_bbox  # noqa: PLC0415
+
+    gt_artifacts = StepArtifacts(gt_step, is_ground_truth=True)
+    shared_deflection = deflection_for_bbox(
+        gt_artifacts.analysis.measurements.bounding_box.diagonal,
+    )
+
+    raw_artifacts = StepArtifacts(
+        raw_candidate, deflection_override=shared_deflection,
+    )
+    with phase("validity", tag=name):
+        validation_dict = _validation_dict(raw_candidate, artifacts=raw_artifacts)
     if not validation_dict.get("is_valid"):
         prior = _read_json(result_json)
         data = {
@@ -200,32 +221,36 @@ def evaluate_result(
     aligned_step = result_dir / ALIGNED_STEP
     renders_dir = result_dir / RENDERS_DIR
 
-    gt_artifacts = StepArtifacts(gt_step, is_ground_truth=True)
-    rmse = _align_or_reuse(
-        raw_candidate, gt_step, aligned_step, renders_dir,
-        data=data, force=force_align,
-    )
+    with phase("align", tag=name):
+        rmse = _align_or_reuse(
+            raw_candidate, aligned_step, renders_dir,
+            raw_artifacts=raw_artifacts,
+            gt_artifacts=gt_artifacts,
+            data=data, force=force_align,
+        )
     aligned_artifacts = StepArtifacts(aligned_step)
 
-    # --- Shape similarity ---------------------------------------------------
-    comparison = compare_step_files(
-        aligned_step, gt_step,
-        align=False,
-        alignment_rmse=rmse,
-        candidate_renders_dir=renders_dir,
-        candidate_artifacts=aligned_artifacts,
-        gt_artifacts=gt_artifacts,
-    )
+    # --- Shape similarity (also fills the candidate renders) ----------------
+    with phase("shape", tag=name):
+        comparison = compare_step_files(
+            aligned_step, gt_step,
+            align=False,
+            alignment_rmse=rmse,
+            candidate_renders_dir=renders_dir,
+            candidate_artifacts=aligned_artifacts,
+            gt_artifacts=gt_artifacts,
+        )
     scores = comparison.scores
 
     # --- Interface match (aligned candidate; only when jig files exist) -----
-    interface_metrics = _interface_metrics_dict(
-        aligned_step,
-        gt_dir,
-        gt_step,
-        candidate_artifacts=aligned_artifacts,
-        gt_artifacts=gt_artifacts,
-    )
+    with phase("interface", tag=name):
+        interface_metrics = _interface_metrics_dict(
+            aligned_step,
+            gt_dir,
+            gt_step,
+            candidate_artifacts=aligned_artifacts,
+            gt_artifacts=gt_artifacts,
+        )
     if interface_metrics:
         _maybe_render_interface_overlay(
             aligned_step,
@@ -234,13 +259,14 @@ def evaluate_result(
         )
 
     # --- Topology match (Betti b0/b1/b2 on the tessellated boundary) --------
-    topology_metrics = _topology_metrics_dict(
-        raw_candidate,
-        gt_step,
-        validation_dict,
-        candidate_artifacts=raw_artifacts,
-        gt_artifacts=gt_artifacts,
-    )
+    with phase("topo", tag=name):
+        topology_metrics = _topology_metrics_dict(
+            raw_candidate,
+            gt_step,
+            validation_dict,
+            candidate_artifacts=raw_artifacts,
+            gt_artifacts=gt_artifacts,
+        )
 
     data["status"] = STATUS_VALID
     data["validation"] = validation_dict
@@ -396,32 +422,47 @@ def evaluate_candidate_only(candidate_step: Path, result_dir: Path) -> None:
 
 def _align_or_reuse(
     raw_candidate: Path,
-    gt_step: Path,
     aligned_step: Path,
     renders_dir: Path,
     *,
+    raw_artifacts: StepArtifacts,
+    gt_artifacts: StepArtifacts,
     data: dict,
     force: bool,
 ) -> float:
-    """Align *raw_candidate* to *gt_step*, reusing a cached result when fresh."""
+    """Rigidly align the candidate to the GT, reusing a cached result when fresh.
+
+    Operates on the candidate's *already-computed* mesh (and the GT's) via
+    :func:`align_cached_mesh` — no re-tessellation. The recovered transform
+    is applied to the BREP to persist ``output_aligned.step`` (a cheap
+    geometric export), and the transformed mesh is written as that STEP's
+    trusted sidecar so every downstream consumer reuses the one mesh
+    instead of meshing the aligned geometry again.
+    """
     cached_rmse = (data.get("alignment") or {}).get("rmse")
+    sidecar = sidecar_path_for(aligned_step)
 
     fresh = (
         aligned_step.exists()
+        and sidecar.exists()
         and aligned_step.stat().st_mtime >= raw_candidate.stat().st_mtime
         and cached_rmse is not None
     )
     if fresh and not force:
         return float(cached_rmse)
 
-    from cadgenbench.eval.alignment import align_step
+    from cadgenbench.eval.alignment import align_cached_mesh, export_aligned_shape
 
+    car = align_cached_mesh(raw_artifacts, gt_artifacts, pca_top_k=12)
     aligned_step.parent.mkdir(parents=True, exist_ok=True)
-    ar = align_step(raw_candidate, gt_step, output=aligned_step, pca_top_k=12)
+    export_aligned_shape(
+        raw_artifacts.wrapped, car.rotation, car.translation, aligned_step,
+    )
+    write_mesh_sidecar(aligned_step, car.mesh)
 
     # The cached candidate renders are stale once the aligned geometry moves.
     shutil.rmtree(renders_dir, ignore_errors=True)
-    return ar.rmse
+    return car.rmse
 
 
 # ---------------------------------------------------------------------------

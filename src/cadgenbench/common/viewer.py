@@ -40,7 +40,10 @@ of magnitude faster than the previous Chromium / three-cad-viewer path.
 from __future__ import annotations
 
 import io
+import os
+import tempfile
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -60,6 +63,7 @@ from cadgenbench.common.mesh import (
     deflection_for_bbox,
     tessellate_step,
 )
+from cadgenbench.common.profiling import phase
 
 # Re-exported for callers that want the canonical preset / default-view sets.
 __all__ = [
@@ -155,18 +159,18 @@ def render_mesh(
     bbox_max = mesh.vertices.max(axis=0)
     body = _mesh_to_polydata(mesh)
 
-    out: list[RenderedImage] = []
-    for view in views:
-        png = _render_scene(
-            shapes=[(body, body_rgb, 1.0)],
-            bbox_min=bbox_min,
-            bbox_max=bbox_max,
-            view=view,
-            width=width,
-            height=height,
-        )
-        out.append(RenderedImage(name=view, data=png, width=width, height=height))
-    return out
+    pngs = _render_views(
+        shapes=[(body, body_rgb, 1.0)],
+        bbox_min=bbox_min,
+        bbox_max=bbox_max,
+        views=views,
+        width=width,
+        height=height,
+    )
+    return [
+        RenderedImage(name=view, data=png, width=width, height=height)
+        for view, png in zip(views, pngs)
+    ]
 
 
 def render_step(
@@ -333,18 +337,18 @@ def render_mesh_overlay(
         bbox_min = np.minimum(bbox_min, mesh.vertices.min(axis=0))
         bbox_max = np.maximum(bbox_max, mesh.vertices.max(axis=0))
 
-    out: list[RenderedImage] = []
-    for view in views:
-        png = _render_scene(
-            shapes=shapes,
-            bbox_min=bbox_min,
-            bbox_max=bbox_max,
-            view=view,
-            width=width,
-            height=height,
-        )
-        out.append(RenderedImage(name=view, data=png, width=width, height=height))
-    return out
+    pngs = _render_views(
+        shapes=shapes,
+        bbox_min=bbox_min,
+        bbox_max=bbox_max,
+        views=views,
+        width=width,
+        height=height,
+    )
+    return [
+        RenderedImage(name=view, data=png, width=width, height=height)
+        for view, png in zip(views, pngs)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -420,26 +424,75 @@ def _parallel_scale_for_view(
     return max(half_h, half_w / aspect) * FRAME_MARGIN
 
 
+# VTK/OpenGL is not thread-safe and there is a single GL context per process.
+# Baseline fixtures and compare-llms models both render from threads, so this
+# guards concurrent renders within one process.
 _RENDER_LOCK = threading.Lock()
 
+# Cross-process render serialisation. The threading lock above only spans one
+# process; the eval ProcessPool runs 8 sibling workers that would otherwise
+# drive the single GPU's GL context concurrently — the contention class that
+# can balloon a render to many seconds (and which the baseline agent already
+# works around with its dedicated render pool). An advisory file lock makes
+# rendering one-at-a-time machine-wide.
+_CROSS_PROC_RENDER_LOCK_PATH = (
+    os.environ.get("CADGENBENCH_RENDER_LOCK_FILE")
+    or str(Path(tempfile.gettempdir()) / "cadgenbench_render.lock")
+)
 
-def _render_scene(
+
+@contextmanager
+def _cross_process_render_lock():
+    """Serialise GPU/GL rendering across processes via an ``fcntl`` file lock.
+
+    Disabled with ``CADGENBENCH_RENDER_LOCK=0``; a no-op where ``fcntl`` is
+    unavailable (non-POSIX). The lock is advisory and held only for the
+    duration of one part's render.
+    """
+    if os.environ.get("CADGENBENCH_RENDER_LOCK", "1") == "0":
+        yield
+        return
+    try:
+        import fcntl  # noqa: PLC0415
+    except ImportError:
+        yield
+        return
+    lock_file = open(_CROSS_PROC_RENDER_LOCK_PATH, "w")  # noqa: SIM115
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        finally:
+            lock_file.close()
+
+
+def _render_views(
     *,
     shapes: list[tuple[pv.PolyData, tuple[float, float, float], float]],
     bbox_min: np.ndarray,
     bbox_max: np.ndarray,
-    view: str,
+    views: Sequence[str],
     width: int,
     height: int,
-) -> bytes:
-    """Render one frame: shaded triangles -> PNG bytes."""
-    # VTK/OpenGL is not thread-safe and there is a single GL context per
-    # process. Baseline fixtures and compare-llms models both run as threads,
-    # so without serialisation concurrent renders contend on (or crash) the
-    # shared context. A process-global lock makes every render one-at-a-time;
-    # each render is short, so this is correct rather than a real bottleneck.
-    # (True render parallelism needs process/GPU isolation, e.g. HF Jobs.)
-    with _RENDER_LOCK:
+) -> list[bytes]:
+    """Render every *view* of *shapes* through ONE GL context -> list of PNGs.
+
+    A single ``pv.Plotter`` (= one EGL/GL context) is created, the meshes are
+    added once, then each view is produced by moving only the camera. This
+    removes the per-view context create/destroy churn the previous
+    one-plotter-per-view path paid (N contexts per part), which on a shared
+    GPU under the eval ProcessPool was a major contention cost.
+
+    Serialised by ``_RENDER_LOCK`` (in-process threads) and
+    ``_cross_process_render_lock`` (sibling eval workers); timed as the
+    ``render`` phase when profiling is enabled.
+    """
+    pngs: list[bytes] = []
+    with _RENDER_LOCK, _cross_process_render_lock(), phase(
+        f"render n={len(views)}",
+    ):
         pl = pv.Plotter(off_screen=True, window_size=(width, height))
         try:
             pl.set_background(BACKGROUND_RGB)
@@ -452,28 +505,29 @@ def _render_scene(
                     show_edges=False,
                     ambient=0.45,
                     diffuse=0.65,
-                specular=0.10,
-                specular_power=15,
+                    specular=0.10,
+                    specular_power=15,
                 )
 
-            eye, target, up = camera_placement(view, bbox_min, bbox_max)
             cam = pl.camera
-            cam.position = tuple(map(float, eye))
-            cam.focal_point = tuple(map(float, target))
-            cam.up = tuple(map(float, up))
-            cam.parallel_projection = True
-            cam.parallel_scale = _parallel_scale_for_view(
-                bbox_min, bbox_max,
-                eye=eye, target=target, up=up,
-                window_w=width, window_h=height,
-            )
-
-            arr = np.asarray(
-                pl.screenshot(return_img=True, transparent_background=False)
-            )
+            for view in views:
+                eye, target, up = camera_placement(view, bbox_min, bbox_max)
+                cam.position = tuple(map(float, eye))
+                cam.focal_point = tuple(map(float, target))
+                cam.up = tuple(map(float, up))
+                cam.parallel_projection = True
+                cam.parallel_scale = _parallel_scale_for_view(
+                    bbox_min, bbox_max,
+                    eye=eye, target=target, up=up,
+                    window_w=width, window_h=height,
+                )
+                arr = np.asarray(
+                    pl.screenshot(return_img=True, transparent_background=False)
+                )
+                buf = io.BytesIO()
+                Image.fromarray(arr).save(buf, format="PNG", optimize=True)
+                pngs.append(buf.getvalue())
         finally:
             pl.close()
 
-    buf = io.BytesIO()
-    Image.fromarray(arr).save(buf, format="PNG", optimize=True)
-    return buf.getvalue()
+    return pngs

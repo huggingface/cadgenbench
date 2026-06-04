@@ -105,16 +105,6 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> None:
                    help=f"Max wall-clock seconds (default: {defaults.max_duration_s:.0f})")
     p.add_argument("--llm-timeout", type=float, default=defaults.llm_timeout,
                    help=f"Per-LLM-call timeout in seconds (default: {defaults.llm_timeout:.0f})")
-    p.add_argument(
-        "--fixture-retries", type=int, default=1, metavar="N",
-        help=(
-            "Number of additional attempts per fixture if it fails from "
-            "exhausted LLM retries (default: 1). A fixture is retried from "
-            "turn 0, wasting the prior attempt's tokens but surviving "
-            "provider outages longer than the per-call retry budget. "
-            "Set to 0 to disable fixture-level retry."
-        ),
-    )
     p.add_argument("--parallel", type=int, default=1, metavar="N",
                    help="Run N fixtures in parallel (default: 1)")
     p.add_argument("--model", default=defaults.model,
@@ -167,7 +157,6 @@ def run(args: argparse.Namespace) -> int:
     )
 
     parallel = max(1, args.parallel)
-    fixture_retries = max(0, args.fixture_retries)
     resolved_model = LLMClient(model=args.model).model
 
     config = AgentConfig(
@@ -207,7 +196,7 @@ def run(args: argparse.Namespace) -> int:
 
     all_results = _run_all(
         tasks, config=config, run_dir=run_dir,
-        parallel=parallel, fixture_retries=fixture_retries,
+        parallel=parallel,
     )
     _print_summary(all_results)
     return 0
@@ -380,58 +369,22 @@ def _run_one_task(
     return name, result, logs
 
 
-def _run_one_with_retry(
-    task: dict,
-    *,
-    config: AgentConfig,
-    run_dir: Path,
-    fixture_retries: int,
-) -> tuple[str, AgentResult, list[str]]:
-    """Run fixture; on exhausted LLM retries, restart from turn 0."""
-    name = task["name"]
-    attempts = fixture_retries + 1
-    retry_logs: list[str] = []
-    last_exc: Exception | None = None
-    for attempt in range(1, attempts + 1):
-        try:
-            fixture_name, result, logs = _run_one_task(
-                task,
-                config=config,
-                run_dir=run_dir,
-            )
-            return fixture_name, result, [*retry_logs, *logs]
-        except RuntimeError as exc:
-            if "LLM call failed after" not in str(exc):
-                raise
-            last_exc = exc
-            if attempt < attempts:
-                retry_logs.append(
-                    f"\n--- {name} fixture retry "
-                    f"({attempt}/{fixture_retries}) after LLM "
-                    f"exhaustion; restarting from turn 0 ---",
-                )
-    assert last_exc is not None
-    raise last_exc
-
-
 def _run_all(
     tasks: list[dict],
     *,
     config: AgentConfig,
     run_dir: Path,
     parallel: int,
-    fixture_retries: int,
 ) -> list[tuple[str, AgentResult]]:
-    """Execute every task, sequentially or in parallel, with per-fixture retry."""
+    """Execute every task, sequentially or in parallel."""
     all_results: list[tuple[str, AgentResult]] = []
     if parallel <= 1:
         for task in tasks:
             try:
-                name, result, logs = _run_one_with_retry(
+                name, result, logs = _run_one_task(
                     task,
                     config=config,
                     run_dir=run_dir,
-                    fixture_retries=fixture_retries,
                 )
                 for line in logs:
                     print(line)
@@ -445,11 +398,10 @@ def _run_all(
         with ProcessPoolExecutor(max_workers=parallel) as pool:
             futures = {
                 pool.submit(
-                    _run_one_with_retry,
+                    _run_one_task,
                     task,
                     config=config,
                     run_dir=run_dir,
-                    fixture_retries=fixture_retries,
                 ): task["name"]
                 for task in tasks
             }

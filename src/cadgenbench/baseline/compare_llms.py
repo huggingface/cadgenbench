@@ -125,7 +125,6 @@ def _model_pool_backstop_s(
     *,
     n_fixtures: int,
     parallel: int,
-    fixture_retries: int,
     max_duration_s: float,
     llm_timeout: float,
     runner_timeout: float,
@@ -135,11 +134,11 @@ def _model_pool_backstop_s(
     Sized so it only ever trips on a genuine teardown hang, never on a slow-
     but-healthy run: per-fixture cap (wall-clock budget plus one stuck LLM/
     script call plus render/eval/upload slack), times the number of
-    sequential fixture waves and retries, times a safety factor, plus a fixed
+    sequential fixture waves, times a safety factor, plus a fixed
     floor. Models run concurrently, so this also bounds the whole step.
     """
     per_fixture = max_duration_s + max(llm_timeout, runner_timeout) + 300.0
-    waves = math.ceil(max(1, n_fixtures) / max(1, parallel)) * (fixture_retries + 1)
+    waves = math.ceil(max(1, n_fixtures) / max(1, parallel))
     return per_fixture * waves * 2.0 + 600.0
 
 
@@ -152,7 +151,6 @@ def _run_model_process(
     output_dir: Path,
     base_timestamp: str,
     parallel: int,
-    fixture_retries: int,
     config_kwargs: dict,
 ) -> tuple[int, str, Path, list[tuple[str, object]]]:
     """Run one model's full fixture set in a separate process."""
@@ -172,7 +170,6 @@ def _run_model_process(
             config=config,
             run_dir=run_dir,
             parallel=parallel,
-            fixture_retries=fixture_retries,
         )
     finally:
         # Close leaked render/mesh pools so this child exits cleanly and the
@@ -259,8 +256,6 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--parallel", type=int, default=3, metavar="N",
                    help="Fixtures in parallel within each model's run "
                         "(default: 3).")
-    p.add_argument("--fixture-retries", type=int, default=1, metavar="N",
-                   help="Retries per fixture on exhausted LLM retries (default: 1).")
 
     p.set_defaults(handler=run)
 
@@ -319,7 +314,6 @@ def run(args: argparse.Namespace) -> int:
     # (before we burn cycles running anything).
     resolved_models = [LLMClient(model=m).model for m in args.models]
     parallel = max(1, args.parallel)
-    fixture_retries = max(0, args.fixture_retries)
 
     base_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     print(f"Models to compare: {len(resolved_models)}")
@@ -357,7 +351,6 @@ def run(args: argparse.Namespace) -> int:
     backstop_s = _model_pool_backstop_s(
         n_fixtures=len(tasks),
         parallel=parallel,
-        fixture_retries=fixture_retries,
         max_duration_s=args.max_duration,
         llm_timeout=args.llm_timeout,
         runner_timeout=args.timeout,
@@ -375,7 +368,6 @@ def run(args: argparse.Namespace) -> int:
                 output_dir=output_dir,
                 base_timestamp=base_timestamp,
                 parallel=parallel,
-                fixture_retries=fixture_retries,
                 config_kwargs=config_kwargs,
             ): i
             for i, m in enumerate(resolved_models)

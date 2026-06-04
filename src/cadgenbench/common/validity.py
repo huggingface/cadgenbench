@@ -143,10 +143,11 @@ AnalysisResult = ValidityResult
 #      will not honour a Python signal mid-flight, so the only reliable bound
 #      is to run each mesh in a child process and *kill* it on overrun. This
 #      wall-clock bound is machine-dependent, so it is NOT a clean scoring
-#      gate on its own: a timeout is retried once on a fresh worker, and only a
-#      second timeout marks the part invalid (saving the offending STEP for
-#      debugging). It is the runaway-work backstop the two deterministic
-#      ceilings cannot be.
+#      gate on its own; it is the runaway-work backstop the two deterministic
+#      ceilings cannot be. A single overrun is the verdict (no retry): OCC is
+#      deterministic per geometry, so a second attempt only re-pays the same
+#      wall-clock cost for the same outcome. The offending STEP is saved for
+#      debugging and the part marked invalid.
 #
 # Ground truth is asserted to clear all three (a GT that trips one is an
 # authoring bug, surfaced as a loud exception rather than a silent zero).
@@ -158,10 +159,6 @@ MAX_STEP_FILE_BYTES = int(
 # meshes in-process (useful for debugging / constrained CI); the deterministic
 # ceilings still apply.
 MESH_TIMEOUT_S = float(os.environ.get("CADGENBENCH_MESH_TIMEOUT_S", 180.0))
-# Number of meshing attempts before a timing-out part is declared invalid. The
-# first timeout is treated as possibly machine-transient and retried once on a
-# fresh worker; the value is intentionally not configurable as a *gate* knob.
-_MESH_TIMEOUT_ATTEMPTS = 2
 
 
 class MeshTimeoutError(RuntimeError):
@@ -169,7 +166,8 @@ class MeshTimeoutError(RuntimeError):
 
     Distinct from :class:`cadgenbench.common.mesh.MeshSanityError` (a
     deterministic geometry defect): a timeout is a machine-dependent
-    backstop, so it is only fatal after the configured number of attempts.
+    backstop. A single overrun is fatal (the part is marked invalid); it is
+    never retried.
     """
 
 
@@ -309,6 +307,7 @@ def _validate_wrapped(
     wrapped,  # type: ignore[no-untyped-def]
     *,
     bbox_diagonal: float | None = None,
+    deflection: float | None = None,
     mesh_cache: dict[float, object] | None = None,
     step_path: str | Path | None = None,
     is_ground_truth: bool = False,
@@ -337,7 +336,10 @@ def _validate_wrapped(
     the tessellation deflection via
     :func:`cadgenbench.common.mesh.deflection_for_bbox`. When ``None``
     (the :func:`validate_step` caller) it is computed locally from the
-    wrapped shape.
+    wrapped shape. ``deflection`` overrides that derivation outright: a
+    caller with a ``deflection_override`` passes it so the mesh gate
+    tessellates at the *same* resolution the metric mesh accessor will,
+    and the single cached mesh is reused (no second tessellation).
     """
     from OCP.BRepCheck import BRepCheck_Analyzer
 
@@ -378,7 +380,8 @@ def _validate_wrapped(
             # defeating the deflection override.
             mesh_ok = True
         else:
-            deflection = _tessellation_deflection(wrapped, bbox_diagonal)
+            if deflection is None:
+                deflection = _tessellation_deflection(wrapped, bbox_diagonal)
             mesh_ok = _run_mesh_gate(
                 wrapped,
                 deflection,
@@ -556,54 +559,89 @@ def safeguarded_tessellate(
     timeout applied.
 
     When *step_path* is given and :data:`MESH_TIMEOUT_S` > 0 the
-    tessellation runs in a reusable, killable child process: a single
-    overrun is retried once on a fresh worker, and a second overrun raises
-    :class:`MeshTimeoutError` (or, for ground truth, a loud
-    ``RuntimeError``) after saving the offending STEP for debugging. When
-    no path is available (an in-memory shape) it meshes in-process from
-    *wrapped*; the triangle ceiling still applies.
+    tessellation runs in a killable child process; a single overrun is the
+    verdict and raises :class:`MeshTimeoutError` (or, for ground truth, a
+    loud ``RuntimeError``) after saving the offending STEP for debugging.
+    When no path is available (an in-memory shape) it meshes in-process
+    from *wrapped*; the triangle ceiling still applies.
+
+    A part that fails to mesh once (timeout or deterministic defect) is
+    memoised in :data:`_FAILED_MESH_CACHE` and never tessellated again in
+    this process: the validity, metric, and topology stages all route here,
+    so without the memo one pathological part would re-pay its (up to
+    timeout-length) cost at each stage. This bounds a part's total meshing
+    cost to a single attempt.
 
     Raises:
         MeshSanityError: geometry defect or triangle-ceiling breach.
-        MeshTimeoutError: repeated timeout on a submission part.
+        MeshTimeoutError: timeout on a submission part.
         RuntimeError: a ground-truth part that breaches any safeguard.
     """
-    from cadgenbench.common.mesh import DEFLECTION_LADDER, robust_tessellate_shape
+    from cadgenbench.common.mesh import (
+        DEFLECTION_LADDER,
+        MeshSanityError,
+        robust_tessellate_shape,
+    )
 
     if ladder is None:
         ladder = DEFLECTION_LADDER
 
-    # In-process path: no STEP file to hand a child process, or isolation
-    # disabled. Mesh directly from the loaded shape; the ceiling still gates.
-    if step_path is None or MESH_TIMEOUT_S <= 0:
-        if wrapped is None:
-            wrapped = _load_step_wrapped(step_path)
-        mesh = robust_tessellate_shape(wrapped, deflection, ladder=ladder)
-        _check_triangle_ceiling(mesh)
-        return mesh
+    fail_key = _mesh_failure_key(step_path)
+    if fail_key is not None and fail_key in _FAILED_MESH_CACHE:
+        raise _FAILED_MESH_CACHE[fail_key]
 
-    step_path = Path(step_path)
-    last_timeout: MeshTimeoutError | None = None
-    for attempt in range(1, _MESH_TIMEOUT_ATTEMPTS + 1):
+    try:
+        # In-process path: no STEP file to hand a child process, or isolation
+        # disabled. Mesh directly from the loaded shape; the ceiling still gates.
+        if step_path is None or MESH_TIMEOUT_S <= 0:
+            if wrapped is None:
+                wrapped = _load_step_wrapped(step_path)
+            mesh = robust_tessellate_shape(wrapped, deflection, ladder=ladder)
+            _check_triangle_ceiling(mesh)
+            return mesh
+
+        step_path = Path(step_path)
         try:
             return _mesh_in_subprocess(step_path, deflection, ladder)
         except MeshTimeoutError as exc:
-            last_timeout = exc
-            logger.warning(
-                "Mesh attempt %d/%d timed out for %s: %s",
-                attempt, _MESH_TIMEOUT_ATTEMPTS, step_path, exc,
+            # First overrun is the verdict: OCC is deterministic per geometry,
+            # so retrying only re-pays the same wall-clock cost.
+            saved = _save_timeout_step(step_path)
+            saved_note = f"; saved offending STEP to {saved}" if saved else ""
+            reason = (
+                f"mesh timeout: tessellation exceeded {MESH_TIMEOUT_S:g}s "
+                f"({exc}){saved_note}"
             )
+            _raise_if_ground_truth(reason, step_path, is_ground_truth)
+            raise MeshTimeoutError(reason) from exc
+    except (MeshSanityError, MeshTimeoutError) as exc:
+        # Remember the verdict so later stages skip re-meshing a known-bad part.
+        if fail_key is not None:
+            _FAILED_MESH_CACHE[fail_key] = exc
+        raise
 
-    # Every attempt timed out. Save the offending STEP for debugging and
-    # turn the (now repeated, less machine-transient) timeout into a verdict.
-    saved = _save_timeout_step(step_path)
-    saved_note = f"; saved offending STEP to {saved}" if saved else ""
-    reason = (
-        f"mesh timeout: tessellation exceeded {MESH_TIMEOUT_S:g}s on "
-        f"{_MESH_TIMEOUT_ATTEMPTS} attempts ({last_timeout}){saved_note}"
-    )
-    _raise_if_ground_truth(reason, step_path, is_ground_truth)
-    raise MeshTimeoutError(reason)
+
+# Per-process memo of parts that already failed to tessellate (timeout or
+# deterministic defect), keyed by file identity. A known-bad part re-raises its
+# original verdict instead of re-running the (up to timeout-length) mesh at the
+# next stage. Bounded by the number of distinct STEP files seen in a process.
+_FAILED_MESH_CACHE: dict[str, Exception] = {}
+
+
+def _mesh_failure_key(step_path: str | Path | None) -> str | None:
+    """Stable identity for *step_path* (path + size + mtime), or ``None``.
+
+    ``None`` for in-memory shapes (no file) and unstatable paths, which then
+    skip the failure memo. Size + mtime make a re-written file a fresh key.
+    """
+    if step_path is None:
+        return None
+    path = Path(step_path)
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return f"{path.resolve()}|{st.st_size}|{st.st_mtime_ns}"
 
 
 # A single reusable, killable mesh worker per process. Spawned lazily on the

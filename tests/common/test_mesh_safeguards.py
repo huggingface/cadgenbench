@@ -7,8 +7,9 @@ Three bounds on meshing cost, applied identically to GT and submissions:
   2. **Triangle-count ceiling** (deterministic) — a mesh above the ceiling
      fails the gate.
   3. **Per-mesh process-kill timeout** (machine-dependent backstop) — a mesh
-     that overruns is retried once, then declared invalid with the offending
-     STEP saved for debugging.
+     that overruns is declared invalid on the first overrun (no retry), with
+     the offending STEP saved for debugging. A part that fails to mesh once
+     is memoised so later stages do not re-pay the cost.
 
 For ground truth every violation escalates to a loud exception (GT must
 clear all ceilings) rather than a silent ``is_valid=False``.
@@ -44,6 +45,18 @@ def _ensure_fixtures() -> None:
 
     for fn in ALL_GENERATORS:
         fn()
+
+
+@pytest.fixture(autouse=True)
+def _clear_mesh_failure_memo() -> None:
+    """Isolate the per-process failed-mesh memo across tests.
+
+    Tests reuse ``box.step``; a test that forces a timeout/ceiling failure
+    would otherwise poison the memo for every later test on the same file.
+    """
+    validity._FAILED_MESH_CACHE.clear()
+    yield
+    validity._FAILED_MESH_CACHE.clear()
 
 
 def _box_wrapped():  # type: ignore[no-untyped-def]
@@ -134,14 +147,16 @@ class TestTriangleCeiling:
 
 
 # ---------------------------------------------------------------------------
-# 3. Per-mesh process-kill timeout (retry-once, then invalid + saved STEP)
+# 3. Per-mesh process-kill timeout (first overrun is the verdict, no retry)
 # ---------------------------------------------------------------------------
 
 
 class TestMeshTimeout:
-    """The timeout backstop: retry once, then invalid + save the STEP."""
+    """The timeout backstop: one overrun -> invalid + save the STEP, no retry."""
 
-    def test_retries_once_then_raises_and_saves(self, monkeypatch, tmp_path) -> None:
+    def test_timeout_raises_on_first_overrun_and_saves(
+        self, monkeypatch, tmp_path,
+    ) -> None:
         calls = {"n": 0}
 
         def _always_timeout(step_path, deflection, ladder, *, angular=0.5):
@@ -152,10 +167,10 @@ class TestMeshTimeout:
         monkeypatch.setattr(validity, "_mesh_in_subprocess", _always_timeout)
         monkeypatch.setenv("CADGENBENCH_TIMEOUT_DEBUG_DIR", str(tmp_path))
 
-        with pytest.raises(MeshTimeoutError, match="2 attempts"):
+        with pytest.raises(MeshTimeoutError, match="mesh timeout"):
             safeguarded_tessellate(BOX, 0.5)
 
-        assert calls["n"] == 2, "should attempt exactly twice before giving up"
+        assert calls["n"] == 1, "must not retry a timed-out mesh"
         saved = list(tmp_path.glob("box-*.step"))
         assert saved, "offending STEP should be copied aside for debugging"
 
@@ -170,23 +185,26 @@ class TestMeshTimeout:
         with pytest.raises(RuntimeError, match="GROUND TRUTH"):
             safeguarded_tessellate(BOX, 0.5, is_ground_truth=True)
 
-    def test_single_timeout_recovers_on_retry(self, monkeypatch) -> None:
-        """A one-off timeout followed by success returns the mesh (no verdict)."""
-        from cadgenbench.common.mesh import robust_tessellate_shape
+    def test_failed_mesh_is_memoised_not_reattempted(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """A known-bad part re-raises its verdict without re-running the mesh."""
+        calls = {"n": 0}
 
-        state = {"first": True}
-        box = _box_wrapped()
-
-        def _flaky(step_path, deflection, ladder, *, angular=0.5):
-            if state["first"]:
-                state["first"] = False
-                raise MeshTimeoutError("transient")
-            return robust_tessellate_shape(box, deflection, ladder=ladder)
+        def _always_timeout(step_path, deflection, ladder, *, angular=0.5):
+            calls["n"] += 1
+            raise MeshTimeoutError("exceeded test wall-clock")
 
         monkeypatch.setattr(validity, "MESH_TIMEOUT_S", 5.0)
-        monkeypatch.setattr(validity, "_mesh_in_subprocess", _flaky)
-        mesh = safeguarded_tessellate(BOX, deflection_for_bbox(40.0))
-        assert mesh.n_triangles > 0
+        monkeypatch.setattr(validity, "_mesh_in_subprocess", _always_timeout)
+        monkeypatch.setenv("CADGENBENCH_TIMEOUT_DEBUG_DIR", str(tmp_path))
+
+        with pytest.raises(MeshTimeoutError):
+            safeguarded_tessellate(BOX, 0.5)
+        # Second call (e.g. a later stage) must hit the memo, not the mesher.
+        with pytest.raises(MeshTimeoutError):
+            safeguarded_tessellate(BOX, 0.25)
+        assert calls["n"] == 1, "memoised failure must not re-tessellate"
 
 
 # ---------------------------------------------------------------------------

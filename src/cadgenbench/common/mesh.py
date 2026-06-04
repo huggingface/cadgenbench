@@ -235,7 +235,14 @@ def tessellate_shape(
     params.Angle = float(angular_deflection_rad)
     params.Relative = bool(_relative)
     params.InParallel = bool(parallel)
-    mesher.Perform()
+    # The OCC tessellation is the native call that the killable mesh
+    # subprocess + MESH_TIMEOUT_S exist to bound, so it is the prime
+    # "meshing by itself" measurement. Timed separately from the Python
+    # welding/validation that follows.
+    from cadgenbench.common.profiling import phase  # noqa: PLC0415
+
+    with phase(f"mesh.perform d={linear_deflection_mm:.4g}"):
+        mesher.Perform()
 
     faces = TopTools_IndexedMapOfShape()
     TopExp.MapShapes_s(wrapped, TopAbs_FACE, faces)

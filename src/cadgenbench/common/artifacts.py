@@ -27,6 +27,41 @@ from cadgenbench.common.validity import (
 )
 
 
+def sidecar_path_for(step_path: Path | str) -> Path:
+    """Path of the trusted-mesh sidecar for *step_path* (``<stem>.mesh.npz``).
+
+    A sidecar next to a STEP marks it "trusted, valid by construction": its
+    presence makes :class:`StepArtifacts` load the supplied mesh and skip
+    both validation and tessellation (see :meth:`StepArtifacts._sidecar_path`).
+    """
+    p = Path(step_path)
+    return p.with_name(p.stem + ".mesh.npz")
+
+
+def write_mesh_sidecar(step_path: Path | str, mesh: Mesh) -> None:
+    """Write *mesh* as the trusted-mesh sidecar next to *step_path*.
+
+    Used when a STEP's mesh is already known (e.g. a rigidly aligned mesh
+    transformed from an already-tessellated source) so downstream
+    :class:`StepArtifacts` consumers reuse it instead of re-tessellating.
+    """
+    path = sidecar_path_for(step_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        with tmp.open("wb") as fh:
+            np.savez(
+                fh,
+                vertices=np.asarray(mesh.vertices, dtype=np.float64),
+                triangles=np.asarray(mesh.triangles, dtype=np.int64),
+                linear_deflection_mm=np.asarray(mesh.linear_deflection_mm),
+            )
+        tmp.replace(path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 @dataclass
 class StepArtifacts:
     """Lazy artifacts for one STEP file.
@@ -95,6 +130,10 @@ class StepArtifacts:
                 validation = _validate_wrapped(
                     self.wrapped,
                     bbox_diagonal=measurements.bounding_box.diagonal,
+                    # Mesh the validity gate at this part's one deflection so
+                    # the cached mesh is exactly what mesh()/manifold()/betti()
+                    # later read — never a second tessellation at another scale.
+                    deflection=self.deflection_override,
                     mesh_cache=self._meshes,
                     step_path=Path(self.step_path),
                     is_ground_truth=self.is_ground_truth,
@@ -191,8 +230,7 @@ class StepArtifacts:
         ``.mesh.npz`` suffix (e.g. ``ground_truth.step`` ->
         ``ground_truth.mesh.npz``). Its presence == "trusted, skip checks".
         """
-        p = Path(self.step_path)
-        cand = p.with_name(p.stem + ".mesh.npz")
+        cand = sidecar_path_for(self.step_path)
         return cand if cand.exists() else None
 
     @property

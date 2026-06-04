@@ -37,6 +37,7 @@ import logging
 import multiprocessing as mp
 import os
 import sys
+import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -117,12 +118,27 @@ def _eval_one(args: tuple[Path, Path, bool]) -> tuple[str, dict | None, str | No
     """
     fixture_path, gt_dir, force = args
     name = fixture_path.name
+    # Live per-fixture markers, flushed so a running shard is observable in
+    # streamed job logs (results otherwise print only after the whole shard
+    # finishes). The START line is what reveals *which* fixture is stuck.
+    t0 = time.perf_counter()
+    pid = os.getpid()
+    print(f"[eval] start pid={pid} {name}", file=sys.stderr, flush=True)
     try:
         from cadgenbench.eval.evaluate import evaluate_result  # noqa: PLC0415
 
         scores = evaluate_result(fixture_path, gt_dir, force_align=force)
+        print(
+            f"[eval] done  pid={pid} {name} {time.perf_counter() - t0:.1f}s",
+            file=sys.stderr, flush=True,
+        )
         return (name, scores, None)
     except Exception as exc:  # noqa: BLE001 - return the error rather than raising
+        print(
+            f"[eval] fail  pid={pid} {name} {time.perf_counter() - t0:.1f}s "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr, flush=True,
+        )
         return (name, None, f"{type(exc).__name__}: {exc}")
 
 

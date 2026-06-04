@@ -70,7 +70,6 @@ def main() -> int:
         max_iter=args.max_iter, max_tokens=1_000_000, max_tokens_per_call=4096,
         max_duration=args.max_duration, llm_timeout=30.0, temperature=0.0,
         reasoning_effort=None, timeout=60, parallel=args.parallel,
-        fixture_retries=0,
     )
 
     t0 = time.monotonic()

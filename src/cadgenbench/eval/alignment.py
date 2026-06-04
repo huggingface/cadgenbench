@@ -513,6 +513,22 @@ def _principal_axes(centered: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
+def export_aligned_shape(
+    shape,  # OCC TopoDS_Shape
+    rotation: np.ndarray,
+    translation: np.ndarray,
+    output: str | Path,
+) -> None:
+    """Apply a rigid transform to an OCC shape and write the aligned STEP.
+
+    A thin public wrapper over :func:`_apply_and_export` for callers that
+    recover the transform separately (e.g. :func:`align_cached_mesh`) and
+    only need the BREP exported — a cheap geometric transform with no
+    tessellation.
+    """
+    _apply_and_export(shape, rotation, translation, Path(output))
+
+
 def _apply_and_export(
     shape,  # OCC TopoDS_Shape
     R: np.ndarray,

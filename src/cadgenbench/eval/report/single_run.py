@@ -77,20 +77,26 @@ def _fmt_metric(key: str, value: float) -> str:
 def _inputs_dir_for(gt_dir: Path | None) -> Path | None:
     """Locate a fixture's inputs directory.
 
-    Resolves via the canonical :func:`cadgenbench.common.paths.data_inputs_dir`
-    so it works under the two-repo Hub layout (inputs and ground truth
-    in separate dataset repos, the production path) as well as a local
-    combined ``data/inputs`` tree. The old sibling heuristic
-    (``gt_dir.parent.parent / "inputs"``) only resolved for the combined
-    layout, so on the Space/Jobs two-repo setup it returned ``None`` and
-    the input column silently dropped the description + input renders
-    (and earlier code embedded the raw ``input.step`` as a broken image).
+    Resolves two layouts, in order:
+
+    1. **Combined sibling** (``gt_dir.parent.parent / "inputs" /
+       <name>``): a local ``data/gt`` + ``data/inputs`` tree, used by
+       local dev and the unit tests. Checked first so it resolves
+       without touching the Hub (and hermetically in tests).
+    2. **Canonical resolver**
+       (:func:`cadgenbench.common.paths.data_inputs_dir`): the two-repo
+       Hub layout (inputs and ground truth in separate dataset repos,
+       the production Space/Jobs path), where the sibling above does not
+       exist.
 
     Returns ``None`` when inputs can't be resolved; the input column then
     degrades gracefully (no crash), matching prior behavior.
     """
     if gt_dir is None:
         return None
+    sibling = gt_dir.parent.parent / "inputs" / gt_dir.name
+    if sibling.exists():
+        return sibling
     try:
         from cadgenbench.common.paths import data_inputs_dir
         cand = data_inputs_dir() / gt_dir.name
