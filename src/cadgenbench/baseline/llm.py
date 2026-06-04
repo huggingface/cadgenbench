@@ -237,8 +237,8 @@ def _fake_completion(model: str) -> CompletionResult:
 
     Emits a valid build123d block that exports ``output.step`` and never
     signals ``[DONE]``, so the agent keeps rendering every turn until it hits
-    its wall-clock timeout, exercising the render-pool teardown path that the
-    nested ``compare-llms`` process pools used to deadlock on.
+    its wall-clock timeout, exercising the render-pool teardown path that
+    nested process pools used to deadlock on.
     """
     import random
 
@@ -322,9 +322,9 @@ class LLMClient:
             RuntimeError: After exhausting all retries on transient errors.
         """
         # Offline test hook: when CADGENBENCH_FAKE_LLM is set, return a canned
-        # response with zero network. Lets the nested-process-pool teardown of
-        # ``compare-llms`` be reproduced locally in seconds (env vars propagate
-        # to spawned child/grandchild workers). Never enabled in normal runs.
+        # response with zero network. Lets the nested-process-pool teardown be
+        # reproduced locally in seconds (env vars propagate to spawned
+        # child/grandchild workers). Never enabled in normal runs.
         if os.environ.get("CADGENBENCH_FAKE_LLM"):
             return _fake_completion(self.model)
         # Several providers reject a non-default temperature: Anthropic's

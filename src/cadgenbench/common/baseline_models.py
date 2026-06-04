@@ -14,12 +14,11 @@
 
 """Default reference-baseline model trio + labels (dependency-light).
 
-These live here rather than in ``baseline/compare_llms.py`` so callers that
-lack the heavy ``[baseline]`` extras (litellm / python-dotenv) -- e.g. the HF
-Jobs orchestrator environment -- can still import the canonical model list and
-display labels. ``compare_llms`` re-exports these names, and the orchestrator's
-``run_baselines`` wrapper imports them from here, so the trio never diverges
-between the local comparison command and the fan-out tooling.
+Kept in this dependency-light module so callers that lack the heavy
+``[baseline]`` extras (litellm / python-dotenv) -- e.g. the HF Jobs
+orchestrator environment -- can still import the canonical model list and
+display labels. The orchestrator's ``run_baselines`` wrapper imports them
+from here, so the trio never diverges across the fan-out tooling.
 
 Current flagship from each of Anthropic, Google, OpenAI as of May 2026.
 """

@@ -425,8 +425,8 @@ def _parallel_scale_for_view(
 
 
 # VTK/OpenGL is not thread-safe and there is a single GL context per process.
-# Baseline fixtures and compare-llms models both render from threads, so this
-# guards concurrent renders within one process.
+# Baseline fixtures render from threads, so this guards concurrent renders
+# within one process.
 _RENDER_LOCK = threading.Lock()
 
 # Cross-process render serialisation. The threading lock above only spans one

@@ -140,12 +140,23 @@ def run(args: argparse.Namespace) -> int:
         data_inputs_dir as _data_inputs_dir,
         data_gt_dir as _data_gt_dir,
     )
+    # Inputs are required: the baseline reads each fixture's description to
+    # generate a candidate STEP.
     try:
         data_inputs_dir = _data_inputs_dir()
-        data_gt_dir = _data_gt_dir()
     except FileNotFoundError as e:
         print(str(e), file=sys.stderr)
         return 2
+
+    # Ground truth is optional. Generation never needs it; it only enables an
+    # extra local self-score at the end of a run. Participants don't have GT
+    # access (it lives only on the leaderboard Space), so a missing GT repo is
+    # not an error -- we just skip scoring. Maintainers who set
+    # $CADGENBENCH_DATA_GT_REPO still get the scored summary.
+    try:
+        data_gt_dir = _data_gt_dir()
+    except FileNotFoundError:
+        data_gt_dir = None
 
     output_dir = args.output_dir if args.output_dir is not None else Path.cwd() / _DEFAULT_OUTPUT_REL
 
@@ -208,20 +219,25 @@ def run(args: argparse.Namespace) -> int:
 
 def _discover_fixtures(
     data_inputs_dir: Path,
-    data_gt_dir: Path,
+    data_gt_dir: Path | None,
     *,
     names: list[str] | None = None,
     run_all: bool = False,
     limit: int | None = None,
 ) -> list[dict]:
-    """Find fixtures under ``data/inputs/<fixture>/description.yaml``."""
+    """Find fixtures under ``data/inputs/<fixture>/description.yaml``.
+
+    ``data_gt_dir`` is optional: when ``None`` (the participant path, no GT
+    access) each fixture's ``_gt_dir`` is left unset and the run skips local
+    scoring.
+    """
     fixtures = []
     for desc_path in sorted(data_inputs_dir.glob("*/description.yaml")):
         data = yaml.safe_load(desc_path.read_text())
         name = desc_path.parent.name
         data["name"] = name
         data["_inputs_dir"] = desc_path.parent
-        data["_gt_dir"] = data_gt_dir / name
+        data["_gt_dir"] = (data_gt_dir / name) if data_gt_dir is not None else None
         fixtures.append(data)
 
     if names:

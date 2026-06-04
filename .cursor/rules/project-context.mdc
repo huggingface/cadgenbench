@@ -30,8 +30,7 @@ dataset as the source of truth.
   match, topology match. Combined as **CAD Score** = mean of
   applicable components, hard-zeroed by validity failure.
 - One CLI entry point: `cadgenbench` (alias `cgb`) with subcommands
-  `evaluate`, `baseline run`, `baseline compare-llms`, `report single`,
-  `report compare`.
+  `evaluate`, `baseline run`, `baseline package`, `report single`.
 - One baseline: iterative build123d agent (no other strategies, no
   multi-library helper agents).
 

@@ -30,7 +30,7 @@ def baseline_unimportable(monkeypatch):
     real_import = builtins.__import__
 
     def fake_import(name, *args, **kwargs):
-        if name == "cadgenbench.baseline._cli" or name == "cadgenbench.baseline.compare_llms":
+        if name == "cadgenbench.baseline._cli" or name == "cadgenbench.baseline.package":
             raise ImportError(
                 f"simulated missing optional dep while importing {name}"
             )

@@ -105,13 +105,10 @@ playwright install chromium
 # 4. Provider API keys for whichever model(s) you plan to run
 cp .env.example .env   # then fill in ANTHROPIC_API_KEY / OPENAI_API_KEY / ...
 
-# 5. Point at the fixture datasets on the Hub. The ground-truth repo
-# is private; an HF_TOKEN (https://huggingface.co/settings/tokens) with
-# read access on cadgenbench-data-gt is required. cadgenbench
-# snapshot-downloads each repo on first use and caches under
+# 5. Point at the public fixture-inputs dataset on the Hub. cadgenbench
+# snapshot-downloads it on first use and caches under
 # ~/.cache/huggingface/hub/.
 export CADGENBENCH_DATA_REPO=HuggingAI4Engineering/cadgenbench-data
-export CADGENBENCH_DATA_GT_REPO=HuggingAI4Engineering/cadgenbench-data-gt
 ```
 
 Verify:
@@ -136,7 +133,9 @@ cadgenbench baseline run --all --parallel 4 \
 ```
 
 Output lands at `results/<timestamp>_<model_slug>/<fixture>/output.step`.
-`cadgenbench baseline --help` lists the full flag set.
+`cadgenbench baseline --help` lists the full flag set. The baseline only
+*generates* candidates; scoring against ground truth happens on the
+leaderboard Space after you submit.
 
 Bundle a run directory into a submission zip (top-level `meta.json` +
 one `output.step` per fixture, per the submission contract):

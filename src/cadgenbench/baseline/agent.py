@@ -231,9 +231,9 @@ def _shutdown_render_pool() -> None:
     A plain ``ProcessPoolExecutor`` registers an ``atexit`` that *joins* its
     workers (``wait=True``); if a render was abandoned (e.g. the agent hit its
     wall-clock timeout mid-render) that join blocks forever, so the process
-    never exits. Under the nested pools used by ``baseline compare-llms``
-    (model pool -> fixture pool -> this render pool) that stalls the parent's
-    ``as_completed`` and the comparison HTML is never produced. We terminate
+    never exits. Under nested process pools (fixture pool -> this render pool)
+    that stalls the parent's ``as_completed`` and the run never finishes. We
+    terminate
     the worker processes outright instead of joining. Registered *after* the
     executor's own atexit (see ``_get_render_pool``) so LIFO ordering runs this
     first, leaving the executor's join nothing live to wait on. Best-effort.
@@ -816,7 +816,7 @@ def run_agent(
         # ``atexit`` does NOT help inside a ``ProcessPoolExecutor`` worker
         # (fixture grandchild), which is force-killed on shutdown and never
         # runs atexit. That left the inner fixture pool's join — and therefore
-        # ``compare-llms``' ``as_completed`` — deadlocked forever. Killing the
+        # the parent's ``as_completed`` — deadlocked forever. Killing the
         # render workers here, before the worker is asked to exit, lets every
         # fixture future resolve and the join complete. Best-effort.
         _shutdown_render_pool()

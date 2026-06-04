@@ -48,18 +48,16 @@ def main(argv: list[str] | None = None) -> int:
     from cadgenbench.eval._cli import add_subparser as add_evaluate
     add_evaluate(subparsers)
 
-    # cadgenbench baseline run|compare-llms (needs [baseline] extra).
+    # cadgenbench baseline run|package (needs [baseline] extra).
     baseline_p = _register_baseline_subcommand(subparsers)
 
-    # cadgenbench report single|compare
+    # cadgenbench report single
     report_p = subparsers.add_parser(
         "report", help="HTML reports from result directories.",
     )
     report_sub = report_p.add_subparsers(dest="report_action")
     from cadgenbench.eval.report.single_run import add_subparser as add_report_single
-    from cadgenbench.eval.report.compare_runs import add_subparser as add_report_compare
     add_report_single(report_sub)
-    add_report_compare(report_sub)
 
     args = parser.parse_args(argv)
 
@@ -92,9 +90,6 @@ def _register_baseline_subcommand(
     """
     try:
         from cadgenbench.baseline._cli import add_subparser as add_baseline_run
-        from cadgenbench.baseline.compare_llms import (
-            add_subparser as add_baseline_compare_llms,
-        )
         from cadgenbench.baseline.package import (
             add_subparser as add_baseline_package,
         )
@@ -106,7 +101,6 @@ def _register_baseline_subcommand(
     )
     baseline_sub = baseline_p.add_subparsers(dest="baseline_action")
     add_baseline_run(baseline_sub)
-    add_baseline_compare_llms(baseline_sub)
     add_baseline_package(baseline_sub)
     return baseline_p
 
