@@ -261,6 +261,23 @@ def _render_output_images(result_dir: Path) -> str:
     return _images_html(pngs) or '<p class="note">No output renders</p>'
 
 
+def _render_edit_diff(result_dir: Path) -> str:
+    """Embed the editing-task diff turntable (``renders/edit_diff.webp``).
+
+    The ghost-body turntable lights up only the material that differs from GT
+    (blue = added by the output, red = present in GT but missing), which makes
+    a small or internal edit legible where the plain aligned output looks
+    identical to the ground truth. No fallback: when the WebP is absent (e.g. an
+    invalid candidate that never rendered, or a fixture evaluated before the
+    diff existed) the column shows an explicit note rather than reverting to the
+    static views.
+    """
+    uri = _data_uri(result_dir / "renders" / "edit_diff.webp")
+    if uri is None:
+        return '<p class="note">No edit-diff render</p>'
+    return f'<img src="{uri}" alt="edit diff" class="edit-diff-img" loading="lazy">'
+
+
 # ---------------------------------------------------------------------------
 # Fixture card
 # ---------------------------------------------------------------------------
@@ -408,15 +425,25 @@ def _render_fixture_card(fix: dict, idx: int) -> str:
                 p.append(f'<iframe src="{uri}" class="pdf-embed"></iframe>')
     p.append("</div>")
 
-    p.append('<div class="col">')
-    p.append("<h3>Ground Truth</h3>")
-    p.append(_render_gt_images(gt_dir))
-    p.append("</div>")
+    if is_editing:
+        # Editing fixtures: the GT and aligned-output 4-view grids are visually
+        # near-identical for a small or internal edit, so replace both with the
+        # single ghost-diff turntable that isolates what actually changed. GT
+        # column is dropped entirely; the diff already carries the GT reference.
+        p.append('<div class="col">')
+        p.append("<h3>Output vs ground truth (edit diff)</h3>")
+        p.append(_render_edit_diff(result_dir))
+        p.append("</div>")
+    else:
+        p.append('<div class="col">')
+        p.append("<h3>Ground Truth</h3>")
+        p.append(_render_gt_images(gt_dir))
+        p.append("</div>")
 
-    p.append('<div class="col">')
-    p.append("<h3>Output (aligned)</h3>")
-    p.append(_render_output_images(result_dir))
-    p.append("</div>")
+        p.append('<div class="col">')
+        p.append("<h3>Output (aligned)</h3>")
+        p.append(_render_output_images(result_dir))
+        p.append("</div>")
 
     p.append("</div>")  # three-col
 
@@ -622,6 +649,7 @@ h2 { margin-top: 0; }
 .view img { max-height: 180px; border: 1px solid #ddd; border-radius: 4px; }
 .view span { display: block; font-size: 0.7em; color: #888; margin-top: 2px; }
 .input-img { max-height: 250px; max-width: 100%; border: 1px solid #ddd; border-radius: 4px; }
+.edit-diff-img { display: block; max-width: 100%; border: 1px solid #ddd; border-radius: 4px; margin: 8px 0; }
 .pdf-embed { width: 100%; height: 400px; border: 1px solid #ddd;
              border-radius: 4px; margin-top: 8px; }
 

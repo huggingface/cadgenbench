@@ -247,7 +247,7 @@ def render_mesh_turntable_webp(
     scale. The animation is encoded as truecolor WebP (no palette banding,
     inter-frame compression) which is both smoother and smaller than the
     GIF equivalent: at the defaults a full orbit is 120 frames over ~18s and
-    a typical part lands around ~360 KB.
+    a typical part lands around ~390 KB.
     """
     if mesh.n_triangles == 0:
         raise ValueError("render_mesh_turntable_webp: mesh has zero triangles")
@@ -268,13 +268,23 @@ def render_mesh_turntable_webp(
     return _encode_webp(pngs, duration_ms=duration_ms, quality=quality)
 
 
+# WebP compression effort. Fixed at 3 on purpose: it is the single value
+# every caller (eval submissions + one-time GT) encodes with, so the encode
+# stays cheap and uniform. method=6 (Pillow's max effort) was ~30s/clip here
+# for only ~3% smaller files (363 vs 387 KB) -- ~40x slower for no real gain;
+# method=3 keeps the quality and size while encoding in <1s. Do NOT expose
+# this as a parameter: a per-caller knob is exactly how an accidental
+# method=6 would creep back into the eval hot path.
+_WEBP_METHOD = 3
+
+
 def _encode_webp(pngs: list[bytes], *, duration_ms: int, quality: int) -> bytes:
     """Encode PNG frames into a looping animated WebP.
 
     WebP is truecolor (no 256-colour palette, so the grey shading ramp keeps
     its contrast) and compresses frame-to-frame deltas like a video codec, so
-    a high frame count stays small. ``method=6`` is the slowest/best WebP
-    compression effort, worth it for a write-once artifact.
+    a high frame count stays small. Compression effort is fixed at
+    :data:`_WEBP_METHOD` (see its note) so every artifact encodes identically.
     """
     frames = [Image.open(io.BytesIO(png)).convert("RGB") for png in pngs]
     buf = io.BytesIO()
@@ -286,7 +296,7 @@ def _encode_webp(pngs: list[bytes], *, duration_ms: int, quality: int) -> bytes:
         duration=duration_ms,
         loop=0,
         quality=quality,
-        method=6,
+        method=_WEBP_METHOD,
     )
     return buf.getvalue()
 

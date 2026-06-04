@@ -107,6 +107,7 @@ logger = logging.getLogger(__name__)
 ALIGNED_STEP = "aligned/output_aligned.step"
 RENDERS_DIR = "renders"
 GT_STEP_NAME = "ground_truth.step"
+EDIT_DIFF_WEBP = "edit_diff.webp"
 
 # Per-fixture status enum surfaced as ``result.json["status"]``.  Agnostic
 # to the generator: same three states whether the STEP was produced by the
@@ -339,6 +340,13 @@ def evaluate_result(
             shape_score=shape_renorm,
             weights=EDITING_AXIS_WEIGHTS,
         )
+        # Editing fixtures get the ghost/diff turntable alongside the
+        # candidate's own renders so the (often tiny or internal) edit is
+        # visible in the gallery.
+        with phase("edit_diff", tag=name):
+            _maybe_render_edit_diff(
+                gt_artifacts, aligned_artifacts, aligned_step, renders_dir,
+            )
 
     result_json.write_text(json.dumps(data, indent=2))
 
@@ -571,6 +579,48 @@ def _maybe_render_interface_overlay(
     except Exception:
         logger.warning(
             "Interface overlay render failed for %s",
+            aligned_candidate_step,
+            exc_info=True,
+        )
+
+
+def _maybe_render_edit_diff(
+    gt_artifacts: StepArtifacts,
+    candidate_artifacts: StepArtifacts,
+    aligned_candidate_step: Path,
+    renders_dir: Path,
+) -> None:
+    """Render the edit-diff turntable WebP (``renders/edit_diff.webp``).
+
+    Editing fixtures only. Ghosts the aligned candidate translucent and lights
+    up only the material that differs from GT, classified by signed distance to
+    the other solid (blue = added by the candidate, red = present in GT but
+    missing from the candidate). This makes a small or internal edit legible
+    where a plain shaded render of a near-no-op output is indistinguishable from
+    a correct one. Reuses the welded meshes both artifacts already cache, so no
+    re-tessellation and no re-alignment happen here.
+
+    Idempotent: only renders when the output is missing or older than the
+    aligned candidate. Renderer failures are logged but never abort the run.
+    """
+    try:
+        output_webp = renders_dir / EDIT_DIFF_WEBP
+        if (
+            output_webp.exists()
+            and output_webp.stat().st_mtime >= aligned_candidate_step.stat().st_mtime
+        ):
+            return
+        from cadgenbench.common.viewer import render_mesh_diff_turntable_webp
+
+        renders_dir.mkdir(parents=True, exist_ok=True)
+        output_webp.write_bytes(
+            render_mesh_diff_turntable_webp(
+                gt_artifacts.mesh(), candidate_artifacts.mesh(),
+            ),
+        )
+    except Exception:
+        logger.warning(
+            "Edit-diff render failed for %s",
             aligned_candidate_step,
             exc_info=True,
         )
