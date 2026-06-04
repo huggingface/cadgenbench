@@ -79,8 +79,8 @@ axes:
 | **Interface match** | Mating-feature correctness via authored keep-in / keep-out sub-volumes. |
 | **Topology match** | Betti numbers (b0, b1, b2) of the tessellated boundary. |
 
-The **CAD Score** is the arithmetic mean of every applicable component
-score, gated by validity. See [`docs/metrics.md`](docs/metrics.md) for
+The **CAD Score** is a weighted combination of the applicable component
+scores, gated by validity. See [`docs/metrics.md`](docs/metrics.md) for
 the full specification and [`docs/metrics/`](docs/metrics/) for the
 per-axis details.
 
