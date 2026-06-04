@@ -1,4 +1,5 @@
 """Unit tests for the headless STEP renderer."""
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,19 @@ class TestRenderStep:
         images = render_step(BOX_STEP)
         names = [img.name for img in images]
         assert names == list(DEFAULT_VIEWS)
+
+    def test_default_views_are_distinct_images(self) -> None:
+        """Camera changes must repaint, not save the first view under every name.
+
+        Regression guard for the headless VTK/PyVista path: a one-plotter
+        optimization once produced ``front`` / ``top`` / ``right`` PNG files
+        whose bytes were identical to ``iso``. The 10x20x30 box fixture has
+        different silhouettes from the default views, so byte-identical PNGs
+        indicate a stale screenshot/camera update bug.
+        """
+        images = render_step(BOX_STEP)
+        hashes = {hashlib.sha256(img.data).hexdigest() for img in images}
+        assert len(hashes) == len(images)
 
     def test_images_are_non_empty_png(self) -> None:
         images = render_step(BOX_STEP)

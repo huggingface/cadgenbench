@@ -477,13 +477,14 @@ def _render_views(
     width: int,
     height: int,
 ) -> list[bytes]:
-    """Render every *view* of *shapes* through ONE GL context -> list of PNGs.
+    """Render every *view* of *shapes* as PNG bytes.
 
-    A single ``pv.Plotter`` (= one EGL/GL context) is created, the meshes are
-    added once, then each view is produced by moving only the camera. This
-    removes the per-view context create/destroy churn the previous
-    one-plotter-per-view path paid (N contexts per part), which on a shared
-    GPU under the eval ProcessPool was a major contention cost.
+    Use a fresh ``pv.Plotter`` per view. Reusing one plotter and mutating only
+    the camera looked faster, but VTK/PyVista can return stale screenshots
+    after camera changes on the headless backends we use for eval, causing
+    ``front`` / ``top`` / ``right`` files to contain the first (usually ``iso``)
+    view. A per-view plotter is slower but makes the output images independent
+    by construction.
 
     Serialised by ``_RENDER_LOCK`` (in-process threads) and
     ``_cross_process_render_lock`` (sibling eval workers); timed as the
@@ -493,25 +494,25 @@ def _render_views(
     with _RENDER_LOCK, _cross_process_render_lock(), phase(
         f"render n={len(views)}",
     ):
-        pl = pv.Plotter(off_screen=True, window_size=(width, height))
-        try:
-            pl.set_background(BACKGROUND_RGB)
-            for body, rgb, alpha in shapes:
-                pl.add_mesh(
-                    body,
-                    color=rgb,
-                    opacity=alpha,
-                    smooth_shading=False,
-                    show_edges=False,
-                    ambient=0.45,
-                    diffuse=0.65,
-                    specular=0.10,
-                    specular_power=15,
-                )
+        for view in views:
+            pl = pv.Plotter(off_screen=True, window_size=(width, height))
+            try:
+                pl.set_background(BACKGROUND_RGB)
+                for body, rgb, alpha in shapes:
+                    pl.add_mesh(
+                        body,
+                        color=rgb,
+                        opacity=alpha,
+                        smooth_shading=False,
+                        show_edges=False,
+                        ambient=0.45,
+                        diffuse=0.65,
+                        specular=0.10,
+                        specular_power=15,
+                    )
 
-            cam = pl.camera
-            for view in views:
                 eye, target, up = camera_placement(view, bbox_min, bbox_max)
+                cam = pl.camera
                 cam.position = tuple(map(float, eye))
                 cam.focal_point = tuple(map(float, target))
                 cam.up = tuple(map(float, up))
@@ -524,10 +525,13 @@ def _render_views(
                 arr = np.asarray(
                     pl.screenshot(return_img=True, transparent_background=False)
                 )
-                buf = io.BytesIO()
-                Image.fromarray(arr).save(buf, format="PNG", optimize=True)
-                pngs.append(buf.getvalue())
-        finally:
-            pl.close()
+            finally:
+                pl.close()
+
+            # Encode after closing the VTK context so each view is fully
+            # independent before the next plotter is created.
+            buf = io.BytesIO()
+            Image.fromarray(arr).save(buf, format="PNG", optimize=True)
+            pngs.append(buf.getvalue())
 
     return pngs
