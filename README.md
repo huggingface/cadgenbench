@@ -5,16 +5,16 @@
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 
-A benchmark for **AI-driven CAD generation and editing**: how well does
-a system either (a) turn a textual or visual description of a mechanical
-part into a valid, geometrically correct 3D model, or (b) take an
-existing STEP file and apply a requested edit to it?
+A benchmark for **AI-driven CAD generation and editing**. Given a
+textual or visual description of a mechanical part, a system must
+produce a valid, geometrically correct 3D model. Given an existing STEP
+file and a requested edit, it must apply that edit.
 
-The benchmark targets AI models. It makes no assumption about the
-CAD environment (`build123d`, Autodesk Fusion, OnShape, ...): a
-submission is just a STEP file per fixture. Each fixture declares its
-type (`generation` or `editing`) in `description.yaml`; the same
-metrics and the same `output.step` contract apply to both.
+The benchmark targets AI models and makes no assumption about the CAD
+environment (`build123d`, Autodesk Fusion, OnShape): a submission is
+just a STEP file per fixture. Each fixture declares its type
+(`generation` or `editing`) in `description.yaml`; the same metrics and
+`output.step` contract apply to both.
 
 **Submit and view the leaderboard:**
 [`HuggingAI4Engineering/cadgenbench-leaderboard`](https://huggingface.co/spaces/HuggingAI4Engineering/cadgenbench-leaderboard).
@@ -30,9 +30,9 @@ here:
   files.
 - **Docs** (`docs/`): metric definitions and the submission contract.
 - **Reference baseline** (`src/cadgenbench/baseline/`): an optional
-  worked example of producing submission-shaped output from a fixture
-  description (iteratively writes [`build123d`](https://github.com/gumyr/build123d)
-  Python, validates the STEP, loops until done).
+  example generator that turns a fixture description into a submission
+  (iteratively writes [`build123d`](https://github.com/gumyr/build123d)
+  Python, validates the STEP, and repeats until valid).
 
 Evaluation itself happens on the Space: ground truth is held privately
 in [`cadgenbench-data-gt`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data-gt)
@@ -70,11 +70,11 @@ before uploading; see
 ## Metrics
 
 The Space scores each candidate STEP against ground truth on four
-orthogonal axes:
+axes:
 
 | Metric | What it captures |
 |---|---|
-| **Validity** | Is the BREP well-formed, watertight, tessellable? Gate. Failure zeroes the rest. |
+| **Validity** | Is the BREP well-formed, watertight, tessellable? Gate: failure zeroes the rest. |
 | **Shape similarity** | Geometry distance (point-cloud F1, volume IoU). |
 | **Interface match** | Mating-feature correctness via authored keep-in / keep-out sub-volumes. |
 | **Topology match** | Betti numbers (b0, b1, b2) of the tessellated boundary. |
@@ -82,7 +82,7 @@ orthogonal axes:
 The **CAD Score** is the arithmetic mean of every applicable component
 score, gated by validity. See [`docs/metrics.md`](docs/metrics.md) for
 the full specification and [`docs/metrics/`](docs/metrics/) for the
-per-axis deep dives.
+per-axis details.
 
 ## Reference baseline (optional)
 
@@ -92,7 +92,7 @@ end-to-end run looks like, or as a starting point for your own
 generator. It targets Python 3.12 and installs entirely via pip.
 
 ```bash
-# 1. Python 3.12 env (any tool: venv, uv, conda, ...)
+# 1. Python 3.12 env (venv, uv, conda, etc.)
 python -m venv .venv && source .venv/bin/activate
 
 # 2. Editable install with the baseline + dev extras
@@ -103,7 +103,7 @@ pip install -e ".[baseline,dev]"
 playwright install chromium
 
 # 4. Provider API keys for whichever model(s) you plan to run
-cp .env.example .env   # then fill in ANTHROPIC_API_KEY / OPENAI_API_KEY / ...
+cp .env.example .env   # then fill in ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.
 
 # 5. Point at the public fixture-inputs dataset on the Hub. cadgenbench
 # snapshot-downloads it on first use and caches under
