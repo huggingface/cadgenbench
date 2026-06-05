@@ -108,6 +108,11 @@ ALIGNED_STEP = "aligned/output_aligned.step"
 RENDERS_DIR = "renders"
 GT_STEP_NAME = "ground_truth.step"
 EDIT_DIFF_WEBP = "edit_diff.webp"
+# Static frame-0 still beside the turntable. Used as the grid thumbnail for
+# editing samples (an animated WebP can't be frozen to one angle in HTML, and
+# 35 looping clips on one page is wasteful); the full turntable still plays in
+# the detail card. Rides to the render bucket like any other ``renders/*.png``.
+EDIT_DIFF_PNG = "edit_diff.png"
 
 # Per-fixture status enum surfaced as ``result.json["status"]``.  Agnostic
 # to the generator: same three states whether the STEP was produced by the
@@ -605,19 +610,30 @@ def _maybe_render_edit_diff(
     """
     try:
         output_webp = renders_dir / EDIT_DIFF_WEBP
-        if (
+        output_png = renders_dir / EDIT_DIFF_PNG
+        webp_fresh = (
             output_webp.exists()
             and output_webp.stat().st_mtime >= aligned_candidate_step.stat().st_mtime
-        ):
+        )
+        # Already current and the still exists -> nothing to do.
+        if webp_fresh and output_png.exists():
             return
+        from cadgenbench.common.imaging import first_frame_png
         from cadgenbench.common.viewer import render_mesh_diff_turntable_webp
 
         renders_dir.mkdir(parents=True, exist_ok=True)
-        output_webp.write_bytes(
-            render_mesh_diff_turntable_webp(
+        if webp_fresh:
+            # Clip is current but the still is missing (e.g. evaluated
+            # before the still existed) -> derive it from the clip, no
+            # re-render.
+            webp_bytes = output_webp.read_bytes()
+        else:
+            webp_bytes = render_mesh_diff_turntable_webp(
                 gt_artifacts.mesh(), candidate_artifacts.mesh(),
-            ),
-        )
+            )
+            output_webp.write_bytes(webp_bytes)
+        # Frame-0 still beside the clip, picked up by the bucket uploader.
+        output_png.write_bytes(first_frame_png(webp_bytes))
     except Exception:
         logger.warning(
             "Edit-diff render failed for %s",
