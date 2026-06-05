@@ -594,7 +594,7 @@ def _render_summary_table(fixtures: list[dict]) -> str:
     col_idx = 2
     header = (
         "<thead><tr>"
-        "<th>Fixture</th>"
+        "<th>Sample</th>"
         "<th>Status</th>"
     )
     if has_cad_score:
@@ -897,7 +897,7 @@ def _render_run_summary_header(summary: dict, n_fixtures_fallback: int) -> str:
     if not summary:
         return (
             f'<div class="run-stats">'
-            f'<span>{n_fixtures_fallback} fixtures</span>'
+            f'<span>{n_fixtures_fallback} samples</span>'
             f'</div>'
         )
 
@@ -923,7 +923,7 @@ def _render_run_summary_header(summary: dict, n_fixtures_fallback: int) -> str:
         parts.append(f'<span>Invalid: <b>{n_invalid}</b></span>')
     if n_missing:
         parts.append(f'<span>Missing: <b>{n_missing}</b></span>')
-    parts.append(f'<span>{n} fixtures</span>')
+    parts.append(f'<span>{n} samples</span>')
     parts.append("</div>")
 
     if by_task:
@@ -1077,7 +1077,7 @@ def run(args: argparse.Namespace) -> int:
     run_data = discover_run(args.run_dir)
 
     if not run_data["fixtures"]:
-        print(f"No fixtures found in {args.run_dir}")
+        print(f"No samples found in {args.run_dir}")
         return 1
 
     html_out = generate_html(
@@ -1089,7 +1089,7 @@ def run(args: argparse.Namespace) -> int:
     out_path = args.output or Path(f"results_{run_data['timestamp']}.html")
     out_path.write_text(html_out)
     print(
-        f"Wrote {out_path} ({len(run_data['fixtures'])} fixtures, "
+        f"Wrote {out_path} ({len(run_data['fixtures'])} samples, "
         f"{out_path.stat().st_size // 1024} KB)"
     )
     return 0
