@@ -68,13 +68,16 @@ EDIT_BASELINE_NAME = "edit_baseline.json"
 # Per-axis weights applied to ``cad_score`` for editing fixtures. Shape
 # is the axis that actually resolves most edits, so it dominates; topology
 # and interface are frequently non-discriminating on a given edit (the edit
-# rarely changes Betti numbers or mating-interface fit), so topology in
-# particular is toned down. See ``GENERATION_AXIS_WEIGHTS`` for the
-# generation-task counterpart.
+# rarely changes Betti numbers or mating-interface fit) and are therefore
+# nearly "free" for the no-op (submit the input unchanged), which only the
+# shape axis is renormalized against. They are kept deliberately small so
+# the no-op caps low: with shape renormalized to 0, the no-op score is at
+# most ``interface + topology = 0.4``. See ``GENERATION_AXIS_WEIGHTS`` for
+# the generation-task counterpart.
 EDITING_AXIS_WEIGHTS: dict[str, float] = {
-    "shape": 0.5,
+    "shape": 0.6,
     "interface": 0.3,
-    "topology": 0.2,
+    "topology": 0.1,
 }
 
 # Authoring gate: the edit must leave the shape metric at least this

@@ -45,8 +45,8 @@ with these keys:
   the weights renormalize over those present. For editing fixtures
   (those with a committed ``edit_baseline.json`` in the GT dir) the
   shape axis is first renormalized against the no-op baseline and the
-  axes are reweighted ``EDITING_AXIS_WEIGHTS`` (shape 0.5 / interface
-  0.3 / topology 0.2; see ``cadgenbench.eval.edit_baseline``). Zero when
+  axes are reweighted ``EDITING_AXIS_WEIGHTS`` (shape 0.6 / interface
+  0.3 / topology 0.1; see ``cadgenbench.eval.edit_baseline``). Zero when
   the candidate is not a valid solid or no STEP was produced.
 - ``edit_metrics``      , editing fixtures only. The no-op baseline
   (``baseline_shape_similarity``), the raw and renormalized shape-axis

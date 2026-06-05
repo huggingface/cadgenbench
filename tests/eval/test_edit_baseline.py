@@ -88,7 +88,7 @@ def test_cad_score_generation_weights() -> None:
 
 def test_cad_score_editing_weights_and_shape_override() -> None:
     # Editing: shape axis is overridden with the renormalized value and
-    # weighted 0.5 / 0.3 / 0.2 (shape / interface / topology).
+    # weighted 0.6 / 0.3 / 0.1 (shape / interface / topology).
     got = _cad_score(
         scores={"shape_similarity_score": 0.95},  # raw, must be ignored
         interface_metrics={"score": 0.8},
@@ -97,11 +97,11 @@ def test_cad_score_editing_weights_and_shape_override() -> None:
         shape_score=0.0,  # renormalized no-op
         weights=EDITING_AXIS_WEIGHTS,
     )
-    assert got == pytest.approx(0.5 * 0.0 + 0.3 * 0.8 + 0.2 * 1.0)
+    assert got == pytest.approx(0.6 * 0.0 + 0.3 * 0.8 + 0.1 * 1.0)
 
 
 def test_cad_score_editing_reweights_when_interface_absent() -> None:
-    # No interface axis: shape 0.5 + topo 0.2 renormalize over 0.7.
+    # No interface axis: shape 0.6 + topo 0.1 renormalize over 0.7.
     got = _cad_score(
         scores={"shape_similarity_score": 0.95},
         interface_metrics={},
@@ -110,7 +110,7 @@ def test_cad_score_editing_reweights_when_interface_absent() -> None:
         shape_score=0.4,
         weights=EDITING_AXIS_WEIGHTS,
     )
-    assert got == pytest.approx((0.5 * 0.4 + 0.2 * 0.9) / 0.7)
+    assert got == pytest.approx((0.6 * 0.4 + 0.1 * 0.9) / 0.7)
 
 
 def test_cad_score_invalid_is_zero_regardless_of_weights() -> None:
@@ -158,13 +158,15 @@ def test_check_baseline_fresh_raises_on_mismatch() -> None:
 def test_compute_baseline_identical_input_gt_scores_near_perfect() -> None:
     # input == GT (a degenerate "no edit") scores ~1 on shape similarity:
     # the no-op problem in its most extreme form. It does not hit exactly
-    # 1.0 because of tessellation residue on volume IoU, so the tiny
-    # EDIT_HEADROOM_FLOOR (numerical-stability guard, not a "meaningful
-    # edit" threshold) does not by itself reject a no-edit.
+    # 1.0 because of tessellation + alignment residue (the input is meshed
+    # and re-aligned, not transformed in place), which the tightened 0.5%
+    # point-cloud F1 threshold now registers; so the tiny EDIT_HEADROOM_FLOOR
+    # (numerical-stability guard, not a "meaningful edit" threshold) does not
+    # by itself reject a no-edit.
     gt = FIXTURES_DIR / "test_1" / "gt.step"
     baseline = compute_edit_baseline(gt, gt)
     assert baseline["cadgenbench_version"] == __version__
-    assert baseline["shape_similarity_score"] > 0.99
+    assert baseline["shape_similarity_score"] > 0.97
 
 
 def test_compute_baseline_real_edit_has_resolvable_headroom() -> None:

@@ -87,10 +87,7 @@ The three score components are orthogonal by construction. Each catches a class 
 - **Topology Match** catches "wrong number of holes / pieces / voids"; blind to feature position (one hole left vs one hole right is identical).
 - **Interface Match** catches "wrong feature position / size against spec"; blind to overall shape (the four bolt holes fit regardless of bracket appearance).
 
-### Why validity is a gate, not a term
-
-A scoring scheme that lets an invalid solid earn partial credit rewards "looks roughly right in a viewer" over "is a real 3D-printable part". Anything less than `is_valid` is hard-zeroed.
-
+Validity is a gate, not a term.
 ---
 
 ## The four metrics at a glance
@@ -136,7 +133,7 @@ $$
 s_i = \exp\!\Bigl(-\bigl|\log\bigl((b_i^{\text{cand}}+1)/(b_i^{\text{gt}}+1)\bigr)\bigr|\Bigr) \in [0, 1]
 $$
 
-Score: $s_0 \cdot s_1 \cdot s_2 \in [0, 1]$ (the **product**, not the mean). The $+1$ shift keeps the ratio finite when either Betti is zero and gives "off by one near zero" graceful (rather than catastrophic) decay; the per-axis scores are persisted alongside the aggregate for diagnostics. The product means a single badly-wrong axis collapses the score toward $0$ — topology is discrete, so getting two of three invariants right is not a partial match.
+Score: $s_0 \cdot s_1 \cdot s_2 \in [0, 1]$ (the **product**, not the mean). The $+1$ shift keeps the ratio finite when either Betti is zero and gives "off by one near zero" graceful (rather than catastrophic) decay; the per-axis scores are persisted alongside the aggregate for diagnostics. The product means a single badly-wrong axis collapses the score toward $0$. Topology is discrete, so getting two of three invariants right is not a partial match.
 
 Topologically *trivial* features (blind pockets, fillets, chamfers, embossed text) leave Betti unchanged. They are covered by [Shape Similarity](#2-shape-similarity) and [Interface Match](#4-interface-match) instead.
 
@@ -161,7 +158,7 @@ unchanged. **Editing** tasks (an `input.step` plus an edit request,
 The problem: an editing GT is a small, local modification of the
 input, so the unedited input is already a valid solid that is *almost*
 the GT. All three scored axes are **global** similarity measures, so
-the "no-op" strategy (submit the input unchanged) scores high — often
+the "no-op" strategy (submit the input unchanged) scores high and often
 higher than a real attempt that perturbs the unchanged bulk. Scoring
 editing tasks with the raw composition would reward doing nothing.
 
@@ -174,7 +171,7 @@ s_renorm  = max(0, (shape_similarity − b_shape) / (1 − b_shape))
 
 `b_shape` (the no-op) maps to `0`; a perfect candidate stays at `1`;
 anything at or below the no-op floors at `0`. **Topology and interface
-match stay raw** — most edits leave them unchanged (so they
+match stay raw**. Most edits leave them unchanged (so they
 contribute equally to every candidate), and where an edit *does* move
 them they already discriminate, and a candidate that *breaks* them
 should still be penalized.
@@ -186,23 +183,23 @@ with absent axes dropping out and the remaining weights renormalizing:
 ```
             0                                                   if not is_valid
 cad_score =
-            0.5·s_renorm + 0.3·interface + 0.2·topo_match        otherwise
+            0.6·s_renorm + 0.3·interface + 0.1·topo_match        otherwise
 ```
 
 Editing weights differ from generation (which uses 0.4 / 0.4 / 0.2):
-shape dominates at 0.5 because it is the axis that actually resolves most
+shape dominates at 0.6 because it is the axis that actually resolves most
 edits, while topology and interface are frequently non-discriminating on
-a given edit (the edit rarely changes Betti numbers or mating fit), so
-topology is toned down to 0.2. A no-op therefore scores at most
-`0.5·0 + 0.3 + 0.2 = 0.5` (and less when the edit moves
+a given edit (the edit rarely changes Betti numbers or mating fit) and so
+are nearly "free" for the no-op, which only the shape axis is renormalized
+against. They are kept small (0.3 / 0.1) so the no-op caps low: a no-op
+scores at most `0.6·0 + 0.3 + 0.1 = 0.4` (and less when the edit moves
 topology/interface, since the no-op then misses those too); any genuine
 shape improvement clears it. The validity gate still hard-zeros as for
 generation.
 
-**`b_shape` is a fixture constant**, not a per-submission quantity: it
-depends only on `input.step`, `ground_truth.step`, and the
+**`b_shape` depends only on `input.step`, `ground_truth.step`, and the
 shape/alignment implementation. It is precomputed once at authoring
-time and committed to the GT dataset as `<fixture>/edit_baseline.json`;
+time pre input, and committed to the GT dataset as `<fixture>/edit_baseline.json`;
 the grader reads it back and never recomputes it per submission. The
 **presence** of that file is also how the grader knows a fixture is an
 editing task. See the authoring doc in the GT dataset
@@ -218,48 +215,74 @@ The renormalized + raw shape values are persisted under
 
 ## Worked examples
 
-Three fixtures from the build123d baseline (Claude Opus 4.7), one per axis. Each isolates the metric that decides the score.
+Three minimal examples, one per axis. Each is built so that a single
+metric is what separates the candidate from the ground truth while the
+other two stay quiet, which is what it means for the three to be
+orthogonal.
 
-### Example 1: Shape Similarity is the limiter
+### Example 1: Shape Similarity catches wrong bulk geometry
 
-A threaded hose-barb fitting. The candidate gets the topology exact (one solid, one through-bore) and bolts up well, but it drops the threaded collar and the barb ridges, so the bulk surface is only roughly right.
+Two single-piece parts with no holes and no mating features, so
+topology and interface have nothing to disagree about and only the
+bulk geometry is in play. The ground truth is an L-bracket; the
+candidate is a plain block of roughly the same footprint. They enclose
+different volumes and present different surfaces, so **shape
+similarity** is the axis that notices the candidate simply isn't the
+right shape.
 
 | Ground truth | Candidate |
 | :--: | :--: |
 | ![GT iso](./metrics/illustrations/example_1_shape/gt_iso.png) | ![Candidate iso](./metrics/illustrations/example_1_shape/candidate_iso.png) |
 
-`shape_similarity = 0.62` is the weakest axis (topology `1.00`, interface `0.80`) and caps the result at **`cad_score = 0.77`**.
+### Example 2: Topology Match catches a wrong feature count
 
-### Example 2: Interface Match catches a misplaced bolt pattern
+Topology counts the pieces, through-handles, and internal voids. Two
+cases, each changing one count while the bulk shape barely moves, so
+shape similarity stays high and the eye is easily fooled.
 
-A circular mounting flange. The candidate has the right silhouette and almost the right topology, but its bolt-hole ring is the wrong size and offset from the spec, so it would not bolt up.
-
-| Ground truth | Candidate |
-| :--: | :--: |
-| ![GT iso](./metrics/illustrations/example_2_interface/gt_iso.png) | ![Candidate iso](./metrics/illustrations/example_2_interface/candidate_iso.png) |
-
-The overlay makes it obvious — the GT keep-out holes (pink) sit off the candidate's actual holes (blue), disagreement in yellow:
-
-![Interface overlay](./metrics/illustrations/example_2_interface/interface_overlay.png)
-
-`interface_match = 0.30` is what pulls **`cad_score = 0.53`** down, even though shape (`0.55`) and topology (`0.94`) are far higher.
-
-### Example 3: Topology Match catches what the eye can't
-
-A mounting bracket (editing task). The candidate looks like a clean single bracket — raw shape similarity is high (`0.86`) — but the boolean left it as **four disconnected solids** with extra handles ($b_0 = 4$ vs GT `1`, $b_1 = 9$ vs `6`), invisible in the render and to the shape metric.
+A wrong number of through-holes: two bars of the same size and outline,
+where the ground truth has two through-holes and the candidate has four.
+The Betti vectors are `(1, 2, 0)` and `(1, 4, 0)`, so only the
+through-handle count $b_1$ differs and scores `0.60`; the topology match
+is the product `1.00 · 0.60 · 1.00 = 0.60`.
 
 | Ground truth | Candidate |
 | :--: | :--: |
-| ![GT iso](./metrics/illustrations/example_3_topology/gt_iso.png) | ![Candidate iso](./metrics/illustrations/example_3_topology/candidate_iso.png) |
+| ![GT iso](./metrics/illustrations/example_2_topology/gt_iso.png) | ![Candidate iso](./metrics/illustrations/example_2_topology/candidate_iso.png) |
 
-`topology_match = 0.70` is what flags the broken solid; on this editing fixture (shape renormalized against the no-op) it lands at **`cad_score = 0.44`**.
+A wrong number of pieces: the ground truth is one solid bar, the
+candidate came out as two disconnected blocks. Now the component count
+$b_0$ differs, `(1, 0, 0)` against `(2, 0, 0)`, and scores `0.667`; the
+topology match is `0.667 · 1.00 · 1.00 = 0.667`.
 
----
+| Ground truth | Candidate |
+| :--: | :--: |
+| ![GT iso](./metrics/illustrations/example_2_topology/components_gt_iso.png) | ![Candidate iso](./metrics/illustrations/example_2_topology/components_candidate_iso.png) |
 
-## Design notes
+The three axis scores are multiplied, not averaged, so one wrong count
+pulls the whole match down and a candidate cannot bank credit for the
+two easy axes. Interface match aggregates differently: it takes the
+worst feature inside a mating group and averages across independent
+groups, shown next.
 
-### Mesh-based computation (with IoU saturation)
+### Example 3: Interface Match catches a misplaced mating feature
 
-Two parts of the pipeline operate on tessellated meshes rather than the BREP directly: the Boolean operations behind volume IoU and interface IoU (run on [`manifold3d`](https://github.com/elalish/manifold)), and the Betti-number computation behind topology match. Mesh-derived results are independent of the modeller's face decomposition: the same physical part authored two different ways gives the same numbers.
+A mounting plate with two bolt holes and a central slot. The candidate
+keeps the outline, the hole count, and the slot, but the slot is shifted
+off its specified position, so the plate would not seat on its fixture.
+The bulk shape barely moves and the feature counts do not change, so
+shape similarity (`0.89`) and topology (`1.00`) both stay high. Only
+interface match sees the problem and scores `0.67`: the two holes mate,
+but the offset slot fails its group. The result is
+`cad_score = 0.4 · 0.89 + 0.4 · 0.67 + 0.2 · 1.00 = 0.82`.
 
-The trade-off is **tessellation residue**: a candidate that is geometrically identical to the GT but independently tessellated typically leaves a 0.1 to 1 % volume difference, which would drop IoU below 1.0 even for perfect candidates. Per-sub-volume IoU is therefore saturated to 1.0 above 0.99. Authoring-equivalent perfect candidates still score 1.0; real geometric errors drop IoU well below 0.99 and are unaffected. Betti is integer-valued and has no analogous noise.
+| Ground truth | Candidate |
+| :--: | :--: |
+| ![GT iso](./metrics/illustrations/example_3_interface/gt_iso.png) | ![Candidate iso](./metrics/illustrations/example_3_interface/candidate_iso.png) |
+
+The overlay makes it concrete. Each keep-out region the spec requires to
+be empty is drawn in red. The two holes line up, but where the
+candidate's material intrudes into the slot region the disagreement
+lights up in yellow.
+
+![Interface overlay](./metrics/illustrations/example_3_interface/interface_overlay.png)
