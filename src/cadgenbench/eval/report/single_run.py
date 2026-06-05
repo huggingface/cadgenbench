@@ -229,14 +229,25 @@ def _quality_class(score: float | None) -> str:
 # HTML rendering helpers
 # ---------------------------------------------------------------------------
 
-def _images_html(pngs: list[Path]) -> str:
+def _images_html(pngs: list[Path], *, base_url: str | None = None) -> str:
+    """Render a row of view thumbnails.
+
+    By default each image is inlined as a base64 data URI, which keeps the
+    report a single self-contained file (the artifact a submitter produces
+    locally with ``cadgenbench report single``). When *base_url* is given the
+    images are referenced as ``{base_url}/{filename}`` instead; the hosted
+    leaderboard passes the public render-bucket URL so the large WebP/PNG bytes
+    live in object storage rather than bloating the HTML. ``base_url`` only
+    changes how ``<img src>`` is written; it grants no write access and the
+    local file is still used to know which views exist and in what order.
+    """
     if not pngs:
         return ""
     parts = ['<div class="images">']
     for vp in pngs:
-        uri = _data_uri(vp)
+        src = f"{base_url}/{vp.name}" if base_url else _data_uri(vp)
         parts.append(
-            f'<div class="view"><img src="{uri}" alt="{vp.stem}" loading="lazy">'
+            f'<div class="view"><img src="{src}" alt="{vp.stem}" loading="lazy">'
             f"<span>{vp.stem}</span></div>"
         )
     parts.append("</div>")
@@ -244,6 +255,8 @@ def _images_html(pngs: list[Path]) -> str:
 
 
 def _render_gt_images(gt_dir: Path | None) -> str:
+    """GT views, always inlined: the ground truth is private and never
+    published to the public render bucket, so it carries no *base_url*."""
     if not gt_dir:
         return '<p class="note">GT source not found</p>'
     renders_dir = gt_dir / "renders"
@@ -251,41 +264,48 @@ def _render_gt_images(gt_dir: Path | None) -> str:
     return _images_html(pngs) or '<p class="note">No GT renders</p>'
 
 
-def _render_output_images(result_dir: Path) -> str:
+def _render_output_images(result_dir: Path, *, base_url: str | None = None) -> str:
     renders_dir = result_dir / "renders"
     if not renders_dir.is_dir():
         return '<p class="note">No output renders</p>'
     all_pngs = list(renders_dir.glob("*.png"))
     view_order = {v: i for i, v in enumerate(VIEWS)}
     pngs = sorted(all_pngs, key=lambda p: (view_order.get(p.stem, len(VIEWS)), p.stem))
-    return _images_html(pngs) or '<p class="note">No output renders</p>'
+    return _images_html(pngs, base_url=base_url) or '<p class="note">No output renders</p>'
 
 
-def _render_edit_diff(result_dir: Path) -> str:
+def _render_edit_diff(result_dir: Path, *, base_url: str | None = None) -> str:
     """Embed the editing-task diff turntable (``renders/edit_diff.webp``).
 
     The ghost-body turntable lights up only the material that differs from GT
     (blue = added by the output, red = present in GT but missing), which makes
     a small or internal edit legible where the plain aligned output looks
-    identical to the ground truth. No fallback: when the WebP is absent (e.g. an
-    invalid candidate that never rendered, or a fixture evaluated before the
-    diff existed) the column shows an explicit note rather than reverting to the
-    static views.
+    identical to the ground truth. Inlined as base64 by default; when *base_url*
+    is given (hosted report) it is referenced from the public render bucket
+    instead, which is what keeps the WebP out of the HTML. No fallback: when the
+    WebP is absent (an invalid candidate that never rendered, or a fixture
+    evaluated before the diff existed) the column shows an explicit note rather
+    than reverting to the static views.
     """
-    uri = _data_uri(result_dir / "renders" / "edit_diff.webp")
-    if uri is None:
+    webp = result_dir / "renders" / "edit_diff.webp"
+    if not webp.exists():
         return '<p class="note">No edit-diff render</p>'
-    return f'<img src="{uri}" alt="edit diff" class="edit-diff-img" loading="lazy">'
+    src = f"{base_url}/edit_diff.webp" if base_url else _data_uri(webp)
+    return f'<img src="{src}" alt="edit diff" class="edit-diff-img" loading="lazy">'
 
 
 # ---------------------------------------------------------------------------
 # Fixture card
 # ---------------------------------------------------------------------------
 
-def _render_fixture_card(fix: dict, idx: int) -> str:
+def _render_fixture_card(fix: dict, idx: int, *, render_base_url: str | None = None) -> str:
     result = fix["result"]
     gt_dir = fix["gt_dir"]
     result_dir = fix["result_dir"]
+    # Per-fixture public render base for the hosted report (display only); the
+    # candidate's renders live at ``{render_base_url}/<fixture>/<file>`` in the
+    # bucket. ``None`` for a local submitter report, which inlines base64.
+    fixture_base = f"{render_base_url}/{fix['name']}" if render_base_url else None
     gt_m = result.get("gt_metrics", {})
     cad_score = result.get("cad_score")
     headline = cad_score if cad_score is not None else gt_m.get("shape_similarity_score")
@@ -432,7 +452,7 @@ def _render_fixture_card(fix: dict, idx: int) -> str:
         # column is dropped entirely; the diff already carries the GT reference.
         p.append('<div class="col">')
         p.append("<h3>Output vs ground truth (edit diff)</h3>")
-        p.append(_render_edit_diff(result_dir))
+        p.append(_render_edit_diff(result_dir, base_url=fixture_base))
         p.append("</div>")
     else:
         p.append('<div class="col">')
@@ -442,7 +462,7 @@ def _render_fixture_card(fix: dict, idx: int) -> str:
 
         p.append('<div class="col">')
         p.append("<h3>Output (aligned)</h3>")
-        p.append(_render_output_images(result_dir))
+        p.append(_render_output_images(result_dir, base_url=fixture_base))
         p.append("</div>")
 
     p.append("</div>")  # three-col
@@ -865,7 +885,22 @@ def _render_run_summary_header(summary: dict, n_fixtures_fallback: int) -> str:
     return "\n".join(parts)
 
 
-def generate_html(run: dict) -> str:
+def generate_html(run: dict, *, render_base_url: str | None = None) -> str:
+    """Build the single-run report HTML.
+
+    Args:
+        run: The discovered run (see :func:`discover_run`).
+        render_base_url: Optional public base URL for the candidate renders. When
+            ``None`` (a submitter running ``cadgenbench report single`` locally),
+            every render is inlined as a base64 data URI so the report is one
+            self-contained, portable file. When set (the hosted leaderboard),
+            the candidate's renders are referenced as
+            ``{render_base_url}/<fixture>/<file>`` from the public render bucket,
+            so the large WebP/PNG bytes stay in object storage instead of
+            bloating the HTML. GT and input views are always inlined (the GT is
+            private and never published to the bucket). This is a display-only
+            knob: it changes ``<img src>`` and grants no storage write access.
+    """
     fixtures = run["fixtures"]
     timestamp = run["timestamp"]
     summary = run.get("run_summary") or {}
@@ -917,7 +952,7 @@ def generate_html(run: dict) -> str:
     )
     p.append("</div>")
     for i, fix in enumerate(fixtures):
-        p.append(_render_fixture_card(fix, i))
+        p.append(_render_fixture_card(fix, i, render_base_url=render_base_url))
     p.append("</div>")
 
     p.append(f"<script>window._fixtureNames = {fixture_names_js};\n{JS}</script>")
@@ -934,6 +969,16 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> None:
     )
     p.add_argument("run_dir", type=Path, help="Path to a result run directory.")
     p.add_argument("-o", "--output", type=Path, help="Output HTML path.")
+    p.add_argument(
+        "--render-base-url",
+        default=None,
+        help=(
+            "Optional public base URL for the candidate renders. Omit (default) "
+            "to inline every render as base64 for a self-contained report; set "
+            "it (hosted leaderboard) to reference candidate renders as "
+            "<base>/<fixture>/<file>. GT/input stay inlined."
+        ),
+    )
     p.set_defaults(handler=run)
 
 
@@ -945,7 +990,7 @@ def run(args: argparse.Namespace) -> int:
         print(f"No fixtures found in {args.run_dir}")
         return 1
 
-    html_out = generate_html(run_data)
+    html_out = generate_html(run_data, render_base_url=args.render_base_url)
     out_path = args.output or Path(f"results_{run_data['timestamp']}.html")
     out_path.write_text(html_out)
     print(
