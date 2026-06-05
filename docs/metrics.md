@@ -35,14 +35,6 @@ the shape axis against the no-op input and reweight differently. See
 
 ---
 
-## What CAD Score does *not* measure
-
-- **GD&T / PMI annotations**: surface finish, tolerance frames, datum references, threading.
-- **Functional fit vs spec fit**: a 30 × 14 slot still accepts a bolt the spec wants in a 30 × 12 slot; we score geometry, not function.
-- **Manufacturability**: machine choice and DfM cost are not modelled.
-
----
-
 ## Coordinate convention & alignment
 
 We instruct submissions to centre their models at $(0, 0, 0)$ and give
@@ -123,7 +115,7 @@ Arithmetic mean of two sub-metrics, each in $[0, 1]$:
 shape_similarity = mean(point_cloud_f1, volume_iou)
 ```
 
-- **`shape_point_cloud_f1`**: normal-weighted symmetric F1 of 50 k surface points per shape; hit requires distance within 1 % of GT bbox diagonal *and* matched-pair normals within ≈25°.
+- **`shape_point_cloud_f1`**: normal-weighted symmetric F1 of 50 k surface points per shape; hit requires distance within 0.5 % of GT bbox diagonal *and* matched-pair normals within ≈20°.
 - **`shape_volume_iou`**: $\mathrm{vol}(A \cap B) / \mathrm{vol}(A \cup B)$.
 
 The two cancel each other's blind spots. Point-cloud F1 is dominated by big flat faces and is sensitive to surface position; volume IoU is invariant to feature position but captures occupied-volume error.
@@ -144,7 +136,7 @@ $$
 s_i = \exp\!\Bigl(-\bigl|\log\bigl((b_i^{\text{cand}}+1)/(b_i^{\text{gt}}+1)\bigr)\bigr|\Bigr) \in [0, 1]
 $$
 
-Score: $\tfrac{1}{3}(s_0 + s_1 + s_2) \in [0, 1]$. The $+1$ shift keeps the ratio finite when either Betti is zero and gives "off by one near zero" graceful (rather than catastrophic) decay; the per-axis scores are persisted alongside the aggregate for diagnostics.
+Score: $s_0 \cdot s_1 \cdot s_2 \in [0, 1]$ (the **product**, not the mean). The $+1$ shift keeps the ratio finite when either Betti is zero and gives "off by one near zero" graceful (rather than catastrophic) decay; the per-axis scores are persisted alongside the aggregate for diagnostics. The product means a single badly-wrong axis collapses the score toward $0$ — topology is discrete, so getting two of three invariants right is not a partial match.
 
 Topologically *trivial* features (blind pockets, fillets, chamfers, embossed text) leave Betti unchanged. They are covered by [Shape Similarity](#2-shape-similarity) and [Interface Match](#4-interface-match) instead.
 
@@ -154,7 +146,7 @@ Topologically *trivial* features (blind pockets, fillets, chamfers, embossed tex
 
 A part has one or more **mating groups**: sets of features that must align rigidly with another object (e.g. the four bolt holes on one mounting face). Each group is specified as one or more **sub-volume STEPs** (cylinders for round holes, prisms for hex bosses, stadium-prisms for slots), each labelled either `KOR` (keep-out region: candidate must be empty here) or `KIR` (keep-in region: candidate must have material here).
 
-Per sub-volume we compute a volumetric IoU against the candidate, with an asymmetric verification shell of opposite-material around the region (so oversize *and* undersize errors both register). Per-group score is the min over its sub-volumes; per-fixture score is the mean over groups.
+Per sub-volume we compute a volumetric IoU against the candidate, with an asymmetric verification shell of opposite-material around the region (so oversize *and* undersize errors both register). Each IoU then passes through a soft pass/fail ramp ($\text{IoU} \ge 0.95 \to 1$, $\le 0.80 \to 0$, linear between) so sloppy fits go to $0$ rather than banking partial credit. Per-group score is the min over its (ramped) sub-volumes; per-fixture score is the mean over groups.
 
 → See [more details below](./metrics/interface_match.md).
 
@@ -226,57 +218,41 @@ The renormalized + raw shape values are persisted under
 
 ## Worked examples
 
-### Example 1: Shape Similarity drives the score
+Three fixtures from the build123d baseline (Claude Opus 4.7), one per axis. Each isolates the metric that decides the score.
 
-This fixture has no interface specification, so the interface term drops out and the remaining weights renormalize: `cad_score = (0.4·shape_similarity + 0.2·topology_match) / 0.6`. The candidate captures the rough silhouette of the bracket but misplaces nearly every feature.
+### Example 1: Shape Similarity is the limiter
+
+A threaded hose-barb fitting. The candidate gets the topology exact (one solid, one through-bore) and bolts up well, but it drops the threaded collar and the barb ridges, so the bulk surface is only roughly right.
 
 | Ground truth | Candidate |
 | :--: | :--: |
 | ![GT iso](./metrics/illustrations/example_1_shape/gt_iso.png) | ![Candidate iso](./metrics/illustrations/example_1_shape/candidate_iso.png) |
 
-| Component | Value | Notes |
-| --- | --- | --- |
-| Validity | ✅ valid, watertight, single solid | gate passes |
-| `shape_point_cloud_f1` | `0.672` | bulk surface roughly right |
-| `shape_volume_iou` | `0.558` | candidate is ~30 % off in occupied volume |
-| **`shape_similarity_score`** | **`0.615`** | mean of the two sub-metrics |
-| `topology_match` | `0.939` | $s_0 = 1.000$ ($b_0$ match), $s_1 = 0.818$ ($b_1 = 8$ vs GT $10$ → $9/11$), $s_2 = 1.000$ ($b_2$ match) |
-| **`cad_score`** | **`0.723`** | $(0.4 \cdot 0.615 + 0.2 \cdot 0.939) / 0.6$ (no interface axis) |
+`shape_similarity = 0.62` is the weakest axis (topology `1.00`, interface `0.80`) and caps the result at **`cad_score = 0.77`**.
 
-### Example 2: Interface Match catches what Shape Similarity misses
+### Example 2: Interface Match catches a misplaced bolt pattern
 
-A perfect topology match, a near-perfect shape match, and yet the candidate would not fit the GT's bolt pattern. All four mounting holes are present and individually look fine, but their *positions* are systematically off by a few millimetres.
+A circular mounting flange. The candidate has the right silhouette and almost the right topology, but its bolt-hole ring is the wrong size and offset from the spec, so it would not bolt up.
 
 | Ground truth | Candidate |
 | :--: | :--: |
 | ![GT iso](./metrics/illustrations/example_2_interface/gt_iso.png) | ![Candidate iso](./metrics/illustrations/example_2_interface/candidate_iso.png) |
 
-Visually indistinguishable. The interface-match overlay makes the problem obvious: GT sub-volumes (yellow / orange) sit next to, not on top of, the candidate's actual holes (black) in the top view.
+The overlay makes it obvious — the GT keep-out holes (pink) sit off the candidate's actual holes (blue), disagreement in yellow:
 
 ![Interface overlay](./metrics/illustrations/example_2_interface/interface_overlay.png)
 
-| Component | Value | Notes |
-| --- | --- | --- |
-| Validity | ✅ valid, watertight | gate passes |
-| `shape_similarity_score` | `0.931` | pc-F1 0.944, vol-IoU 0.918 |
-| `topology_match` | `1.000` | $(b_0, b_1, b_2) = (1, 4, 0)$ exact match |
-| `interface_match` | **`0.0915`** | per-group min over the four `KOR` sub-volume IoUs: 0.092, 0.103, 0.098, 0.102 |
-| **`cad_score`** | **`0.609`** | $0.4 \cdot 0.931 + 0.4 \cdot 0.0915 + 0.2 \cdot 1.000$ |
+`interface_match = 0.30` is what pulls **`cad_score = 0.53`** down, even though shape (`0.55`) and topology (`0.94`) are far higher.
 
-### Example 3: Topology Match catches what Shape Similarity misses
+### Example 3: Topology Match catches what the eye can't
 
-The candidate captures the silhouette of the fixture (cylindrical flange + central post + tall pin) well enough to score a moderate shape similarity, but the topology is wildly off: it produced half the expected through-holes and added internal voids that shouldn't exist.
+A mounting bracket (editing task). The candidate looks like a clean single bracket — raw shape similarity is high (`0.86`) — but the boolean left it as **four disconnected solids** with extra handles ($b_0 = 4$ vs GT `1`, $b_1 = 9$ vs `6`), invisible in the render and to the shape metric.
 
 | Ground truth | Candidate |
 | :--: | :--: |
 | ![GT iso](./metrics/illustrations/example_3_topology/gt_iso.png) | ![Candidate iso](./metrics/illustrations/example_3_topology/candidate_iso.png) |
 
-| Component | Value | Notes |
-| --- | --- | --- |
-| Validity | ✅ valid, watertight | gate passes |
-| `shape_similarity_score` | `0.432` | pc-F1 0.499, vol-IoU 0.364 |
-| `topology_match` | **`0.626`** | $s_0 = 1.000$ ($b_0 = 1$ match), $s_1 = 0.545$ ($b_1 = 5$ vs GT $10$ → $6/11$), $s_2 = 0.333$ ($b_2 = 2$ vs GT $0$ → $1/3$) |
-| **`cad_score`** | **`0.497`** | $(0.4 \cdot 0.432 + 0.2 \cdot 0.626) / 0.6$ (no interface axis) |
+`topology_match = 0.70` is what flags the broken solid; on this editing fixture (shape renormalized against the no-op) it lands at **`cad_score = 0.44`**.
 
 ---
 
@@ -287,17 +263,3 @@ The candidate captures the silhouette of the fixture (cylindrical flange + centr
 Two parts of the pipeline operate on tessellated meshes rather than the BREP directly: the Boolean operations behind volume IoU and interface IoU (run on [`manifold3d`](https://github.com/elalish/manifold)), and the Betti-number computation behind topology match. Mesh-derived results are independent of the modeller's face decomposition: the same physical part authored two different ways gives the same numbers.
 
 The trade-off is **tessellation residue**: a candidate that is geometrically identical to the GT but independently tessellated typically leaves a 0.1 to 1 % volume difference, which would drop IoU below 1.0 even for perfect candidates. Per-sub-volume IoU is therefore saturated to 1.0 above 0.99. Authoring-equivalent perfect candidates still score 1.0; real geometric errors drop IoU well below 0.99 and are unaffected. Betti is integer-valued and has no analogous noise.
-
----
-
-## Code pointers
-
-- Orchestrator: [`src/cadgenbench/eval/evaluate.py`](../src/cadgenbench/eval/evaluate.py) (`_cad_score`)
-- Per-metric implementations:
-  - [`cad_validity.py`](../src/cadgenbench/common/validity.py)
-  - [`shape_similarity.py`](../src/cadgenbench/eval/shape_similarity.py)
-  - [`topo_match.py`](../src/cadgenbench/eval/topo_match.py)
-  - [`interface_match.py`](../src/cadgenbench/eval/interface_match.py)
-- Geometry utilities: [`alignment.py`](../src/cadgenbench/eval/alignment.py), [`measurements.py`](../src/cadgenbench/common/measurements.py), [`sampling.py`](../src/cadgenbench/eval/sampling.py), [`mesh.py`](../src/cadgenbench/common/mesh.py)
-- Headless renderer: [`src/cadgenbench/common/viewer.py`](../src/cadgenbench/common/viewer.py)
-- Entry points: `cadgenbench baseline run` ([`src/cadgenbench/baseline/_cli.py`](../src/cadgenbench/baseline/_cli.py)) and `cadgenbench evaluate` ([`src/cadgenbench/eval/_cli.py`](../src/cadgenbench/eval/_cli.py))

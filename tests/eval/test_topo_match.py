@@ -147,7 +147,7 @@ class TestTopoMatchMismatch:
         assert r.per_axis_scores["b0"] == pytest.approx(1.0)
         assert r.per_axis_scores["b1"] == pytest.approx(expected_b1)
         assert r.per_axis_scores["b2"] == pytest.approx(1.0)
-        assert r.score == pytest.approx((2.0 + expected_b1) / 3.0)
+        assert r.score == pytest.approx(expected_b1)
 
     def test_box_vs_two_cubes(self, tmp_steps: dict[str, Path]) -> None:
         # (1, 0, 0) vs (2, 0, 0): only b0 differs (2/3).
@@ -156,7 +156,7 @@ class TestTopoMatchMismatch:
         assert r.per_axis_scores["b0"] == pytest.approx(expected_b0)
         assert r.per_axis_scores["b1"] == pytest.approx(1.0)
         assert r.per_axis_scores["b2"] == pytest.approx(1.0)
-        assert r.score == pytest.approx((2.0 + expected_b0) / 3.0)
+        assert r.score == pytest.approx(expected_b0)
 
     def test_box_vs_hollow_ball(self, tmp_steps: dict[str, Path]) -> None:
         # (1, 0, 0) vs (1, 0, 1): only b2 differs (1/2).
@@ -165,7 +165,7 @@ class TestTopoMatchMismatch:
         assert r.per_axis_scores["b0"] == pytest.approx(1.0)
         assert r.per_axis_scores["b1"] == pytest.approx(1.0)
         assert r.per_axis_scores["b2"] == pytest.approx(expected_b2)
-        assert r.score == pytest.approx((2.0 + expected_b2) / 3.0)
+        assert r.score == pytest.approx(expected_b2)
 
 
 class TestTopoMatchScoreFn:
@@ -188,8 +188,8 @@ class TestTopoMatchScoreFn:
         assert m == pytest.approx({"b0": 1.0, "b1": 1.0, "b2": 1.0})
 
     def test_all_differ(self) -> None:
-        # (2, 1, 1) vs (1, 0, 0): every axis drifts but the score is the
-        # mean of three fuzzy log-ratios, never zero.
+        # (2, 1, 1) vs (1, 0, 0): every axis drifts; the score is the
+        # product of three fuzzy log-ratios, never zero (no axis is exact).
         score, m = topo_match_score(self._mk(2, 1, 1), self._mk(1, 0, 0))
         expected = {
             "b0": _expected_axis_score(2, 1),
@@ -197,26 +197,31 @@ class TestTopoMatchScoreFn:
             "b2": _expected_axis_score(1, 0),
         }
         assert m == pytest.approx(expected)
-        assert score == pytest.approx(sum(expected.values()) / 3.0)
+        assert score == pytest.approx(
+            expected["b0"] * expected["b1"] * expected["b2"],
+        )
         assert 0.0 < score < 1.0
 
     def test_one_differs(self) -> None:
-        # (1, 5, 0) vs (1, 4, 0): b1 off by one (6/5 ratio).
+        # (1, 5, 0) vs (1, 4, 0): b1 off by one (6/5 ratio). With the
+        # product aggregate the two exact axes pass through and the score
+        # equals the single non-exact axis.
         score, m = topo_match_score(self._mk(1, 5, 0), self._mk(1, 4, 0))
         expected_b1 = _expected_axis_score(5, 4)
         assert m == pytest.approx(
             {"b0": 1.0, "b1": expected_b1, "b2": 1.0},
         )
-        assert score == pytest.approx((2.0 + expected_b1) / 3.0)
+        assert score == pytest.approx(expected_b1)
 
     def test_negative_betti_scores_zero_without_crashing(self) -> None:
         # A degenerate candidate (b1 = -1 from a broken mesh) must not crash
-        # the log-ratio; its topology axis is zeroed and drags the mean down.
+        # the log-ratio; its topology axis is zeroed, which collapses the
+        # product to 0.
         score, m = topo_match_score(self._mk(1, -1, 0), self._mk(1, 1, 0))
         assert m["b1"] == 0.0
         assert m["b0"] == pytest.approx(1.0)
         assert m["b2"] == pytest.approx(1.0)
-        assert score == pytest.approx(2.0 / 3.0)
+        assert score == pytest.approx(0.0)
 
     def test_axis_score_is_symmetric(self) -> None:
         # Swapping candidate and GT must leave each per-axis score and

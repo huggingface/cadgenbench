@@ -76,13 +76,15 @@ $$
 s_i \;=\; \exp\!\Bigl(-\bigl|\log\bigl((b_i^{\text{cand}}+1)/(b_i^{\text{gt}}+1)\bigr)\bigr|\Bigr) \;\in\; [0, 1]
 $$
 
-The aggregate is the unweighted mean over the three axes:
+The aggregate is the **product** over the three axes:
 
 $$
-\text{topo\_match} \;=\; \tfrac{1}{3}\bigl(s_0 + s_1 + s_2\bigr) \;\in\; [0, 1]
+\text{topo\_match} \;=\; s_0 \cdot s_1 \cdot s_2 \;\in\; [0, 1]
 $$
 
 Each $s_i$ equals $1$ iff the candidate's Betti matches the GT's on that axis, and decays smoothly as the count drifts in either direction, equivalent for non-negative integers to $(\min(b^{\text{cand}}, b^{\text{gt}})+1) / (\max(b^{\text{cand}}, b^{\text{gt}})+1)$. The $+1$ shift keeps the ratio finite when either Betti is zero (so "1 vs 0" is $1/2$, not undefined) and prevents "off by one near zero" from collapsing to a binary fail.
+
+The product (rather than the mean) means a single badly-wrong axis collapses the aggregate toward $0$: topology is discrete, so a part that is right on two of three invariants but wrong on the third is not a topological match. Under the mean a candidate could bank a free $2/3$ just by getting the two easy axes ($b_0 = 1$, $b_2 = 0$ for most parts) right; the product removes that floor.
 
 The score is **symmetric** in candidate / GT and the same on every axis, so a one-step drift on $b_0$, $b_1$, or $b_2$ contributes the same penalty.
 

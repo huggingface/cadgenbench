@@ -278,40 +278,40 @@ class TestPoseSearch:
 # not silent drift. Values are reproducible from interface_score() with the
 # deterministic default sampler, default n_samples=32, default ±1% of GT
 # bounding-box diagonal translation budget, ±1° rotation budget, and the
-# mean-of-context-mins aggregation rule.
+# mean-of-context-mins aggregation rule applied to the per-sub-volume soft
+# pass/fail ramp (IoU >= 0.95 -> 1.0, <= 0.80 -> 0.0, linear in between).
+# The ramp pushes sloppy fits hard toward 0: a partial fit that earned
+# ~0.8 raw IoU now scores 0, while a clean pass still scores 1.0.
 _EXPECTED_SCORES = {
     ("test_1", "gt.step"):                                 1.000,
     ("test_1", "candidates/correct.step"):                 1.000,
-    # 0.809 (was 0.804): the sub-volume is now meshed once at the parent-GT
-    # deflection (the override), instead of being pre-tessellated at its own
-    # finer deflection by the validity gate and then left uncoarsened by
-    # BRepMesh. This is the override working as designed.
-    ("test_1", "candidates/broken_1_small_hole.step"):     0.809,
-    ("test_1", "candidates/broken_2_offset_hole.step"):    0.348,
+    ("test_1", "candidates/broken_1_small_hole.step"):     0.063,
+    ("test_1", "candidates/broken_2_offset_hole.step"):    0.000,
     ("test_1", "candidates/broken_3_no_hole.step"):        0.000,
     ("test_2", "gt.step"):                                 1.000,
     ("test_2", "candidates/correct.step"):                 1.000,
-    ("test_2", "candidates/broken_1_wrong_spacing.step"):  0.522,
+    ("test_2", "candidates/broken_1_wrong_spacing.step"):  0.000,
     ("test_2", "candidates/broken_2_missing_hole.step"):   0.000,
-    ("test_2", "candidates/broken_3_wrong_diameter.step"): 0.640,
+    ("test_2", "candidates/broken_3_wrong_diameter.step"): 0.000,
     ("test_3", "gt.step"):                                 1.000,
     ("test_3", "candidates/correct.step"):                 1.000,
-    ("test_3", "candidates/broken_1_cylinder_boss.step"):  0.860,
-    ("test_3", "candidates/broken_2_rotated_boss.step"):   0.897,
-    ("test_3", "candidates/broken_3_shifted_holes.step"):  0.718,
+    ("test_3", "candidates/broken_1_cylinder_boss.step"):  0.402,
+    ("test_3", "candidates/broken_2_rotated_boss.step"):   0.644,
+    ("test_3", "candidates/broken_3_shifted_holes.step"):  0.000,
     ("test_4", "gt.step"):                                 1.000,
     ("test_4", "candidates/correct.step"):                 1.000,
-    ("test_4", "candidates/broken_1_narrow_slot.step"):    0.923,
-    ("test_4", "candidates/broken_2_slot_offset.step"):    0.750,
+    ("test_4", "candidates/broken_1_narrow_slot.step"):    0.667,
+    ("test_4", "candidates/broken_2_slot_offset.step"):    0.667,
 }
 
 
 class TestAggregatedScore:
     """Pin the single-number aggregated score for each fixture x candidate.
 
-    interface_score() = mean over contexts of (min over the context's sub-volume IoUs),
-    with each per-sub-volume IoU itself the max over the bounded
-    deterministic pose search.
+    interface_score() = mean over contexts of (min over the context's
+    ramped sub-volume scores), with each per-sub-volume IoU itself the
+    max over the bounded deterministic pose search, then passed through
+    the soft pass/fail ramp before aggregation.
     """
 
     @pytest.mark.parametrize(

@@ -22,8 +22,8 @@ Reported shape metrics:
 - ``shape_point_cloud_f1``:
   Symmetric F1 of surface point clouds with a normal-agreement gate.
   A point counts as a hit when its nearest neighbor on the other
-  cloud is within ``1%`` of the GT bounding-box diagonal **and** the
-  two outward unit normals dot above ``0.9`` (≈25° tolerance).
+  cloud is within ``0.5%`` of the GT bounding-box diagonal **and** the
+  two outward unit normals dot above ``cos(20°) ≈ 0.94``.
 - ``shape_volume_iou``:
   Volumetric IoU of candidate and GT solids.
 - ``shape_similarity_score``:
@@ -169,23 +169,24 @@ MetricFn = Callable[[MetricContext, MetricContext], float | None]
 # ---------------------------------------------------------------------------
 
 
-POINT_CLOUD_F1_THRESHOLD_FRACTION = 0.01
+POINT_CLOUD_F1_THRESHOLD_FRACTION = 0.005
 # Normal-agreement gate on point-cloud F1 hits. A match requires the
 # candidate and GT surface normals at the matched pair to agree in
 # direction within this cosine, applied to the **absolute** dot product
 # (|dot|): we accept a point on the right surface regardless of which way
 # the facet is wound, which removes the whole orientation-sensitivity class
 # (winding-convention differences and flipped patches) that flat-facet,
-# signed-dot matching was fragile to. cos(30°) ≈ 0.866 keeps a generous
-# angular tolerance for residual smooth-normal-across-crease wobble.
+# signed-dot matching was fragile to. cos(20°) ≈ 0.940 keeps a modest
+# angular tolerance for residual smooth-normal-across-crease wobble while
+# rejecting surfaces that are only roughly co-oriented.
 # (Combined with smooth_normals=True sampling, this makes the metric
 # continuous in the triangulation.) "Right place, wrong side" is still
 # excluded upstream by the watertight + manifold + winding gate.
-POINT_CLOUD_F1_NORMAL_DOT_THRESHOLD = 0.8660254037844387  # cos(30°)
+POINT_CLOUD_F1_NORMAL_DOT_THRESHOLD = 0.9396926207859084  # cos(20°)
 
 
 def shape_point_cloud_f1(candidate: MetricContext, gt: MetricContext) -> float | None:
-    """Symmetric surface-point-cloud F1 in ``[0, 1]`` (threshold = 1% of GT bbox diag)."""
+    """Symmetric surface-point-cloud F1 in ``[0, 1]`` (threshold = 0.5% of GT bbox diag)."""
     stats = _point_cloud_f1_stats(candidate, gt)
     if stats is None:
         return None
@@ -530,7 +531,7 @@ def _point_cloud_f1_stats(
        :data:`POINT_CLOUD_F1_THRESHOLD_FRACTION` of the GT bbox diagonal.
     2. The outward normal at the source point and at the matched point
        dot above :data:`POINT_CLOUD_F1_NORMAL_DOT_THRESHOLD` (i.e. they
-       face roughly the same direction; ≈25° tolerance at 0.9).
+       face roughly the same direction; ≈20° tolerance at cos(20°)).
 
     The second gate rejects "right place, wrong side" matches (back-face
     of a thin wall, or a flipped-orientation copy of the part) that

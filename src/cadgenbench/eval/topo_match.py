@@ -43,18 +43,22 @@ consistent) is a precondition of this math; if it fails, the caller
 should have already short-circuited validity. We re-assert on entry as
 a safety net.
 
-Score: per-Betti fuzzy log-ratio in :math:`[0, 1]`, mean over the three:
+Score: per-Betti fuzzy log-ratio in :math:`[0, 1]`, **product** over the
+three:
 
 .. code-block:: text
 
     s_i        = exp(-|log((b_cand_i + 1) / (b_gt_i + 1))|)   ∈ [0, 1]
-    topo_match = (s_0 + s_1 + s_2) / 3                        ∈ [0, 1]
+    topo_match = s_0 * s_1 * s_2                              ∈ [0, 1]
 
 Each :math:`s_i` equals ``1`` iff the candidate matches the GT on
 that axis, and decays smoothly as the count drifts in either direction
 (the :math:`+1` shift makes the score well-defined when either Betti is
 zero, and keeps "off by one near zero" from being indistinguishable
-from "completely wrong").
+from "completely wrong"). The product (rather than the mean) means a
+single badly-wrong axis collapses the aggregate toward ``0``: topology
+is discrete, so "right on two of three invariants" is not a part that
+matches.
 """
 from __future__ import annotations
 
@@ -180,15 +184,16 @@ def topo_match_score(
 
     which is symmetric in candidate / GT, equals ``1`` iff the two
     counts agree, and decays smoothly to ``0`` as the ratio departs
-    from ``1``. ``score`` is the arithmetic mean over the three axes,
-    so the aggregate lives in ``[0, 1]``.
+    from ``1``. ``score`` is the product over the three axes, so the
+    aggregate lives in ``[0, 1]`` and any single badly-wrong axis
+    collapses it toward ``0``.
     """
     per_axis = {
         "b0": _per_betti_score(candidate.b0, gt.b0),
         "b1": _per_betti_score(candidate.b1, gt.b1),
         "b2": _per_betti_score(candidate.b2, gt.b2),
     }
-    score = sum(per_axis.values()) / len(per_axis)
+    score = per_axis["b0"] * per_axis["b1"] * per_axis["b2"]
     return score, per_axis
 
 

@@ -41,8 +41,8 @@ Symmetric normal-weighted Chamfer F1 over surface point clouds.
 
 50 000 points are area-weighted-sampled from each welded mesh; each sample carries the outward unit normal of its source triangle. A candidate point is a **hit** when both conditions hold:
 
-1. Nearest-neighbour distance on the GT cloud is within $\tau_{\text{pc}} = \max(10^{-6},\ 0.01 \cdot \mathrm{diag}(\mathrm{bbox}_{\text{GT}}))$, i.e. 1 % of the GT bounding-box diagonal.
-2. Outward unit normals satisfy $n_{\text{cand}} \cdot n_{\text{gt}} > 0.9$ (≈25° tolerance).
+1. Nearest-neighbour distance on the GT cloud is within $\tau_{\text{pc}} = \max(10^{-6},\ 0.005 \cdot \mathrm{diag}(\mathrm{bbox}_{\text{GT}}))$, i.e. 0.5 % of the GT bounding-box diagonal.
+2. Outward unit normals satisfy $|n_{\text{cand}} \cdot n_{\text{gt}}| > \cos(20°) \approx 0.94$.
 
 The same two-gate definition applies in the reverse direction. Then
 
@@ -56,7 +56,7 @@ $$
 
 The normal gate rejects "right place, wrong side" matches: the back face of a thin wall, a flipped-orientation candidate, or two surfaces brushing past each other through a hole. It promotes the metric from "points are nearby" to "the same surface is nearby".
 
-The 1 %-of-diagonal threshold scales naturally from a 10 mm rivet to a 1 m bracket; a fixed-mm tolerance does not.
+The 0.5 %-of-diagonal threshold scales naturally from a 10 mm rivet to a 1 m bracket; a fixed-mm tolerance does not. It is deliberately tight (half the looser 1 % we started with) so a candidate has to land close to the GT surface, not merely in its neighbourhood, before a point counts as a hit.
 
 ### Sub-metric 2: `shape_volume_iou`
 
@@ -85,7 +85,7 @@ on their mean. See [`../metrics.md`](../metrics.md) § *Editing tasks* and
 
 ## What this metric does *not* test
 
-- **Sub-threshold features.** Both sub-metrics use thresholds proportional to the GT bounding box (1 % of bbox diagonal). A $\varnothing\,3$ mm hole on a 200 mm bracket sits well below that and can be misplaced by ~1 mm without penalty. Small mating features are scored via [`interface_match.md`](./interface_match.md), where the verification region is sized to the feature, not the part.
+- **Sub-threshold features.** Both sub-metrics use thresholds proportional to the GT bounding box (0.5 % of bbox diagonal). A $\varnothing\,3$ mm hole on a 200 mm bracket sits well below that and can be misplaced without penalty. Small mating features are scored via [`interface_match.md`](./interface_match.md), where the verification region is sized to the feature, not the part.
 - **Tolerance-grade precision.** Precision and recall saturate as the candidate gets closer than the threshold. The metric measures "looks right at the scale of the part", not "hits a 50 µm spec".
 
 ## Code pointers

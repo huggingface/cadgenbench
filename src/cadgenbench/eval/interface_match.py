@@ -115,6 +115,27 @@ DEFAULT_IOU_THRESHOLD = 0.95
 # fraction of vol(R).
 SATURATION_THRESHOLD = 0.99
 
+# Soft pass/fail ramp applied to each sub-volume IoU when aggregating into
+# the single interface score (see :func:`interface_score`). A fit at or
+# above 0.95 IoU is a full pass (score 1.0); at or below 0.80 it is a clean
+# fail (score 0.0); in between it ramps linearly. The 0.80 floor sits well
+# above tessellation noise, so a genuinely good fit is never zeroed, while
+# sloppy fits are pushed hard toward 0 instead of earning ~0.85 partial
+# credit. The raw IoU is preserved unchanged in the diagnostics
+# (:func:`interface_score_iou`); only the aggregate score is ramped.
+INTERFACE_FULL_SCORE_IOU = 0.95
+INTERFACE_ZERO_SCORE_IOU = 0.80
+
+
+def _iou_to_interface_score(iou: float) -> float:
+    """Map a raw sub-volume IoU through the soft pass/fail ramp in ``[0, 1]``."""
+    if iou >= INTERFACE_FULL_SCORE_IOU:
+        return 1.0
+    if iou <= INTERFACE_ZERO_SCORE_IOU:
+        return 0.0
+    span = INTERFACE_FULL_SCORE_IOU - INTERFACE_ZERO_SCORE_IOU
+    return (iou - INTERFACE_ZERO_SCORE_IOU) / span
+
 
 # ---------------------------------------------------------------------------
 # IoU scoring
@@ -655,21 +676,26 @@ def interface_score(
 ) -> float:
     """Single-number interface-match score in [0, 1] for one candidate.
 
-    Aggregation:
+    Each sub-volume's pose-searched IoU is first mapped through a soft
+    pass/fail ramp (:func:`_iou_to_interface_score`): ``IoU >= 0.95`` →
+    ``1.0``, ``IoU <= 0.80`` → ``0.0``, linear in between. This crushes
+    sloppy fits toward 0 while keeping a noise-safe margin so a genuinely
+    good fit is never zeroed. (Raw IoU is unchanged in
+    :func:`interface_score_iou`.) Ramped scores are then aggregated:
 
     - **Within a context** (sub-volumes sharing the same ``context_id``):
-      take the ``min`` IoU. A composite interface fails if any
-      sub-feature fails -- a bracket with a broken boss does not
-      mate, regardless of how well its bolt holes match.
+      take the ``min``. A composite interface fails if any sub-feature
+      fails -- a bracket with a broken boss does not mate, regardless of
+      how well its bolt holes match.
     - **Across contexts**: take the ``mean`` of per-context scores.
       Independent interfaces contribute proportionally, so a part
       with one wrong interface among many still earns partial
       credit.
 
     For a fixture with a single context this collapses to the
-    plain min across its pose-searched sub-volumes. For a fixture
-    with N independent single-interface contexts this is the mean
-    of the N max-IoUs.
+    plain min across its pose-searched (ramped) sub-volumes. For a
+    fixture with N independent single-interface contexts this is the
+    mean of the N ramped max-IoUs.
 
     All keyword arguments are forwarded to
     :func:`best_iou_in_context` per context.
@@ -703,6 +729,8 @@ def interface_score(
             candidate_artifacts=candidate_artifacts,
             interface_artifacts=artifacts,
         )
-        per_context.append(min(per_sv.values()))
+        per_context.append(
+            min(_iou_to_interface_score(v) for v in per_sv.values()),
+        )
     return sum(per_context) / len(per_context)
 
