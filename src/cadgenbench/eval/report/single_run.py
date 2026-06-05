@@ -677,6 +677,13 @@ h2 { margin-top: 0; }
 
 .run-header { background: white; border-radius: 8px; padding: 16px 20px;
               margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+.run-header-top { display: flex; align-items: center; justify-content: space-between;
+                  gap: 16px; flex-wrap: wrap; }
+.run-header-top h1 { border-bottom: none; padding-bottom: 0; margin: 0; }
+.download-zip { background: #37474f; color: #fff; text-decoration: none;
+                padding: 8px 16px; border-radius: 6px; font-size: 0.9em;
+                font-weight: 600; white-space: nowrap; flex-shrink: 0; }
+.download-zip:hover { background: #455a64; }
 .run-meta { color: #666; font-size: 0.9em; margin-top: 4px; }
 .run-meta span { margin-right: 16px; }
 .run-stats { margin-top: 8px; font-size: 0.95em; }
@@ -945,6 +952,7 @@ def generate_html(
     render_base_url: str | None = None,
     gt_base_url: str | None = None,
     input_base_url: str | None = None,
+    download_url: str | None = None,
 ) -> str:
     """Build the single-run report HTML.
 
@@ -962,11 +970,16 @@ def generate_html(
         input_base_url: Optional base URL for input drawings / starting-shape
             renders. ``None`` inlines base64; set (hosted report) references
             them as ``{input_base_url}/<fixture>/...`` via the Space input proxy.
+        download_url: Optional URL of the submission's STEP zip. When set, a
+            "Download submission ZIP" button is rendered in the run header
+            (mirrors the leaderboard gallery's per-submission download). ``None``
+            (a local run with no published artifact) omits the button.
 
-    All three are display-only knobs: they only change ``<img src>`` and grant
-    no storage write access. Set together on the hosted report so every heavy
-    asset is a lazy-loaded link and the HTML stays small; left ``None`` for the
-    local report so it remains one self-contained, portable file.
+    The three ``*_base_url`` knobs are display-only: they only change
+    ``<img src>`` and grant no storage write access. Set together on the hosted
+    report so every heavy asset is a lazy-loaded link and the HTML stays small;
+    left ``None`` for the local report so it remains one self-contained,
+    portable file.
     """
     fixtures = run["fixtures"]
     timestamp = run["timestamp"]
@@ -983,9 +996,19 @@ def generate_html(
         "</head><body>",
     ]
 
-    # Run header, agnostic to who produced the candidates.
+    # Run header, agnostic to who produced the candidates. The title row is a
+    # flex container so an optional "Download submission ZIP" button sits at the
+    # top-right (mirrors the gallery's per-submission download).
     p.append('<div class="run-header">')
+    p.append('<div class="run-header-top">')
     p.append(f"<h1>Results: {html.escape(title)}</h1>")
+    if download_url:
+        href = html.escape(str(download_url), quote=True)
+        p.append(
+            f'<a class="download-zip" href="{href}" download '
+            f'rel="noopener">&#11015; Download submission ZIP</a>'
+        )
+    p.append("</div>")
     p.append(_render_run_summary_header(summary, len(fixtures)))
     p.append("</div>")
 
@@ -1069,6 +1092,15 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> None:
             "base64; set to reference as <base>/<fixture>/<relpath>."
         ),
     )
+    p.add_argument(
+        "--download-url",
+        default=None,
+        help=(
+            "Optional URL of the submission's STEP zip. When set, a 'Download "
+            "submission ZIP' button is shown in the run header (hosted report); "
+            "omit for a local report with no published artifact."
+        ),
+    )
     p.set_defaults(handler=run)
 
 
@@ -1085,6 +1117,7 @@ def run(args: argparse.Namespace) -> int:
         render_base_url=args.render_base_url,
         gt_base_url=args.gt_base_url,
         input_base_url=args.input_base_url,
+        download_url=args.download_url,
     )
     out_path = args.output or Path(f"results_{run_data['timestamp']}.html")
     out_path.write_text(html_out)
