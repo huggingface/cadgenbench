@@ -362,6 +362,16 @@ class LLMClient:
                 # OpenAI / Gemini / others: let LiteLLM translate.
                 kwargs["reasoning_effort"] = effort
 
+        if (
+            self.model.startswith("huggingface/")
+            and "api_key" not in kwargs
+            and os.environ.get("CADGENBENCH_HF_INFERENCE_TOKEN")
+        ):
+            # HF Jobs use HF_TOKEN for Hub/data access. Hugging Face Inference
+            # Providers may require a different token, so pass it explicitly to
+            # LiteLLM instead of overloading HF_TOKEN.
+            kwargs["api_key"] = os.environ["CADGENBENCH_HF_INFERENCE_TOKEN"]
+
         # Only the task input image + the last few renders ride along; older
         # per-turn renders are dropped (text kept). Bounds request size and
         # avoids provider many-image limits. Caller's list stays intact.
