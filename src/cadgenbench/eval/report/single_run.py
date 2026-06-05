@@ -63,6 +63,24 @@ def _data_uri(path: Path) -> str | None:
     return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode()}"
 
 
+def _input_src(img_path: Path, inputs_dir: Path | None, base_url: str | None) -> str | None:
+    """``<img src>`` for an input asset: a proxy URL (hosted) or base64 (local).
+
+    When *base_url* (the fixture's input root) is given, the asset is
+    referenced as ``{base_url}/<relpath>`` where ``<relpath>`` is the asset's
+    path relative to *inputs_dir* (e.g. ``input.png`` or ``renders/iso.png``),
+    so it streams lazily through the Space's input proxy instead of bloating
+    the HTML. Falls back to base64 inlining otherwise (the portable local
+    report)."""
+    if base_url and inputs_dir is not None:
+        try:
+            rel = img_path.relative_to(inputs_dir).as_posix()
+        except ValueError:
+            rel = img_path.name
+        return f"{base_url}/{rel}"
+    return _data_uri(img_path)
+
+
 def _fmt_metric(key: str, value: float) -> str:
     meta = METRIC_DISPLAY.get(key)
     if meta:
@@ -254,14 +272,23 @@ def _images_html(pngs: list[Path], *, base_url: str | None = None) -> str:
     return "\n".join(parts)
 
 
-def _render_gt_images(gt_dir: Path | None) -> str:
-    """GT views, always inlined: the ground truth is private and never
-    published to the public render bucket, so it carries no *base_url*."""
+def _render_gt_images(gt_dir: Path | None, *, base_url: str | None = None) -> str:
+    """GT views for a fixture.
+
+    Inlined as base64 by default (the portable local submitter report). When
+    *base_url* is given (the hosted report) the views are referenced as
+    ``{base_url}/renders/<view>.png`` instead — *base_url* is the fixture's GT
+    root, e.g. the Space's token-holding GT proxy ``/gt/<fixture>``, so the
+    private GT bytes are streamed lazily through the Space rather than baked
+    into the HTML. The local PNGs are still enumerated either way to know which
+    views exist and in what order.
+    """
     if not gt_dir:
         return '<p class="note">GT source not found</p>'
     renders_dir = gt_dir / "renders"
     pngs = [renders_dir / f"{v}.png" for v in VIEWS if (renders_dir / f"{v}.png").exists()]
-    return _images_html(pngs) or '<p class="note">No GT renders</p>'
+    renders_base = f"{base_url}/renders" if base_url else None
+    return _images_html(pngs, base_url=renders_base) or '<p class="note">No GT renders</p>'
 
 
 def _render_output_images(result_dir: Path, *, base_url: str | None = None) -> str:
@@ -298,14 +325,32 @@ def _render_edit_diff(result_dir: Path, *, base_url: str | None = None) -> str:
 # Fixture card
 # ---------------------------------------------------------------------------
 
-def _render_fixture_card(fix: dict, idx: int, *, render_base_url: str | None = None) -> str:
+def _render_fixture_card(
+    fix: dict,
+    idx: int,
+    *,
+    render_base_url: str | None = None,
+    gt_base_url: str | None = None,
+    input_base_url: str | None = None,
+) -> str:
     result = fix["result"]
     gt_dir = fix["gt_dir"]
     result_dir = fix["result_dir"]
-    # Per-fixture public render base for the hosted report (display only); the
-    # candidate's renders live at ``{render_base_url}/<fixture>/<file>`` in the
-    # bucket. ``None`` for a local submitter report, which inlines base64.
+    # Per-fixture base URLs for the hosted report (display only). When set, the
+    # corresponding images are referenced by URL + lazy-loaded instead of
+    # base64-inlined, so the heavy bytes stay out of the HTML and only the
+    # fixture the reader actually opens fetches them:
+    #   - candidate renders + interface overlay: public render bucket
+    #     (``{render_base_url}/<fixture>/<file>``).
+    #   - GT views + ground-truth PDF: the Space's token-holding GT proxy
+    #     (``{gt_base_url}/<fixture>/...``), because GT is private.
+    #   - input drawings / starting-shape renders: the Space's input proxy
+    #     (``{input_base_url}/<fixture>/...``).
+    # All ``None`` for a local submitter report, which inlines base64 so the
+    # file stays self-contained and portable.
     fixture_base = f"{render_base_url}/{fix['name']}" if render_base_url else None
+    gt_base = f"{gt_base_url}/{fix['name']}" if gt_base_url else None
+    input_base = f"{input_base_url}/{fix['name']}" if input_base_url else None
     gt_m = result.get("gt_metrics", {})
     cad_score = result.get("cad_score")
     headline = cad_score if cad_score is not None else gt_m.get("shape_similarity_score")
@@ -427,22 +472,24 @@ def _render_fixture_card(fix: dict, idx: int, *, render_base_url: str | None = N
         desc_text, input_imgs, input_shape_pngs, wants_shape = _load_description(gt_dir)
         if desc_text:
             p.append(f'<p class="desc">{html.escape(desc_text)}</p>')
+        inputs_dir = _inputs_dir_for(gt_dir)
         for img_path in input_imgs:
-            uri = _data_uri(img_path)
-            if uri:
-                p.append(f'<img src="{uri}" alt="input" class="input-img" loading="lazy">')
+            src = _input_src(img_path, inputs_dir, input_base)
+            if src:
+                p.append(f'<img src="{src}" alt="input" class="input-img" loading="lazy">')
         # Editing tasks: show the starting shape's canonical views
         # (same grid as GT/Output). Falls back to a note if the render
         # PNGs weren't shipped with the input fixture.
         if input_shape_pngs:
-            p.append(_images_html(input_shape_pngs))
+            shape_base = f"{input_base}/renders" if input_base else None
+            p.append(_images_html(input_shape_pngs, base_url=shape_base))
         elif wants_shape:
             p.append('<p class="note">No input renders</p>')
         gt_pdf = gt_dir / "ground_truth.pdf"
         if gt_pdf.exists():
-            uri = _data_uri(gt_pdf)
-            if uri:
-                p.append(f'<iframe src="{uri}" class="pdf-embed"></iframe>')
+            src = f"{gt_base}/ground_truth.pdf" if gt_base else _data_uri(gt_pdf)
+            if src:
+                p.append(f'<iframe src="{src}" class="pdf-embed" loading="lazy"></iframe>')
     p.append("</div>")
 
     if is_editing:
@@ -457,7 +504,7 @@ def _render_fixture_card(fix: dict, idx: int, *, render_base_url: str | None = N
     else:
         p.append('<div class="col">')
         p.append("<h3>Ground Truth</h3>")
-        p.append(_render_gt_images(gt_dir))
+        p.append(_render_gt_images(gt_dir, base_url=gt_base))
         p.append("</div>")
 
         p.append('<div class="col">')
@@ -467,11 +514,18 @@ def _render_fixture_card(fix: dict, idx: int, *, render_base_url: str | None = N
 
     p.append("</div>")  # three-col
 
-    # Interface overlay (only when fixture has sub-volumes; yellow = disagreement)
+    # Interface overlay (only when fixture has sub-volumes; yellow = disagreement).
+    # The overlay is a per-submission artifact, so on the hosted report it is
+    # referenced from the public render bucket (the eval job uploads it next to
+    # the turntable renders) rather than base64-inlined.
     overlay = result_dir / "interface_overlay.png"
     if overlay.exists():
-        uri = _data_uri(overlay)
-        if uri:
+        src = (
+            f"{fixture_base}/interface_overlay.png"
+            if fixture_base
+            else _data_uri(overlay)
+        )
+        if src:
             p.append('<div class="iface-overlay">')
             p.append(
                 "<h3>Interface overlay "
@@ -480,7 +534,7 @@ def _render_fixture_card(fix: dict, idx: int, *, render_base_url: str | None = N
                 "yellow = candidate disagreement)</span></h3>"
             )
             p.append(
-                f'<img src="{uri}" alt="interface overlay" '
+                f'<img src="{src}" alt="interface overlay" '
                 f'class="iface-overlay-img" loading="lazy">'
             )
             p.append("</div>")
@@ -885,21 +939,34 @@ def _render_run_summary_header(summary: dict, n_fixtures_fallback: int) -> str:
     return "\n".join(parts)
 
 
-def generate_html(run: dict, *, render_base_url: str | None = None) -> str:
+def generate_html(
+    run: dict,
+    *,
+    render_base_url: str | None = None,
+    gt_base_url: str | None = None,
+    input_base_url: str | None = None,
+) -> str:
     """Build the single-run report HTML.
 
     Args:
         run: The discovered run (see :func:`discover_run`).
-        render_base_url: Optional public base URL for the candidate renders. When
-            ``None`` (a submitter running ``cadgenbench report single`` locally),
-            every render is inlined as a base64 data URI so the report is one
-            self-contained, portable file. When set (the hosted leaderboard),
-            the candidate's renders are referenced as
-            ``{render_base_url}/<fixture>/<file>`` from the public render bucket,
-            so the large WebP/PNG bytes stay in object storage instead of
-            bloating the HTML. GT and input views are always inlined (the GT is
-            private and never published to the bucket). This is a display-only
-            knob: it changes ``<img src>`` and grants no storage write access.
+        render_base_url: Optional public base URL for the candidate renders and
+            interface overlay. When ``None`` (a submitter running ``cadgenbench
+            report single`` locally), these are inlined as base64. When set (the
+            hosted leaderboard), they are referenced as
+            ``{render_base_url}/<fixture>/<file>`` from the public render bucket.
+        gt_base_url: Optional base URL for the ground-truth views + PDF. When
+            ``None`` they are base64-inlined. When set (hosted report) they are
+            referenced as ``{gt_base_url}/<fixture>/...`` — GT is private, so
+            this points at the Space's token-holding GT proxy.
+        input_base_url: Optional base URL for input drawings / starting-shape
+            renders. ``None`` inlines base64; set (hosted report) references
+            them as ``{input_base_url}/<fixture>/...`` via the Space input proxy.
+
+    All three are display-only knobs: they only change ``<img src>`` and grant
+    no storage write access. Set together on the hosted report so every heavy
+    asset is a lazy-loaded link and the HTML stays small; left ``None`` for the
+    local report so it remains one self-contained, portable file.
     """
     fixtures = run["fixtures"]
     timestamp = run["timestamp"]
@@ -952,7 +1019,12 @@ def generate_html(run: dict, *, render_base_url: str | None = None) -> str:
     )
     p.append("</div>")
     for i, fix in enumerate(fixtures):
-        p.append(_render_fixture_card(fix, i, render_base_url=render_base_url))
+        p.append(_render_fixture_card(
+            fix, i,
+            render_base_url=render_base_url,
+            gt_base_url=gt_base_url,
+            input_base_url=input_base_url,
+        ))
     p.append("</div>")
 
     p.append(f"<script>window._fixtureNames = {fixture_names_js};\n{JS}</script>")
@@ -973,10 +1045,28 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> None:
         "--render-base-url",
         default=None,
         help=(
-            "Optional public base URL for the candidate renders. Omit (default) "
-            "to inline every render as base64 for a self-contained report; set "
-            "it (hosted leaderboard) to reference candidate renders as "
-            "<base>/<fixture>/<file>. GT/input stay inlined."
+            "Optional public base URL for the candidate renders + interface "
+            "overlay. Omit (default) to inline as base64 for a self-contained "
+            "report; set it (hosted leaderboard) to reference them as "
+            "<base>/<fixture>/<file>."
+        ),
+    )
+    p.add_argument(
+        "--gt-base-url",
+        default=None,
+        help=(
+            "Optional base URL for the ground-truth views + PDF (e.g. the "
+            "Space GT proxy '/gt'). Omit to inline base64; set to reference "
+            "as <base>/<fixture>/renders/<view>.png."
+        ),
+    )
+    p.add_argument(
+        "--input-base-url",
+        default=None,
+        help=(
+            "Optional base URL for input drawings / starting-shape renders "
+            "(e.g. the Space input proxy '/task-input'). Omit to inline "
+            "base64; set to reference as <base>/<fixture>/<relpath>."
         ),
     )
     p.set_defaults(handler=run)
@@ -990,7 +1080,12 @@ def run(args: argparse.Namespace) -> int:
         print(f"No fixtures found in {args.run_dir}")
         return 1
 
-    html_out = generate_html(run_data, render_base_url=args.render_base_url)
+    html_out = generate_html(
+        run_data,
+        render_base_url=args.render_base_url,
+        gt_base_url=args.gt_base_url,
+        input_base_url=args.input_base_url,
+    )
     out_path = args.output or Path(f"results_{run_data['timestamp']}.html")
     out_path.write_text(html_out)
     print(
