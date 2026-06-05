@@ -153,9 +153,23 @@ def run(args: argparse.Namespace) -> int:
     # access (it lives only on the leaderboard Space), so a missing GT repo is
     # not an error -- we just skip scoring. Maintainers who set
     # $CADGENBENCH_DATA_GT_REPO still get the scored summary.
+    #
+    # "Not accessible" must NEVER block generation. A locally-absent GT raises
+    # FileNotFoundError, but a set-but-unreadable $CADGENBENCH_DATA_GT_REPO
+    # (private repo + no token / no access -- the normal case for anyone who
+    # isn't a maintainer) raises a huggingface_hub error instead. Degrade to
+    # "no scoring" in both cases rather than crashing the whole run.
     try:
         data_gt_dir = _data_gt_dir()
     except FileNotFoundError:
+        data_gt_dir = None
+    except Exception as e:  # noqa: BLE001 -- optional scoring must never block generation
+        logging.getLogger(__name__).warning(
+            "Ground-truth dataset not accessible (%s: %s); skipping local "
+            "self-scoring. Generation is unaffected.",
+            type(e).__name__,
+            e,
+        )
         data_gt_dir = None
 
     output_dir = args.output_dir if args.output_dir is not None else Path.cwd() / _DEFAULT_OUTPUT_REL
