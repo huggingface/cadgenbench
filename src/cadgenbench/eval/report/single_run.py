@@ -14,12 +14,13 @@
 
 """``cadgenbench report single`` -- HTML report for one experiment run.
 
-Shows a sortable summary table and per-fixture detail cards with input,
-ground truth, output renders, metrics, and a debug panel with a per-turn
+Shows a thumbnail grid (grouped by task type, with a number search + a
+type filter) and per-fixture detail cards with input, ground truth,
+output renders, metrics, and a debug panel with a per-turn
 timeline/slider, full LLM responses, code, and execution results.
 
-Navigation: click a row to view details, j/k or arrow keys to move
-between fixtures, Escape to return to the summary table.
+Navigation: click a card to view details, j/k or arrow keys to move
+between fixtures, Escape to return to the grid.
 
 Usage::
 
@@ -38,6 +39,11 @@ from pathlib import Path
 import yaml
 
 VIEWS = ["iso", "front", "top", "right", "bottom"]
+
+# Static frame-0 still of the editing edit-diff turntable (written by the eval
+# pipeline beside ``edit_diff.webp`` and backfilled into the render bucket). Used
+# as the editing card's output thumbnail in the summary grid.
+EDIT_DIFF_STILL = "edit_diff.png"
 
 
 def _data_gt_dir() -> Path:
@@ -222,15 +228,6 @@ def discover_run(run_dir: Path) -> dict:
         "run_summary": run_summary,
         "fixtures": fixtures,
     }
-
-
-# Canonical display order for GT metrics (matches compare_results.py).
-# Headline-only: shape_similarity_score is shown next to cad_score and
-# interface in summary tables. Per-component scores (point cloud F1, volume
-# IoU, edge F1) live in the per-fixture detail card's secondary line.
-SUMMARY_METRICS = [
-    ("shape_similarity_score", "Shape Similarity", False),  # (key, label, lower_is_better)
-]
 
 
 def _quality_class(score: float | None) -> str:
@@ -611,83 +608,193 @@ def _render_fixture_card(
 # Summary table
 # ---------------------------------------------------------------------------
 
-def _render_summary_table(fixtures: list[dict]) -> str:
-    has_cad_score = any(f["result"].get("cad_score") is not None for f in fixtures)
-    present_metrics = [
-        (mk, mlabel) for mk, mlabel, _ in SUMMARY_METRICS
-        if any(f["result"].get("gt_metrics", {}).get(mk) is not None for f in fixtures)
-    ]
-    has_interface = any(
-        (f["result"].get("interface_metrics") or {}).get("score") is not None
-        for f in fixtures
-    )
-    has_topo = any(
-        (f["result"].get("topology_metrics") or {}).get("score") is not None
-        for f in fixtures
-    )
-    col_idx = 2
-    header = (
-        "<thead><tr>"
-        "<th>Sample</th>"
-        "<th>Status</th>"
-    )
-    if has_cad_score:
-        header += f'<th class="sortable" data-col="{col_idx}">CAD Score</th>'
-        col_idx += 1
-    for _, mlabel in present_metrics:
-        header += f'<th class="sortable" data-col="{col_idx}">{html.escape(mlabel)}</th>'
-        col_idx += 1
-    if has_interface:
-        header += f'<th class="sortable" data-col="{col_idx}">Interface</th>'
-        col_idx += 1
-    if has_topo:
-        header += f'<th class="sortable" data-col="{col_idx}">Topo</th>'
-        col_idx += 1
-    header += "</tr></thead><tbody>"
+def _render_src(path: Path, base_url: str | None) -> str | None:
+    """One render thumbnail src: a URL under *base_url* (hosted) or base64.
 
-    p = ['<table class="summary-table" id="summary-table">', header]
+    Mirrors the fixture-card image policy — hosted reports reference the
+    render bucket by URL (lazy-loaded), local reports inline base64 so the
+    file stays self-contained. Returns ``None`` for a local report when the
+    file is absent (the card then shows a blank half, never a broken image).
+    """
+    if base_url:
+        return f"{base_url}/{path.name}"
+    return _data_uri(path)
 
-    for i, fix in enumerate(fixtures):
-        result = fix["result"]
-        gt_m = result.get("gt_metrics", {})
-        iface_m = result.get("interface_metrics") or {}
-        topo_m = result.get("topology_metrics") or {}
-        cad = result.get("cad_score")
-        headline = cad if cad is not None else gt_m.get("shape_similarity_score")
-        row_cls = _quality_class(headline if gt_m or cad is not None else None)
-        status = result.get("status", "?")
-        status_cls = {
-            "valid": "status-valid",
-            "invalid": "status-invalid",
-            "missing": "status-missing",
-        }.get(status, "status-unknown")
 
-        row = (
-            f'<tr class="{row_cls}" onclick="showDetail({i})" style="cursor:pointer">'
-            f"<td>{html.escape(fix['name'])}</td>"
-            f'<td><span class="status-pill {status_cls}">{html.escape(status)}</span></td>'
+def _grid_half(src: str | None, label: str) -> str:
+    """One half of a card thumbnail (input or output still)."""
+    if not src:
+        return f'<span class="ghalf"><span class="giolabel">{label}</span></span>'
+    return (
+        '<span class="ghalf"><img loading="lazy" decoding="async" '
+        f'src="{html.escape(src, quote=True)}" alt="{label}" '
+        "onerror=\"this.style.visibility='hidden'\">"
+        f'<span class="giolabel">{label}</span></span>'
+    )
+
+
+def _grid_card(
+    fix: dict,
+    idx: int,
+    *,
+    render_base_url: str | None,
+    input_base_url: str | None,
+) -> tuple[str, bool]:
+    """One grid card: input still + output still + sample no. + score badge.
+
+    Returns ``(html, is_editing)`` so the caller can bucket it under the
+    right group header. The thumbnails reuse images that already exist (no
+    new renders): the input drawing / starting-shape iso render on the left,
+    and the candidate's output iso (generation) or the edit-diff still
+    ``edit_diff.png`` (editing) on the right. Clicking opens that fixture's
+    detail card via ``showDetail(idx)``.
+    """
+    result = fix["result"]
+    name = fix["name"]
+    gt_dir = fix["gt_dir"]
+    result_dir = fix["result_dir"]
+    fixture_base = f"{render_base_url}/{name}" if render_base_url else None
+    input_base = f"{input_base_url}/{name}" if input_base_url else None
+
+    image_files: list[Path] = []
+    shape_pngs: list[Path] = []
+    wants_shape = False
+    inputs_dir: Path | None = None
+    if gt_dir:
+        _text, image_files, shape_pngs, wants_shape = _load_description(gt_dir)
+        inputs_dir = _inputs_dir_for(gt_dir)
+    is_editing = wants_shape
+
+    # Input still: editing -> starting-shape iso render; generation -> drawing.
+    in_src: str | None = None
+    if is_editing and shape_pngs:
+        iso = next((p for p in shape_pngs if p.stem == "iso"), shape_pngs[0])
+        in_src = f"{input_base}/renders/{iso.name}" if input_base else _data_uri(iso)
+    elif image_files:
+        in_src = _input_src(image_files[0], inputs_dir, input_base)
+
+    # Output still: editing -> edit-diff frame-0; generation -> output iso.
+    out_name = EDIT_DIFF_STILL if is_editing else "iso.png"
+    out_src = _render_src(result_dir / "renders" / out_name, fixture_base)
+
+    card = grid_card_html(
+        idx=idx,
+        name=name,
+        is_editing=is_editing,
+        status=result.get("status", "?"),
+        cad=result.get("cad_score"),
+        in_src=in_src,
+        out_src=out_src,
+    )
+    return card, is_editing
+
+
+def grid_card_html(
+    *,
+    idx: int,
+    name: str,
+    is_editing: bool,
+    status: str,
+    cad: float | None,
+    in_src: str | None,
+    out_src: str | None,
+) -> str:
+    """Presentation-only grid card markup (no asset resolution).
+
+    Shared single source of truth for the grid card so the report
+    generator (which resolves ``in_src``/``out_src`` from local render
+    paths) and the one-time HTML backfill (which reuses the URLs already
+    in a published report) emit byte-identical cards. ``idx`` wires the
+    click to ``showDetail(idx)``.
+    """
+    status_cls = {
+        "valid": "status-valid",
+        "invalid": "status-invalid",
+        "missing": "status-missing",
+    }.get(status, "status-unknown")
+    type_cls = "editing" if is_editing else "generation"
+    badge = (
+        f'<span class="gscore {_quality_class(cad)}">'
+        f"{_fmt_metric('cad_score', cad)}</span>"
+        if cad is not None else ""
+    )
+    return (
+        f'<button class="gcard" type="button" data-idx="{idx}" '
+        f'data-type="{type_cls}" data-name="{html.escape(name, quote=True)}" '
+        f'onclick="showDetail({idx})">'
+        f'<span class="gthumb">{_grid_half(in_src, "input")}'
+        f'{_grid_half(out_src, "output")}</span>'
+        '<span class="gmeta">'
+        f'<span class="gleft"><span class="gsample">{html.escape(name)}</span>'
+        f'<span class="status-pill {status_cls}">{html.escape(status)}</span></span>'
+        f'<span class="gright"><span class="gtype {type_cls}">{type_cls}</span>'
+        f"{badge}</span>"
+        "</span>"
+        "</button>"
+    )
+
+
+def _render_grid_controls() -> str:
+    """Search box + All/Generation/Editing segmented type filter."""
+    return (
+        '<div class="gcontrols">'
+        '<div class="gsearch"><span class="gmag">&#8981;</span>'
+        '<input type="text" id="grid-search" autocomplete="off" '
+        'placeholder="Search samples by number\u2026"></div>'
+        '<div class="gseg" id="grid-seg">'
+        '<button type="button" class="on" data-type="all">All</button>'
+        '<button type="button" data-type="generation">Generation</button>'
+        '<button type="button" data-type="editing">Editing</button>'
+        "</div>"
+        '<span class="gcount-note" id="grid-count-note"></span>'
+        "</div>"
+    )
+
+
+def _render_summary_grid(
+    fixtures: list[dict],
+    *,
+    render_base_url: str | None,
+    input_base_url: str | None,
+) -> str:
+    """Grouped thumbnail grid (Generation, then Editing) for the summary view."""
+    gen_cards: list[str] = []
+    edit_cards: list[str] = []
+    for idx, fix in enumerate(fixtures):
+        card, is_editing = _grid_card(
+            fix, idx,
+            render_base_url=render_base_url, input_base_url=input_base_url,
         )
-        if has_cad_score:
-            v = cad
-            display = _fmt_metric("cad_score", v) if v is not None else "-"
-            row += f'<td data-v="{v if v is not None else -1}"><b>{display}</b></td>'
-        for mk, _ in present_metrics:
-            v = gt_m.get(mk)
-            display = _fmt_metric(mk, v) if v is not None else "-"
-            row += f'<td data-v="{v if v is not None else -1}">{display}</td>'
-        if has_interface:
-            v = iface_m.get("score")
-            display = f"{v:.3f}" if v is not None else "-"
-            row += f'<td data-v="{v if v is not None else -1}">{display}</td>'
-        if has_topo:
-            v = topo_m.get("score")
-            display = f"{v:.3f}" if v is not None else "-"
-            row += f'<td data-v="{v if v is not None else -1}">{display}</td>'
-        row += "</tr>"
-        p.append(row)
+        (edit_cards if is_editing else gen_cards).append(card)
+    return render_grid_groups(gen_cards, edit_cards)
 
-    p.append("</tbody></table>")
-    return "\n".join(p)
+
+def render_grid_groups(gen_cards: list[str], edit_cards: list[str]) -> str:
+    """Wrap pre-built cards into the grouped ``#groups`` grid.
+
+    Shared by the generator and the HTML backfill so both lay out the
+    Generation / Editing sections, count badges and empty-state
+    identically.
+    """
+    out = ['<div id="groups">']
+    for key, label, cls, cards in (
+        ("generation", "Generation", "gen", gen_cards),
+        ("editing", "Editing", "edit", edit_cards),
+    ):
+        if not cards:
+            continue
+        out.append(
+            f'<section class="ggroup" data-group="{key}">'
+            f'<div class="ghead {cls}"><span>{label}</span> '
+            f'<span class="gcount" data-count-for="{key}">{len(cards)}</span></div>'
+            f'<div class="ggrid">{"".join(cards)}</div></section>'
+        )
+    out.append(
+        '<div class="gempty" id="grid-empty" style="display:none">'
+        "No samples match your search.</div>"
+    )
+    out.append("</div>")
+    return "\n".join(out)
 
 
 # ---------------------------------------------------------------------------
@@ -722,17 +829,6 @@ h2 { margin-top: 0; }
 .run-meta span { margin-right: 16px; }
 .run-stats { margin-top: 8px; font-size: 0.95em; }
 .run-stats span { margin-right: 20px; font-weight: 500; }
-
-.summary-table { width: 100%; border-collapse: collapse; background: white;
-                 border-radius: 8px; overflow: hidden;
-                 box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-.summary-table th { background: #37474f; color: white; padding: 10px 12px;
-                    text-align: left; font-size: 0.85em; text-transform: uppercase;
-                    letter-spacing: 0.05em; }
-.summary-table th.sortable { cursor: pointer; }
-.summary-table th.sortable:hover { background: #455a64; }
-.summary-table td { padding: 8px 12px; border-bottom: 1px solid #eee; font-size: 0.9em; }
-.summary-table tr:hover { filter: brightness(0.97); }
 
 .nav-bar { display: flex; align-items: center; gap: 12px; padding: 12px 16px;
            background: white; border-radius: 8px; margin-bottom: 16px;
@@ -846,6 +942,66 @@ h2 { margin-top: 0; }
                         text-decoration: underline; }
 """
 
+# Summary-grid styles. Kept as a standalone constant (appended to CSS in the
+# generator) so the one-time HTML backfill can inject the identical styles into
+# already-published reports.
+_GRID_CSS = """\
+/* Summary grid (replaces the flat table): grouped cards, each with an
+   input + output still, sample number, status pill and CAD-score badge. */
+.grid-help { color: #888; font-size: 0.85em; }
+.gtint { padding: 1px 6px; border-radius: 4px; }
+.gtint.q-high { background: #e8f5e9; } .gtint.q-mid { background: #fff9c4; }
+.gtint.q-low { background: #ffebee; }
+.gcontrols { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 12px 0; }
+.gsearch { flex: 1; min-width: 240px; position: relative; }
+.gsearch input { width: 100%; padding: 11px 14px 11px 36px; border: 1px solid #d2d5dd;
+                 border-radius: 11px; font-family: inherit; font-size: 14.5px; background: #fff;
+                 outline: none; }
+.gsearch input:focus { border-color: #4338ca; box-shadow: 0 0 0 3px #eef0ff; }
+.gsearch .gmag { position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+                 color: #9aa0ad; }
+.gseg { display: flex; gap: 4px; background: #fff; border: 1px solid #d2d5dd; border-radius: 11px;
+        padding: 4px; }
+.gseg button { font-family: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer;
+               border: none; background: none; color: #5b6170; padding: 7px 14px; border-radius: 8px; }
+.gseg button.on { background: #4338ca; color: #fff; }
+.gcount-note { font-size: 13px; color: #9aa0ad; margin-left: auto; }
+.ghead { display: flex; align-items: center; gap: 10px; margin: 24px 0 12px; font-size: 13px;
+         font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+.ghead.gen { color: #1565c0; } .ghead.edit { color: #6a1b9a; }
+.ghead .gcount { font-family: monospace; font-size: 11px; padding: 3px 9px; border-radius: 999px; }
+.ghead.gen .gcount { background: #e3f2fd; } .ghead.edit .gcount { background: #f3e5f5; }
+.ggrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 16px; }
+.gcard { background: #fff; border: 1px solid #e3e5ea; border-radius: 12px; overflow: hidden;
+         cursor: pointer; padding: 0; font-family: inherit; text-align: left;
+         transition: transform .14s ease, box-shadow .14s ease, border-color .14s ease; }
+.gcard:hover { transform: translateY(-3px); box-shadow: 0 10px 26px rgba(20,22,28,.13);
+               border-color: #4338ca; }
+.gthumb { display: flex; width: 100%; aspect-ratio: 2 / 1; background: #eceef2;
+          border-bottom: 1px solid #e3e5ea; }
+.ghalf { position: relative; flex: 1; min-width: 0; overflow: hidden; border-right: 1px solid #e3e5ea; }
+.ghalf:last-child { border-right: none; }
+.ghalf img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.giolabel { position: absolute; left: 6px; top: 6px; font-family: monospace; font-size: 8.5px;
+            font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: #5b6170;
+            background: rgba(255,255,255,.82); padding: 2px 6px; border-radius: 5px; }
+.gmeta { padding: 10px 12px; display: flex; align-items: center; justify-content: space-between;
+         gap: 8px; }
+.gleft, .gright { display: flex; align-items: center; gap: 7px; }
+.gsample { font-family: monospace; font-weight: 700; font-size: 15px; }
+.gtype { font-family: monospace; font-size: 8.5px; font-weight: 700; text-transform: uppercase;
+         letter-spacing: .03em; padding: 2px 7px; border-radius: 6px; }
+.gtype.generation { color: #1565c0; background: #e3f2fd; }
+.gtype.editing { color: #6a1b9a; background: #f3e5f5; }
+.gscore { font-family: monospace; font-weight: 700; font-size: 13px; padding: 2px 8px;
+          border-radius: 6px; }
+.gscore.q-high { background: #e8f5e9; color: #2e7d32; }
+.gscore.q-mid { background: #fff9c4; color: #9e7700; }
+.gscore.q-low { background: #ffebee; color: #c62828; }
+.gscore.q-none { background: #f5f5f5; color: #777; }
+.gempty { padding: 50px; text-align: center; color: #9aa0ad; }
+"""
+
 # ---------------------------------------------------------------------------
 # JavaScript
 # ---------------------------------------------------------------------------
@@ -891,23 +1047,6 @@ document.addEventListener('keydown', function(e) {
   }
 });
 
-document.querySelectorAll('.sortable').forEach(function(th) {
-  th.addEventListener('click', function() {
-    const col = parseInt(this.dataset.col);
-    const table = document.getElementById('summary-table');
-    const tbody = table.querySelector('tbody');
-    const rows = Array.from(tbody.querySelectorAll('tr'));
-    const asc = this.dataset.dir !== 'asc';
-    this.dataset.dir = asc ? 'asc' : 'desc';
-    rows.sort(function(a, b) {
-      const va = parseFloat(a.children[col].dataset.v || 0);
-      const vb = parseFloat(b.children[col].dataset.v || 0);
-      return asc ? va - vb : vb - va;
-    });
-    rows.forEach(function(r) { tbody.appendChild(r); });
-  });
-});
-
 // Deep-link: opening the report at `#fixture=<name>` (or `#idx=<n>`)
 // jumps straight to that fixture's detail card instead of the summary
 // view. The leaderboard gallery links thumbnails this way so a click
@@ -928,6 +1067,59 @@ function openHashTarget() {
 }
 openHashTarget();
 window.addEventListener('hashchange', openHashTarget);
+"""
+
+# Summary-grid filtering. Standalone (appended after JS in the generator) so the
+# HTML backfill can inject the identical behavior into published reports. Reads
+# showDetail/showSummary from the main JS above; runs as an IIFE after the DOM.
+_GRID_JS = """\
+// Summary-grid filtering: the segmented control filters by type, the search
+// box filters by sample number. Group counts + visibility and the empty-state
+// stay in sync; cards stay rendered (so showDetail indices are stable) and are
+// just shown/hidden.
+(function gridFilter() {
+  let query = '', typeFilter = 'all';
+  const total = document.querySelectorAll('.gcard').length;
+  if (!total) return;
+
+  function apply() {
+    const q = query.trim().toLowerCase();
+    let shown = 0;
+    document.querySelectorAll('#groups .ggroup').forEach(function(g) {
+      const key = g.dataset.group;
+      let vis = 0;
+      g.querySelectorAll('.gcard').forEach(function(c) {
+        const ok = (typeFilter === 'all' || c.dataset.type === typeFilter) &&
+                   (!q || c.dataset.name.toLowerCase().includes(q));
+        c.style.display = ok ? '' : 'none';
+        if (ok) vis++;
+      });
+      g.style.display = vis ? '' : 'none';
+      const badge = g.querySelector('[data-count-for="' + key + '"]');
+      if (badge) badge.textContent = vis;
+      shown += vis;
+    });
+    const empty = document.getElementById('grid-empty');
+    if (empty) empty.style.display = shown ? 'none' : '';
+    const note = document.getElementById('grid-count-note');
+    if (note) note.textContent = shown + ' of ' + total + ' shown';
+  }
+
+  const search = document.getElementById('grid-search');
+  if (search) search.addEventListener('input', function(e) {
+    query = e.target.value; apply();
+  });
+  const seg = document.getElementById('grid-seg');
+  if (seg) seg.querySelectorAll('button').forEach(function(b) {
+    b.addEventListener('click', function() {
+      seg.querySelectorAll('button').forEach(function(x) { x.classList.remove('on'); });
+      b.classList.add('on');
+      typeFilter = b.dataset.type;
+      apply();
+    });
+  });
+  apply();
+})();
 """
 
 
@@ -1033,7 +1225,7 @@ def generate_html(
         "<!DOCTYPE html><html><head>",
         "<meta charset='utf-8'>",
         f"<title>Results: {html.escape(title)}</title>",
-        f"<style>{CSS}</style>",
+        f"<style>{CSS}{_GRID_CSS}</style>",
         "</head><body>",
     ]
 
@@ -1053,19 +1245,26 @@ def generate_html(
     p.append(_render_run_summary_header(summary, len(fixtures)))
     p.append("</div>")
 
-    # Summary view
+    # Summary view: grouped thumbnail grid (input + output still per card)
+    # with a number search + type filter.
     p.append('<div id="summary-view">')
     p.append(
-        '<p style="color:#888;font-size:0.85em">'
-        "Click a row to view details. "
+        '<p class="grid-help">'
+        "Click a card to view details. "
         '<span class="kbd">j</span>/<span class="kbd">k</span> '
         "to navigate, "
-        '<span class="kbd">Esc</span> to return. '
-        "Row color: <span style='background:#e8f5e9;padding:1px 6px'>&ge;0.90</span> "
-        "<span style='background:#fff9c4;padding:1px 6px'>&ge;0.60</span> "
-        "<span style='background:#ffebee;padding:1px 6px'>&lt;0.60</span> shape similarity.</p>"
+        '<span class="kbd">Esc</span> to return. Each card shows the input '
+        "and the candidate output. Score tint: "
+        "<span class='gtint q-high'>&ge;0.90</span> "
+        "<span class='gtint q-mid'>&ge;0.60</span> "
+        "<span class='gtint q-low'>&lt;0.60</span> CAD score.</p>"
     )
-    p.append(_render_summary_table(fixtures))
+    p.append(_render_grid_controls())
+    p.append(_render_summary_grid(
+        fixtures,
+        render_base_url=render_base_url,
+        input_base_url=input_base_url,
+    ))
     p.append("</div>")
 
     # Detail view
@@ -1091,7 +1290,10 @@ def generate_html(
         ))
     p.append("</div>")
 
-    p.append(f"<script>window._fixtureNames = {fixture_names_js};\n{JS}</script>")
+    p.append(
+        f"<script>window._fixtureNames = {fixture_names_js};\n"
+        f"{JS}\n{_GRID_JS}</script>"
+    )
     p.append("</body></html>")
     return "\n".join(p)
 
