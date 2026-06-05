@@ -247,6 +247,39 @@ def _quality_class(score: float | None) -> str:
 # HTML rendering helpers
 # ---------------------------------------------------------------------------
 
+def _legend_html(items: list[tuple[str, str]]) -> str:
+    """Build a compact color-chip legend (``[(css_color, label), ...]``).
+
+    Shared by the interface-overlay and edit-diff headings so both read the
+    same way; each chip's color matches the corresponding render color exactly.
+    """
+    parts = ['<span class="legend">']
+    for color, label in items:
+        parts.append(
+            f'<span class="legend-chip" style="background:{color}"></span>'
+            f"{html.escape(label)}"
+        )
+    parts.append("</span>")
+    return "".join(parts)
+
+
+# Legend color chips, kept in lockstep with the render palettes so the report
+# explains exactly what the viewer sees. Interface overlay:
+# cadgenbench.eval.interface_match_viz (PART/KOR/KIR/DISAGREEMENT); edit diff:
+# cadgenbench.common.viewer (DIFF_GHOST/ADDED/REMOVED).
+_IFACE_LEGEND = [
+    ("#2e73db", "your part"),
+    ("#e64d4d", "keep-out (must stay empty)"),
+    ("#33b34d", "keep-in (must be filled)"),
+    ("#ffd900", "disagreement"),
+]
+_EDIT_DIFF_LEGEND = [
+    ("#bdc4d1", "your output"),
+    ("#2173f5", "extra material vs GT"),
+    ("#e62929", "missing material vs GT"),
+]
+
+
 def _images_html(pngs: list[Path], *, base_url: str | None = None) -> str:
     """Render a row of view thumbnails.
 
@@ -498,7 +531,10 @@ def _render_fixture_card(
         # single ghost-diff turntable that isolates what actually changed. GT
         # column is dropped entirely; the diff already carries the GT reference.
         p.append('<div class="col">')
-        p.append("<h3>Output vs ground truth (edit diff)</h3>")
+        p.append(
+            "<h3>Output vs ground truth (edit diff) "
+            f"{_legend_html(_EDIT_DIFF_LEGEND)}</h3>"
+        )
         p.append(_render_edit_diff(result_dir, base_url=fixture_base))
         p.append("</div>")
     else:
@@ -529,9 +565,7 @@ def _render_fixture_card(
             p.append('<div class="iface-overlay">')
             p.append(
                 "<h3>Interface overlay "
-                "<span class='iface-overlay-legend'>"
-                "(red = free sub-volumes, green = filled sub-volumes, "
-                "yellow = candidate disagreement)</span></h3>"
+                f"{_legend_html(_IFACE_LEGEND)}</h3>"
             )
             p.append(
                 f'<img src="{src}" alt="interface overlay" '
@@ -769,6 +803,13 @@ h2 { margin-top: 0; }
                     display: flex; align-items: baseline; gap: 10px; }
 .iface-overlay-legend { color: #888; font-size: 0.78em; font-weight: 400;
                         text-transform: none; }
+/* Color-chip legend (interface overlay + edit diff). Chip colors mirror the
+   render palettes; see _IFACE_LEGEND / _EDIT_DIFF_LEGEND. */
+.legend { color: #6b7785; font-size: 0.78em; font-weight: 400;
+          text-transform: none; letter-spacing: normal; line-height: 1.6; }
+.legend-chip { display: inline-block; width: 11px; height: 11px;
+               border-radius: 3px; vertical-align: middle;
+               margin: 0 5px 0 14px; border: 1px solid rgba(0,0,0,0.18); }
 .iface-overlay-img { max-width: 100%; border: 1px solid #ddd; border-radius: 4px;
                      display: block; }
 .meta-bar   { background: #fff8e1; }
