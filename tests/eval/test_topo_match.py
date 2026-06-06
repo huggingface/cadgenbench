@@ -28,7 +28,9 @@ from cadgenbench.eval.topo_match import (
 
 def _expected_axis_score(b_cand: int, b_gt: int) -> float:
     """Reference implementation of the fuzzy log-ratio for one Betti axis."""
-    return math.exp(-abs(math.log((b_cand + 1) / (b_gt + 1))))
+    from cadgenbench.eval.topo_match import BETTI_SHARPNESS
+
+    return math.exp(-BETTI_SHARPNESS * abs(math.log((b_cand + 1) / (b_gt + 1))))
 
 
 # ---------------------------------------------------------------------------

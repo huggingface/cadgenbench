@@ -48,8 +48,11 @@ three:
 
 .. code-block:: text
 
-    s_i        = exp(-|log((b_cand_i + 1) / (b_gt_i + 1))|)   ∈ [0, 1]
-    topo_match = s_0 * s_1 * s_2                              ∈ [0, 1]
+    s_i        = exp(-alpha * |log((b_cand_i + 1) / (b_gt_i + 1))|)   ∈ [0, 1]
+    topo_match = s_0 * s_1 * s_2                                      ∈ [0, 1]
+
+The sharpness ``alpha`` (``BETTI_SHARPNESS``, currently ``2``) steepens the
+per-axis penalty: doubling a count scores 0.36, not 0.60.
 
 Each :math:`s_i` equals ``1`` iff the candidate matches the GT on
 that axis, and decays smoothly as the count drifts in either direction
@@ -180,11 +183,11 @@ def topo_match_score(
 
     .. math::
 
-        s_i = \\exp\\!\\bigl(-\\bigl|\\log\\bigl((b_i^{\\text{cand}}+1)/(b_i^{\\text{gt}}+1)\\bigr)\\bigr|\\bigr),
+        s_i = \\exp\\!\\bigl(-\\alpha\\,\\bigl|\\log\\bigl((b_i^{\\text{cand}}+1)/(b_i^{\\text{gt}}+1)\\bigr)\\bigr|\\bigr),
 
-    which is symmetric in candidate / GT, equals ``1`` iff the two
-    counts agree, and decays smoothly to ``0`` as the ratio departs
-    from ``1``. ``score`` is the product over the three axes, so the
+    with sharpness :math:`\\alpha` = ``BETTI_SHARPNESS``. It is symmetric
+    in candidate / GT, equals ``1`` iff the two counts agree, and decays
+    smoothly to ``0`` as the ratio departs from ``1``. ``score`` is the product over the three axes, so the
     aggregate lives in ``[0, 1]`` and any single badly-wrong axis
     collapses it toward ``0``.
     """
@@ -197,13 +200,21 @@ def topo_match_score(
     return score, per_axis
 
 
+# Sharpness exponent on the per-axis fuzzy log-ratio. At ``1.0`` the score is
+# ``(min+1)/(max+1)``; raising it steepens every penalty while preserving the
+# shape (symmetric, ``1`` on a match, finite at zero). ``2.0`` is deliberately
+# strict: doubling a count (e.g. 2 -> 4 holes) scores 0.36 instead of 0.60,
+# because a wrong topological count is a real defect, not a near miss.
+BETTI_SHARPNESS = 2.0
+
+
 def _per_betti_score(b_cand: int, b_gt: int) -> float:
     """Fuzzy log-ratio score for one Betti axis, in ``[0, 1]``.
 
     The :math:`+1` shift keeps the ratio finite when either Betti is
     zero and gives "off by one near zero" graceful (rather than
     catastrophic) decay; for non-negative integers it is equivalent to
-    ``(min(b_cand, b_gt) + 1) / (max(b_cand, b_gt) + 1)``.
+    ``((min(b_cand, b_gt) + 1) / (max(b_cand, b_gt) + 1)) ** BETTI_SHARPNESS``.
 
     A negative Betti is not a real count - it means the candidate's mesh
     is degenerate (not a clean manifold). Score it ``0`` rather than feed
@@ -212,7 +223,7 @@ def _per_betti_score(b_cand: int, b_gt: int) -> float:
     """
     if b_cand < 0 or b_gt < 0:
         return 0.0
-    return math.exp(-abs(math.log((b_cand + 1) / (b_gt + 1))))
+    return math.exp(-BETTI_SHARPNESS * abs(math.log((b_cand + 1) / (b_gt + 1))))
 
 
 def topo_match(
