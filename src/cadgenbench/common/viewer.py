@@ -135,10 +135,15 @@ DIFF_GHOST_ALPHA: float = 0.16
 # "A bit of alpha" on the highlight (vs fully opaque) so where extra and missing
 # patches stack, or sit over the ghost body, both still read through.
 DIFF_HIGHLIGHT_ALPHA: float = 0.85
-# Default surface-deviation tolerance (mm): a vertex must lie more than this
-# far OUTSIDE the other solid to count as added/removed, which keeps coincident
-# surfaces and tessellation noise from lighting up.
-DIFF_TOL_MM: float = 0.5
+# Surface-deviation tolerance for the diff: a vertex must lie more than this far
+# OUTSIDE the other solid to count as added/removed, which keeps coincident
+# surfaces and tessellation noise from lighting up. Expressed as a *fraction of
+# the GT bounding-box diagonal* (resolved per fixture in :func:`mesh_diff`) so it
+# matches the shape-similarity point-cloud F1 distance gate exactly, instead of a
+# fixed millimetre value that a small edit on a large part slips under. A tiny
+# absolute floor guards against a degenerate (~0-diagonal) input.
+DIFF_TOL_FRACTION: float = 0.005  # 0.5% of the GT bbox diagonal (== shape F1 gate)
+DIFF_TOL_FLOOR_MM: float = 1e-4
 # Float the highlighted patch out along its own normals by this many mm so it
 # sits proud of the ghost shell and never z-fights the coincident base surface.
 DIFF_OFFSET_MM: float = 0.2
@@ -381,11 +386,27 @@ class MeshDiff:
     max_deviation_mm: float
 
 
+def _diff_tol_mm(gt_mesh: Mesh, tol_mm: float | None) -> float:
+    """Resolve the diff tolerance: explicit *tol_mm*, else 0.5% of the GT bbox.
+
+    The scale-relative default matches the shape-similarity F1 distance gate
+    (:data:`DIFF_TOL_FRACTION`), so the diff lights up the same deviations the
+    shape score penalises rather than slipping a small edit on a large part
+    under a fixed millimetre threshold.
+    """
+    if tol_mm is not None:
+        return tol_mm
+    lo = gt_mesh.vertices.min(axis=0)
+    hi = gt_mesh.vertices.max(axis=0)
+    diag = float(np.linalg.norm(hi - lo))
+    return max(DIFF_TOL_FLOOR_MM, DIFF_TOL_FRACTION * diag)
+
+
 def mesh_diff(
     gt_mesh: Mesh,
     candidate_mesh: Mesh,
     *,
-    tol_mm: float = DIFF_TOL_MM,
+    tol_mm: float | None = None,
 ) -> MeshDiff:
     """Classify the added / removed material between candidate and GT.
 
@@ -399,12 +420,16 @@ def mesh_diff(
         gt_mesh: Ground-truth welded mesh.
         candidate_mesh: Candidate welded mesh, aligned into the GT frame.
         tol_mm: Outward-distance threshold (mm) above which a vertex counts as
-            added / removed. Below it, coincident surfaces and tessellation
+            added / removed. ``None`` (the default) resolves it to
+            :data:`DIFF_TOL_FRACTION` of the GT bounding-box diagonal so it
+            tracks the shape-F1 distance gate; pass an explicit value to
+            override. Below the threshold, coincident surfaces and tessellation
             noise stay unflagged.
 
     Returns:
         A :class:`MeshDiff`.
     """
+    tol_mm = _diff_tol_mm(gt_mesh, tol_mm)
     s_cand = _signed_distance(candidate_mesh.vertices, gt_mesh)
     s_gt = _signed_distance(gt_mesh.vertices, candidate_mesh)
     added, frac_added = _subset_mesh(candidate_mesh, s_cand, tol_mm)
@@ -426,7 +451,7 @@ def render_mesh_diff(
     *,
     width: int = 1024,
     height: int = 768,
-    tol_mm: float = DIFF_TOL_MM,
+    tol_mm: float | None = None,
     ghost_rgb: tuple[float, float, float] = DIFF_GHOST_RGB,
 ) -> list[RenderedImage]:
     """Render the candidate as a ghost body with added/removed material lit up.
@@ -482,7 +507,7 @@ def render_mesh_diff_turntable_webp(
     height: int = 384,
     duration_ms: int = 150,
     quality: int = 68,
-    tol_mm: float = DIFF_TOL_MM,
+    tol_mm: float | None = None,
     ghost_rgb: tuple[float, float, float] = DIFF_GHOST_RGB,
 ) -> bytes:
     """Render a Z-up turntable of the edit diff as an animated WebP.
