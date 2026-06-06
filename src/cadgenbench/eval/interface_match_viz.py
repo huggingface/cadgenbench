@@ -19,30 +19,37 @@ part against each mating region the metric checks, using the *same*
 geometry the score is computed from so the picture and the number agree.
 
 Colour language (shared with the edit-diff render in
-:mod:`cadgenbench.common.viewer` -- grey = your geometry, red = wrong):
+:mod:`cadgenbench.common.viewer`): grey = your geometry, blue = matches,
+**red = extra material (too much), amber = missing material (too little)**.
 
 - the candidate part as a translucent **grey ghost** (context, so the
   region markers inside it show through),
 - the portion of each region the candidate gets **right** in translucent
   **blue** (a keep-out clearance correctly left empty, or a keep-in
   feature correctly filled),
-- the portion it gets **wrong** in **red**.
+- where the candidate has material it shouldn't, in **red** ("too much"),
+- where the candidate is missing material it should have, in **amber**
+  ("too little").
 
-"Right" / "wrong" come straight from the scorer's region split. For each
-sub-volume the metric builds ``bbox_R = R ∪ shell`` (the region plus a
-thin shell of the opposite material) and the candidate region ``C``
-inside it (``C = bbox_R \\ candidate`` for a keep-out, ``bbox_R ∩
-candidate`` for a keep-in). Then:
+The split comes straight from the scorer's geometry. For each sub-volume
+the metric builds ``bbox_R = R ∪ shell`` (the region plus a thin shell of
+the opposite material); ``shell = bbox_R \\ R``. Against the candidate
+solid ``P``:
 
-- **matched (blue)** = ``R ∩ C`` -- the region the candidate satisfied.
-- **wrong (red)**    = ``(R ∪ C) \\ (R ∩ C)`` -- everything that lowers the
-  IoU: material where a keep-out must stay clear / missing where a keep-in
-  must be filled (inside ``R``), **and** material that spills into the
-  surrounding shell, i.e. an oversize feature (outside ``R``). Using the
-  shell is what makes a "too big" feature turn red here, matching the
-  score, instead of looking all-satisfied.
+- ``KOR`` (keep-out, ``R`` must be empty, shell must be solid):
+  matched = ``R \\ P``; too-much (red) = ``R ∩ P`` (material blocking the
+  clearance); too-little (amber) = ``shell \\ P`` (plate eaten away, i.e.
+  the feature is oversize).
+- ``KIR`` (keep-in, ``R`` must be solid, shell must be empty):
+  matched = ``R ∩ P``; too-little (amber) = ``R \\ P`` (feature not
+  filled); too-much (red) = ``shell ∩ P`` (material spilling past the
+  feature, i.e. oversize).
 
-For a perfectly-fitting candidate the wrong volume is ≈ 0 and the region
+So "wrong" is split exactly the way the edit diff splits its difference,
+and the same rule reads across both: red = too much candidate material,
+amber = too little. Using the shell is what makes an oversize feature
+light up here, matching the score, instead of looking all-satisfied. For
+a perfectly-fitting candidate both wrong volumes are ≈ 0 and the region
 shows fully blue.
 
 Rendering goes through :func:`cadgenbench.common.viewer.render_mesh_overlay`,
@@ -61,7 +68,6 @@ from cadgenbench.eval.interface_match import (
     SATURATION_THRESHOLD,
     InterfaceMatchArtifacts,
     SubVolume,
-    _candidate_region_for_cache,
     discover_sub_volumes,
 )
 from cadgenbench.common.viewer import RenderedImage, render_mesh_overlay
@@ -73,11 +79,12 @@ DEFAULT_GRID_VIEWS: tuple[str, ...] = ("iso", "top", "left", "rear")
 
 # Colour scheme (rgba). Kept in lockstep with the edit-diff palette in
 # cadgenbench.common.viewer so both per-fixture reports read the same way:
-# grey ghost = your geometry, red = wrong, with blue here for the extra
-# "this region is satisfied" signal the interface check can give.
+# grey ghost = your geometry, blue = matches, red = extra material (too much),
+# amber = missing material (too little). Red/amber share the edit-diff hues.
 PART_COLOR: tuple[float, float, float, float] = (0.74, 0.77, 0.82, 0.18)   # grey ghost
 MATCHED_COLOR: tuple[float, float, float, float] = (0.13, 0.45, 0.96, 0.38)  # translucent blue
-WRONG_COLOR: tuple[float, float, float, float] = (0.90, 0.16, 0.16, 0.72)  # red
+TOO_MUCH_COLOR: tuple[float, float, float, float] = (0.90, 0.16, 0.16, 0.72)   # red
+TOO_LITTLE_COLOR: tuple[float, float, float, float] = (0.96, 0.60, 0.10, 0.72)  # amber
 
 
 def render_part_with_subvolumes(
@@ -89,15 +96,16 @@ def render_part_with_subvolumes(
     width: int = 1024,
     height: int = 768,
 ) -> list[RenderedImage]:
-    """Render *part_step* as a ghost with each region's matched/wrong split.
+    """Render *part_step* as a ghost with each region's matched / too-much /
+    too-little split.
 
     Uses the scorer's region geometry (see module docstring): per
-    sub-volume it builds the same ``bbox_R`` / candidate region ``C`` the
-    metric uses, then draws ``R ∩ C`` blue (matched) and the rest of
-    ``R ∪ C`` red (wrong). *gt_step* is required because the verification
-    shell around each region is carved out of the ground-truth solid --
-    the same shell that lets an oversize feature lower the score, and now
-    shows up red here too.
+    sub-volume it builds the same ``bbox_R = R ∪ shell`` the metric uses,
+    then draws the part the candidate satisfies blue, material it has where
+    it shouldn't red, and material it is missing amber. *gt_step* is
+    required because the verification shell around each region is carved out
+    of the ground-truth solid -- the same shell that lets an oversize
+    feature lower the score, and now shows up here too.
 
     Tessellation/Booleans reuse the metric's
     :class:`~cadgenbench.eval.interface_match.InterfaceMatchArtifacts`
@@ -109,7 +117,6 @@ def render_part_with_subvolumes(
         manifold_to_mesh,
         manifold_volume,
         subtract,
-        union,
     )
 
     part_step = Path(part_step).resolve()
@@ -126,30 +133,39 @@ def render_part_with_subvolumes(
     n_wrong = 0
     for sv in sub_volumes:
         cache = interface_artifacts.cache_for(sv)
-        region = _candidate_region_for_cache(cache, part_manifold)
-
-        matched = intersect(cache.R, region.C)
-        wrong = subtract(union(cache.R, region.C), matched)
+        shell = subtract(cache.bbox_R, cache.R)
+        if sv.fit_type == "KOR":
+            # keep-out: R must be empty, shell must be solid.
+            matched = subtract(cache.R, part_manifold)
+            too_much = intersect(cache.R, part_manifold)
+            too_little = subtract(shell, part_manifold)
+        else:  # KIR -- keep-in: R must be solid, shell must be empty.
+            matched = intersect(cache.R, part_manifold)
+            too_much = intersect(shell, part_manifold)
+            too_little = subtract(cache.R, part_manifold)
 
         # Below this the residue is tessellation noise, not a real region:
         # reuse the scorer's saturation tolerance scaled to vol(R), the same
         # "too small to draw" floor the disagreement helper uses.
         residue = (1.0 - SATURATION_THRESHOLD) * cache.vol_R
 
-        if manifold_volume(matched) > residue and not matched.is_empty():
-            meshes.append(manifold_to_mesh(matched))
-            colors.append(MATCHED_COLOR)
-
-        wrong_vol = manifold_volume(wrong)
-        if wrong_vol > residue and not wrong.is_empty():
-            meshes.append(manifold_to_mesh(wrong))
-            colors.append(WRONG_COLOR)
-            total_wrong_vol += wrong_vol
-            n_wrong += 1
+        for region_manifold, color in (
+            (matched, MATCHED_COLOR),
+            (too_much, TOO_MUCH_COLOR),
+            (too_little, TOO_LITTLE_COLOR),
+        ):
+            vol = manifold_volume(region_manifold)
+            if vol <= residue or region_manifold.is_empty():
+                continue
+            meshes.append(manifold_to_mesh(region_manifold))
+            colors.append(color)
+            if color is not MATCHED_COLOR:
+                total_wrong_vol += vol
+                n_wrong += 1
 
     if n_wrong:
         logger.info(
-            "Total interface-mismatch volume %.2f mm^3 across %d sub-volume(s)",
+            "Total interface-mismatch volume %.2f mm^3 across %d region(s)",
             total_wrong_vol, len(sub_volumes),
         )
 

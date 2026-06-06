@@ -262,15 +262,17 @@ def _legend_html(items: list[tuple[str, str]]) -> str:
 
 # Legend color chips, kept in lockstep with the render palettes so the report
 # explains exactly what the viewer sees. Both views share one language:
-# grey = your geometry, red = wrong. Interface overlay adds blue for "region
-# satisfied"; the edit diff splits "wrong" into red (too much) + amber (too
-# little). Chip hex must match the render RGB: interface overlay ->
-# cadgenbench.eval.interface_match_viz (PART/MATCHED/WRONG); edit diff ->
-# cadgenbench.common.viewer (DIFF_GHOST_RGB / DIFF_EXTRA_RGB / DIFF_MISSING_RGB).
+# grey = your geometry, blue = matches, red = extra material (too much),
+# amber = missing material (too little). The interface overlay and the edit
+# diff use the same red/amber rule. Chip hex must match the render RGB:
+# interface overlay -> cadgenbench.eval.interface_match_viz
+# (PART/MATCHED/TOO_MUCH/TOO_LITTLE); edit diff -> cadgenbench.common.viewer
+# (DIFF_GHOST_RGB / DIFF_EXTRA_RGB / DIFF_MISSING_RGB).
 _IFACE_LEGEND = [
     ("#bdc4d1", "your part"),
-    ("#2173f5", "fits correctly"),
-    ("#e62929", "doesn't fit"),
+    ("#2173f5", "fits"),
+    ("#e62929", "extra material (too much)"),
+    ("#f5991a", "missing material (too little)"),
 ]
 _EDIT_DIFF_LEGEND = [
     ("#bdc4d1", "your output"),
@@ -282,9 +284,9 @@ _EDIT_DIFF_LEGEND = [
 # self-explaining even for a reader who doesn't know the metric internals.
 _IFACE_CAPTION = (
     "Your part (grey) against each mating region the interface score checks. "
-    "Blue = satisfied (a keep-out clearance left empty, or a keep-in feature "
-    "filled). Red = a mismatch: material where it must stay clear, missing "
-    "where it must be filled, or a feature that is the wrong size."
+    "Blue = fits (a keep-out clearance left empty, or a keep-in feature "
+    "filled). Red = extra material where it should be clear; amber = missing "
+    "material where it should be filled. A wrong-size feature shows both."
 )
 _EDIT_DIFF_CAPTION = (
     "Your output (grey ghost) compared to the ground truth. The material that "
