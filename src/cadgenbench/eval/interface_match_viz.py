@@ -14,29 +14,41 @@
 
 """Visualisation helpers for the interface-match metric.
 
-Sibling to :mod:`cadgenbench.eval.interface_match`. Dev/debug aid
-that overlays a part (GT or candidate) with the metric's sub-volumes:
+Sibling to :mod:`cadgenbench.eval.interface_match`. Renders a candidate
+part against each mating region the metric checks, using the *same*
+geometry the score is computed from so the picture and the number agree.
 
-- the part (GT or candidate) in solid blue,
-- each ``__KOR`` (keep-out region) sub-volume in translucent red
-  ("candidate should be empty here"),
-- each ``__KIR`` (keep-in region) sub-volume in translucent green
-  ("candidate should be solid here"),
-- the per-sub-volume *disagreement* volume in opaque yellow.
+Colour language (shared with the edit-diff render in
+:mod:`cadgenbench.common.viewer` -- grey = your geometry, red = wrong):
 
-"Disagreement" = the part of R the candidate gets wrong:
+- the candidate part as a translucent **grey ghost** (context, so the
+  region markers inside it show through),
+- the portion of each region the candidate gets **right** in translucent
+  **blue** (a keep-out clearance correctly left empty, or a keep-in
+  feature correctly filled),
+- the portion it gets **wrong** in **red**.
 
-- For ``KOR``  R: ``R ∩ candidate_solid``  (candidate has material it shouldn't).
-- For ``KIR``  R: ``R \\ candidate_solid`` (candidate is missing material it should have).
+"Right" / "wrong" come straight from the scorer's region split. For each
+sub-volume the metric builds ``bbox_R = R ∪ shell`` (the region plus a
+thin shell of the opposite material) and the candidate region ``C``
+inside it (``C = bbox_R \\ candidate`` for a keep-out, ``bbox_R ∩
+candidate`` for a keep-in). Then:
 
-Both fire the same yellow highlight, so the eye flags any failure
-without thinking about fit_type. For ``correct.step`` the disagreement
-volume is ≈ 0 and no yellow appears.
+- **matched (blue)** = ``R ∩ C`` -- the region the candidate satisfied.
+- **wrong (red)**    = ``(R ∪ C) \\ (R ∩ C)`` -- everything that lowers the
+  IoU: material where a keep-out must stay clear / missing where a keep-in
+  must be filled (inside ``R``), **and** material that spills into the
+  surrounding shell, i.e. an oversize feature (outside ``R``). Using the
+  shell is what makes a "too big" feature turn red here, matching the
+  score, instead of looking all-satisfied.
+
+For a perfectly-fitting candidate the wrong volume is ≈ 0 and the region
+shows fully blue.
 
 Rendering goes through :func:`cadgenbench.common.viewer.render_mesh_overlay`,
-in-process via VTK; safe to call from any host. All geometry (the
-disagreement region included) is computed with the ``manifold3d`` mesh
-kernel: no OCCT Booleans on this path.
+in-process via VTK; safe to call from any host. All Booleans use the
+``manifold3d`` mesh kernel (the scorer's, reused here): no OCCT Booleans
+on this path.
 """
 from __future__ import annotations
 
@@ -47,7 +59,9 @@ from pathlib import Path
 from cadgenbench.common.mesh import Mesh
 from cadgenbench.eval.interface_match import (
     SATURATION_THRESHOLD,
+    InterfaceMatchArtifacts,
     SubVolume,
+    _candidate_region_for_cache,
     discover_sub_volumes,
 )
 from cadgenbench.common.viewer import RenderedImage, render_mesh_overlay
@@ -57,66 +71,86 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_GRID_VIEWS: tuple[str, ...] = ("iso", "top", "left", "rear")
 
-# Colour scheme (rgba).
-PART_COLOR: tuple[float, float, float, float] = (0.18, 0.45, 0.86, 1.00)   # solid blue
-KOR_COLOR: tuple[float, float, float, float] = (0.90, 0.30, 0.30, 0.40)   # translucent red
-KIR_COLOR: tuple[float, float, float, float] = (0.20, 0.70, 0.30, 0.40)   # translucent green
-DISAGREEMENT_COLOR: tuple[float, float, float, float] = (1.00, 0.85, 0.00, 1.00)  # opaque yellow
-
-
-def _color_for(sv: SubVolume) -> tuple[float, float, float, float]:
-    return KOR_COLOR if sv.fit_type == "KOR" else KIR_COLOR
+# Colour scheme (rgba). Kept in lockstep with the edit-diff palette in
+# cadgenbench.common.viewer so both per-fixture reports read the same way:
+# grey ghost = your geometry, red = wrong, with blue here for the extra
+# "this region is satisfied" signal the interface check can give.
+PART_COLOR: tuple[float, float, float, float] = (0.74, 0.77, 0.82, 0.18)   # grey ghost
+MATCHED_COLOR: tuple[float, float, float, float] = (0.13, 0.45, 0.96, 0.38)  # translucent blue
+WRONG_COLOR: tuple[float, float, float, float] = (0.90, 0.16, 0.16, 0.72)  # red
 
 
 def render_part_with_subvolumes(
     part_step: str | Path,
     sub_volumes: list[SubVolume],
     *,
+    gt_step: str | Path,
     views: tuple[str, ...] = ("iso",),
     width: int = 1024,
     height: int = 768,
 ) -> list[RenderedImage]:
-    """Render *part_step* with each sub-volume coloured by fit_type and the
-    per-sub-volume disagreement highlighted.
+    """Render *part_step* as a ghost with each region's matched/wrong split.
 
-    See module docstring for the colour scheme.
+    Uses the scorer's region geometry (see module docstring): per
+    sub-volume it builds the same ``bbox_R`` / candidate region ``C`` the
+    metric uses, then draws ``R ∩ C`` blue (matched) and the rest of
+    ``R ∪ C`` red (wrong). *gt_step* is required because the verification
+    shell around each region is carved out of the ground-truth solid --
+    the same shell that lets an oversize feature lower the score, and now
+    shows up red here too.
 
-    Tessellates the part and each sub-volume exactly once (via
-    :class:`~cadgenbench.common.artifacts.StepArtifacts`, at the part's
-    deflection so every shape shares one scale), reuses those meshes for
-    both the ``manifold3d`` disagreement Boolean and the render, and
-    draws everything through :func:`render_mesh_overlay`.
+    Tessellation/Booleans reuse the metric's
+    :class:`~cadgenbench.eval.interface_match.InterfaceMatchArtifacts`
+    caches, so candidate and GT share one scale and no work is duplicated.
     """
     from cadgenbench.common.artifacts import StepArtifacts
+    from cadgenbench.eval.booleans import (
+        intersect,
+        manifold_to_mesh,
+        manifold_volume,
+        subtract,
+        union,
+    )
 
     part_step = Path(part_step).resolve()
     part_artifacts = StepArtifacts(part_step)
     part_manifold = part_artifacts.manifold()
 
+    interface_artifacts = InterfaceMatchArtifacts(
+        gt_step=Path(gt_step), sub_volumes=sub_volumes,
+    )
+
     meshes: list[Mesh] = [part_artifacts.mesh()]
     colors: list[tuple[float, float, float, float]] = [PART_COLOR]
-    total_disagreement_vol = 0.0
-    n_disagreements = 0
+    total_wrong_vol = 0.0
+    n_wrong = 0
     for sv in sub_volumes:
-        sv_artifacts = StepArtifacts(
-            sv.path, deflection_override=part_artifacts.deflection(),
-        )
-        meshes.append(sv_artifacts.mesh())
-        colors.append(_color_for(sv))
+        cache = interface_artifacts.cache_for(sv)
+        region = _candidate_region_for_cache(cache, part_manifold)
 
-        vol, disagreement_mesh = _disagreement_mesh(
-            part_manifold, sv_artifacts.manifold(), sv.fit_type,
-        )
-        total_disagreement_vol += vol
-        if disagreement_mesh is not None:
-            meshes.append(disagreement_mesh)
-            colors.append(DISAGREEMENT_COLOR)
-            n_disagreements += 1
+        matched = intersect(cache.R, region.C)
+        wrong = subtract(union(cache.R, region.C), matched)
 
-    if n_disagreements:
+        # Below this the residue is tessellation noise, not a real region:
+        # reuse the scorer's saturation tolerance scaled to vol(R), the same
+        # "too small to draw" floor the disagreement helper uses.
+        residue = (1.0 - SATURATION_THRESHOLD) * cache.vol_R
+
+        if manifold_volume(matched) > residue and not matched.is_empty():
+            meshes.append(manifold_to_mesh(matched))
+            colors.append(MATCHED_COLOR)
+
+        wrong_vol = manifold_volume(wrong)
+        if wrong_vol > residue and not wrong.is_empty():
+            meshes.append(manifold_to_mesh(wrong))
+            colors.append(WRONG_COLOR)
+            total_wrong_vol += wrong_vol
+            n_wrong += 1
+
+    if n_wrong:
         logger.info(
-            "Total disagreement volume %.2f mm^3 across %d sub-volume(s)",
-            total_disagreement_vol, len(sub_volumes),
+            "Total interface-mismatch volume %.2f mm^3 across %d sub-volume(s)",
+            total_wrong_vol, len(sub_volumes),
         )
 
     return render_mesh_overlay(
@@ -153,15 +187,18 @@ def render_fixture(
             f"No jig_<id>__<index>__<fit>.step files found in {fixture_dir}"
         )
 
+    gt_step = fixture_dir / "gt.step"
+    if not gt_step.exists():
+        raise FileNotFoundError(f"gt.step missing in {fixture_dir}")
     if candidate is None:
-        part = fixture_dir / "gt.step"
+        part = gt_step
     else:
         part = fixture_dir / "candidates" / f"{candidate}.step"
     if not part.exists():
         raise FileNotFoundError(f"Part STEP missing: {part}")
 
     return render_part_with_subvolumes(
-        part, sub_volumes, views=views, width=width, height=height,
+        part, sub_volumes, gt_step=gt_step, views=views, width=width, height=height,
     )
 
 
@@ -306,7 +343,7 @@ def render_test_overview(
             )
 
         images = render_part_with_subvolumes(
-            cand, sub_volumes,
+            cand, sub_volumes, gt_step=test_dir / "gt.step",
             views=views, width=tile_width, height=tile_height,
         )
         for col, img in enumerate(images):

@@ -261,20 +261,38 @@ def _legend_html(items: list[tuple[str, str]]) -> str:
 
 
 # Legend color chips, kept in lockstep with the render palettes so the report
-# explains exactly what the viewer sees. Interface overlay:
-# cadgenbench.eval.interface_match_viz (PART/KOR/KIR/DISAGREEMENT); edit diff:
-# cadgenbench.common.viewer (DIFF_GHOST/ADDED/REMOVED).
+# explains exactly what the viewer sees. Both views share one language:
+# grey = your geometry, red = wrong. Interface overlay adds blue for "region
+# satisfied"; the edit diff splits "wrong" into red (too much) + amber (too
+# little). Chip hex must match the render RGB: interface overlay ->
+# cadgenbench.eval.interface_match_viz (PART/MATCHED/WRONG); edit diff ->
+# cadgenbench.common.viewer (DIFF_GHOST_RGB / DIFF_EXTRA_RGB / DIFF_MISSING_RGB).
 _IFACE_LEGEND = [
-    ("#2e73db", "your part"),
-    ("#e64d4d", "keep-out (must stay empty)"),
-    ("#33b34d", "keep-in (must be filled)"),
-    ("#ffd900", "disagreement"),
+    ("#bdc4d1", "your part"),
+    ("#2173f5", "fits correctly"),
+    ("#e62929", "doesn't fit"),
 ]
 _EDIT_DIFF_LEGEND = [
     ("#bdc4d1", "your output"),
-    ("#2173f5", "extra material vs GT"),
-    ("#e62929", "missing material vs GT"),
+    ("#e62929", "extra material (too much)"),
+    ("#f5991a", "missing material (too little)"),
 ]
+
+# One-line plain-language caption under each viz heading, so the picture is
+# self-explaining even for a reader who doesn't know the metric internals.
+_IFACE_CAPTION = (
+    "Your part (grey) against each mating region the interface score checks. "
+    "Blue = satisfied (a keep-out clearance left empty, or a keep-in feature "
+    "filled). Red = a mismatch: material where it must stay clear, missing "
+    "where it must be filled, or a feature that is the wrong size."
+)
+_EDIT_DIFF_CAPTION = (
+    "Your output (grey ghost) compared to the ground truth. The material that "
+    "differs is lit up in two warm tones (both mean \u201cwrong\u201d): red = "
+    "material you added that the ground truth does not have (too much); amber = "
+    "ground-truth material you are missing (too little). Less colour = closer "
+    "to the target."
+)
 
 
 def _images_html(pngs: list[Path], *, base_url: str | None = None) -> str:
@@ -334,10 +352,10 @@ def _render_output_images(result_dir: Path, *, base_url: str | None = None) -> s
 def _render_edit_diff(result_dir: Path, *, base_url: str | None = None) -> str:
     """Embed the editing-task diff turntable (``renders/edit_diff.webp``).
 
-    The ghost-body turntable lights up only the material that differs from GT
-    (blue = added by the output, red = present in GT but missing), which makes
-    a small or internal edit legible where the plain aligned output looks
-    identical to the ground truth. Inlined as base64 by default; when *base_url*
+    The ghost-body turntable lights up every surface that differs from GT in two
+    warm tones (red = material the output added / too much, amber = GT material
+    it is missing / too little), which makes a small or internal edit legible
+    where the plain aligned output looks identical to the ground truth. Inlined as base64 by default; when *base_url*
     is given (hosted report) it is referenced from the public render bucket
     instead, which is what keeps the WebP out of the HTML. No fallback: when the
     WebP is absent (an invalid candidate that never rendered, or a fixture
@@ -532,6 +550,7 @@ def _render_fixture_card(
             "<h3>Output vs ground truth (edit diff) "
             f"{_legend_html(_EDIT_DIFF_LEGEND)}</h3>"
         )
+        p.append(f'<p class="viz-caption">{html.escape(_EDIT_DIFF_CAPTION)}</p>')
         p.append(_render_edit_diff(result_dir, base_url=fixture_base))
         p.append("</div>")
     else:
@@ -564,6 +583,7 @@ def _render_fixture_card(
                 "<h3>Interface overlay "
                 f"{_legend_html(_IFACE_LEGEND)}</h3>"
             )
+            p.append(f'<p class="viz-caption">{html.escape(_IFACE_CAPTION)}</p>')
             p.append(
                 f'<img src="{src}" alt="interface overlay" '
                 f'class="iface-overlay-img" loading="lazy">'
@@ -906,6 +926,9 @@ h2 { margin-top: 0; }
 .legend-chip { display: inline-block; width: 11px; height: 11px;
                border-radius: 3px; vertical-align: middle;
                margin: 0 5px 0 14px; border: 1px solid rgba(0,0,0,0.18); }
+/* Plain-language caption under a viz heading (interface overlay + edit diff). */
+.viz-caption { color: #6b7785; font-size: 0.82em; line-height: 1.5;
+               margin: 2px 0 8px; max-width: 70ch; }
 .iface-overlay-img { max-width: 100%; border: 1px solid #ddd; border-radius: 4px;
                      display: block; }
 .meta-bar   { background: #fff8e1; }

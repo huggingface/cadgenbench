@@ -70,9 +70,9 @@ from cadgenbench.common.profiling import phase
 __all__ = [
     "CAMERA_PRESETS",
     "DEFAULT_VIEWS",
-    "DIFF_ADDED_RGB",
+    "DIFF_EXTRA_RGB",
     "DIFF_GHOST_RGB",
-    "DIFF_REMOVED_RGB",
+    "DIFF_MISSING_RGB",
     "MeshDiff",
     "OVERLAY_PALETTE",
     "RenderedImage",
@@ -114,13 +114,27 @@ OVERLAY_PALETTE: tuple[tuple[float, float, float, float], ...] = (
     (0.20, 0.70, 0.30, 0.60),  # translucent green
 )
 
-# Edit-diff look (see :func:`render_mesh_diff`). The body is ghosted
-# translucent so internal changes show through; added / removed material is
-# painted opaque on top. Blue = candidate surplus, red = candidate deficit.
+# Edit-diff look (see :func:`render_mesh_diff`). The candidate output is ghosted
+# translucent grey -- the neutral "your geometry" body, the same ghost the
+# interface overlay uses -- so internal changes show through. Every surface that
+# *differs* from the ground truth is painted on top in a *warm* highlight: the
+# two directions of difference are kept distinct, but both stay in the
+# "alert / wrong" family so neither reads as "correct" (an earlier blue/red split
+# coloured "added" blue, which misled viewers into reading it as good). This is
+# the standard CAD deviation-map idea (red = excess, cool = deficit) with the
+# cool/"looks-fine" end swapped for amber:
+#   - extra material the candidate added that the GT lacks  -> red  ("too much")
+#   - GT material the candidate is missing                  -> amber ("too little")
+# Red is shared with cadgenbench.eval.interface_match_viz's "wrong" colour and
+# the grey ghost is shared too, so the two per-fixture reports read as one
+# palette (grey = you, red = wrong; amber = the missing-material flavour of wrong).
 DIFF_GHOST_RGB: tuple[float, float, float] = (0.74, 0.77, 0.82)
-DIFF_REMOVED_RGB: tuple[float, float, float] = (0.90, 0.16, 0.16)  # in GT, missing from candidate
-DIFF_ADDED_RGB: tuple[float, float, float] = (0.13, 0.45, 0.96)    # in candidate, absent from GT
+DIFF_EXTRA_RGB: tuple[float, float, float] = (0.90, 0.16, 0.16)    # added by candidate (too much)
+DIFF_MISSING_RGB: tuple[float, float, float] = (0.96, 0.60, 0.10)  # missing from candidate (too little)
 DIFF_GHOST_ALPHA: float = 0.16
+# "A bit of alpha" on the highlight (vs fully opaque) so where extra and missing
+# patches stack, or sit over the ghost body, both still read through.
+DIFF_HIGHLIGHT_ALPHA: float = 0.85
 # Default surface-deviation tolerance (mm): a vertex must lie more than this
 # far OUTSIDE the other solid to count as added/removed, which keeps coincident
 # surfaces and tessellation noise from lighting up.
@@ -757,14 +771,21 @@ def _diff_shapes(
     diff: MeshDiff,
     ghost_rgb: tuple[float, float, float],
 ) -> list[tuple[pv.PolyData, tuple[float, float, float], float]]:
-    """Build the ghost-body + added/removed shape list for the diff renderers."""
+    """Build the shape list for the diff renderers: ghost body + warm differences.
+
+    The candidate is the translucent ghost; the differing material is painted on
+    top, floated proud of the shell, in two warm tones that both read as "wrong"
+    while keeping the direction legible -- red for extra material the candidate
+    added, amber for ground-truth material it is missing. See
+    :data:`DIFF_EXTRA_RGB` / :data:`DIFF_MISSING_RGB`.
+    """
     shapes: list[tuple[pv.PolyData, tuple[float, float, float], float]] = [
         (_mesh_to_polydata(candidate_mesh), ghost_rgb, DIFF_GHOST_ALPHA),
     ]
     if diff.removed is not None:
-        shapes.append((_diff_subpoly(diff.removed), DIFF_REMOVED_RGB, 1.0))
+        shapes.append((_diff_subpoly(diff.removed), DIFF_MISSING_RGB, DIFF_HIGHLIGHT_ALPHA))
     if diff.added is not None:
-        shapes.append((_diff_subpoly(diff.added), DIFF_ADDED_RGB, 1.0))
+        shapes.append((_diff_subpoly(diff.added), DIFF_EXTRA_RGB, DIFF_HIGHLIGHT_ALPHA))
     return shapes
 
 

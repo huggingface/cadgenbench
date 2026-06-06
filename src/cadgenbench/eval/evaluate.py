@@ -272,6 +272,7 @@ def evaluate_result(
         _maybe_render_interface_overlay(
             aligned_step,
             gt_dir,
+            gt_step,
             result_dir / "interface_overlay.png",
         )
 
@@ -550,9 +551,15 @@ def _validation_dict(
 def _maybe_render_interface_overlay(
     aligned_candidate_step: Path,
     fixture_dir: Path,
+    gt_step: Path,
     output_png: Path,
 ) -> None:
-    """Render an overlay PNG showing candidate vs sub-volumes (yellow = disagreement).
+    """Render an overlay PNG of the candidate vs each mating region.
+
+    Grey ghost = candidate; blue = region satisfied; red = region wrong
+    (see :mod:`cadgenbench.eval.interface_match_viz`). *gt_step* is passed
+    through to build the scorer's verification shell, so an oversize
+    feature shows red here exactly as it docks the score.
 
     Idempotent: only renders when *output_png* is older than the aligned
     candidate or missing. Renderer failures are logged but never abort
@@ -575,6 +582,7 @@ def _maybe_render_interface_overlay(
         images = render_part_with_subvolumes(
             aligned_candidate_step,
             sub_volumes,
+            gt_step=gt_step,
             views=("iso", "top", "front", "right"),
             width=512,
             height=384,
@@ -598,11 +606,11 @@ def _maybe_render_edit_diff(
     """Render the edit-diff turntable WebP (``renders/edit_diff.webp``).
 
     Editing fixtures only. Ghosts the aligned candidate translucent and lights
-    up only the material that differs from GT, classified by signed distance to
-    the other solid (blue = added by the candidate, red = present in GT but
-    missing from the candidate). This makes a small or internal edit legible
-    where a plain shaded render of a near-no-op output is indistinguishable from
-    a correct one. Reuses the welded meshes both artifacts already cache, so no
+    up every surface that differs from GT in two warm tones, classified by
+    signed distance to the other solid (red = material the candidate added /
+    too much, amber = GT material it is missing / too little). This makes a
+    small or internal edit legible where a plain shaded render of a near-no-op
+    output is indistinguishable from a correct one. Reuses the welded meshes both artifacts already cache, so no
     re-tessellation and no re-alignment happen here.
 
     Idempotent: only renders when the output is missing or older than the
