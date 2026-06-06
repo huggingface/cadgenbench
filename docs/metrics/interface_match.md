@@ -125,7 +125,7 @@ For each mating group independently:
 
    During bounded pose search, `bbox_R` stays fixed at the GT pose; only `R` is perturbed. This avoids edge-of-part artifacts where a moved `bbox_R` can create artificial free space outside the GT part.
 
-   The per-sub-volume IoU is saturated to 1.0 above a threshold of 0.99 before aggregation (rationale in the main metrics doc, [Design notes § Why mesh-based computation](../metrics.md#why-mesh-based-computation-with-iou-saturation)). The pose search returns the pose maximising the per-sub-volume IoU.
+   The per-sub-volume IoU is saturated to 1.0 above a threshold of 0.99 before aggregation. This absorbs tessellation residue: two independently meshed copies of the same solid differ by roughly 0.1 to 1 % in volume, so without the cap an authoring-equivalent perfect fit would never reach 1.0. Real geometric errors drop the IoU well below 0.99 and are unaffected. The pose search returns the pose maximising the per-sub-volume IoU.
 
 4. **Soft pass/fail ramp.** Each sub-volume's pose-searched IoU is mapped through a ramp before aggregation: $\text{IoU} \ge 0.95 \to 1.0$, $\text{IoU} \le 0.80 \to 0.0$, linear in between. A mating feature either fits within tolerance or it doesn't, so this crushes sloppy fits toward $0$ instead of letting a feature that is only ~0.85 IoU bank most of the credit. The $0.80$ floor sits comfortably above tessellation noise, so a genuinely good fit is never zeroed by accident. The raw (pre-ramp) IoU is still reported per sub-volume for diagnostics; only the aggregate score is ramped.
 

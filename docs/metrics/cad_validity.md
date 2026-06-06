@@ -1,37 +1,9 @@
 # CAD Validity (Hard Gate)
 
-Runs before every other metric; any failure zeroes `cad_score` so an invalid candidate can never beat a worse-but-valid one.
+Runs before every other metric on the raw candidate STEP. Any failure sets `is_valid = False` and forces `cad_score = 0`, with a human-readable reason. `is_valid = True` requires all of:
 
-## What we check
+1. **Well-formed BREP.** `BRepCheck_Analyzer.IsValid()` reports no per-face, per-edge, or per-vertex errors (self-intersecting wires, edges off their surface, and similar defects).
+2. **Watertight.** Every shell is closed: no naked or free edges.
+3. **Meshable as a closed orientable manifold.** Tessellation yields a triangle mesh that is manifold (every edge in at most 2 triangles), closed (every edge in exactly 2 triangles, i.e. $3F = 2E$), and orientation-consistent (each shared edge is traversed in opposite directions by its two triangles).
 
-`is_valid = True` iff all three of the following hold.
-
-### 1. BREP well-formedness
-
-`BRepCheck_Analyzer.IsValid()` (Open CASCADE) reports no per-face, per-edge, or per-vertex topology errors. Catches self-intersecting wires, edges whose curves don't lie on their underlying surfaces, and the usual classical-BREP defects. These are the failures STEP authors make most often: the part looks fine in a viewer but blows up the first time it's Boolean'd against.
-
-### 2. Watertightness
-
-Every shell is closed: no naked / free edges. A BREP that `BRepCheck_Analyzer` accepts but whose shells are open is not a solid; it cannot be 3D-printed, Boolean'd against, or topologically analysed. Surfaced in `topology_errors` as:
-
-```
-"BREP not watertight: at least one shell has open / naked edges"
-```
-
-The classical OCC check is lenient on open shells; downstream volume IoU, Betti, and interface IoU all assume a closed volume, so this gate is enforced separately.
-
-### 3. Meshable as a closed orientable manifold
-
-Tessellating the BREP with [`mesh.py`](../../src/cadgenbench/common/mesh.py) must produce a triangle mesh that is:
-
-- **Manifold**: every edge appears in $\le 2$ triangles.
-- **Closed**: every edge appears in exactly 2 triangles ($3F = 2E$ on the global mesh).
-- **Orientation-consistent**: for each shared edge $(a, b)$, the two incident triangles list it in opposite orders $(a, b)$ and $(b, a)$.
-
-Surfaced as e.g. `"mesh non-manifold: edge (220, 243) shared by 4 triangles"`. A failure here also signals a BREP defect the classical analyzer missed.
-
-## Code pointers
-
-- Metric: [`src/cadgenbench/common/validity.py`](../../src/cadgenbench/common/validity.py)
-- Mesh-pipeline gate: [`src/cadgenbench/common/mesh.py`](../../src/cadgenbench/common/mesh.py)
-- Orchestrator: [`src/cadgenbench/eval/evaluate.py`](../../src/cadgenbench/eval/evaluate.py) (`_cad_score`)
+Code: [`validity.py`](../../src/cadgenbench/common/validity.py)
