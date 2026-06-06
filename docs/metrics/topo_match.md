@@ -44,15 +44,15 @@ $$
 It is $1$ when the counts match and decays smoothly otherwise; the $+1$ shift keeps it finite when a count is zero. The aggregate is the **product** over the three axes:
 
 $$
-\text{topo\_match} \;=\; s_0 \cdot s_1 \cdot s_2 \;\in\; [0, 1]
+s_0 \cdot s_1 \cdot s_2 \;\in\; [0, 1]
 $$
 
 The product, not the mean, means one wrong axis collapses the score: topology is discrete, so getting two of three invariants right is not a partial match. Per-axis scores are saved under `topology_metrics.per_axis_scores` in `result.json`.
 
 Two examples:
 
-- **Wrong number of pieces.** GT `(1, 0, 0)`, candidate `(2, 0, 0)`: only $b_0$ differs, so $s_0 = (2/3)^2 = 0.444$ and $\text{topo\_match} = 0.444$.
-- **Wrong number of through-holes.** GT `(1, 2, 0)`, candidate `(1, 4, 0)`: only $b_1$ differs, so $s_1 = (3/5)^2 = 0.360$ and $\text{topo\_match} = 0.360$.
+- **Wrong number of pieces.** GT `(1, 0, 0)`, candidate `(2, 0, 0)`: only $b_0$ differs, so $s_0 = (2/3)^2 = 0.444$ and the topology match is `0.444`.
+- **Wrong number of through-holes.** GT `(1, 2, 0)`, candidate `(1, 4, 0)`: only $b_1$ differs, so $s_1 = (3/5)^2 = 0.360$ and the topology match is `0.360`.
 
 ## What this metric does *not* test
 
