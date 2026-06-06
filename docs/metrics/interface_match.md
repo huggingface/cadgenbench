@@ -25,9 +25,4 @@ For each group:
 
 A group scores as its **worst** feature (the minimum), and the fixture scores as the **mean** over its groups, so a part that nails one independent interface and misses another still earns partial credit.
 
-## What this metric does not test
-
-- **Functional vs spec fit.** It scores geometric match to the specified region. A 30 × 14 slot still passes a bolt meant for 30 × 12, but the IoU drops because the geometry departs from spec.
-- **Threading and fit class** (H7/g6 and similar).
-
 Code: [`interface_match.py`](../../src/cadgenbench/eval/interface_match.py)
