@@ -25,4 +25,24 @@ For each group:
 
 A group scores as its **worst** feature (the minimum), and the fixture scores as the **mean** over its groups, so a part that nails one independent interface and misses another still earns partial credit.
 
+## What a fit looks like
+
+The per-fixture report overlays the candidate (grey ghost) against each region: **blue** where it fits, **red** where the candidate has material it shouldn't (too much), and **amber** where it's missing material it should have (too little). Both region kinds use the verification shell, so a wrong-*size* feature shows up too, not just one in the wrong place.
+
+### Keep-out (KOR): a bolt-hole clearance
+
+| Fits | Doesn't fit |
+| :--: | :--: |
+| ![KOR fits](illustrations/kor_fit.png) | ![KOR fails](illustrations/kor_fail.png) |
+
+Left: the candidate keeps the clearance empty, so the region is blue. Right: the candidate left material in the clearance (hole missing or too small), so it reads red — material where there should be none. A hole drilled *too big* shows the opposite: an amber ring where it has eaten into the plate that should stay solid.
+
+### Keep-in (KIR): a locating boss
+
+| Fits | Doesn't fit |
+| :--: | :--: |
+| ![KIR fits](illustrations/kir_fit.png) | ![KIR fails](illustrations/kir_fail.png) |
+
+Left: the candidate fills the boss region, so it is blue (the four bolt-hole keep-outs around it are satisfied too). Right: the boss is oversize — a round boss where a hex is specified — so it bulges past the region into the surrounding clearance (red, too much material), while any corner of the hex it fails to fill reads amber.
+
 Code: [`interface_match.py`](../../src/cadgenbench/eval/interface_match.py)

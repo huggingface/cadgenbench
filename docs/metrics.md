@@ -159,6 +159,15 @@ wired into `_cad_score` in [`evaluate.py`](../src/cadgenbench/eval/evaluate.py);
 the raw and renormalized shape values are saved under
 `result.json["edit_metrics"]`.
 
+In the per-fixture report an editing candidate is shown as a ghost-diff
+against the ground truth, so a small or internal change is visible where
+a plain render of a near-no-op looks identical to the GT. Red marks
+material the candidate added that the GT doesn't have (too much); amber
+marks GT material the candidate is missing (too little). A no-op lights
+up as the entire edit it skipped.
+
+![Edit diff](./metrics/illustrations/example_editing/edit_diff.png)
+
 ---
 
 ## Worked examples
@@ -229,9 +238,12 @@ whole interface score to `0.00`. The result is
 | :--: | :--: |
 | ![GT iso](./metrics/illustrations/example_3_interface/gt_iso.png) | ![Candidate iso](./metrics/illustrations/example_3_interface/candidate_iso.png) |
 
-The overlay makes it concrete. Each keep-out region the spec requires to
-be empty is drawn in red. The two holes line up, but where the
-candidate's material intrudes into the slot region the disagreement
-lights up in yellow.
+The overlay makes it concrete: the candidate is the grey ghost, and each
+mating region is drawn **blue where it fits**, **red where the candidate
+has material it shouldn't** (too much), and **amber where it's missing
+material it should have** (too little). The two bolt holes are clear, so
+they read blue; the slot is shifted off its position, so the required
+opening is blocked (red) and the slot the candidate did cut sits where the
+plate should stay solid (amber).
 
 ![Interface overlay](./metrics/illustrations/example_3_interface/interface_overlay.png)
