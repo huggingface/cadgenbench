@@ -35,7 +35,7 @@ The per-fixture report overlays the candidate (grey ghost) against each region: 
 | :--: | :--: |
 | ![KOR fits](illustrations/kor_fit.png) | ![KOR fails](illustrations/kor_fail.png) |
 
-Left: the candidate keeps the clearance empty, so the region is blue. Right: the candidate left material in the clearance (hole missing or too small), so it reads red — material where there should be none. A hole drilled *too big* shows the opposite: an amber ring where it has eaten into the plate that should stay solid.
+Left: the candidate keeps the clearance empty, so the region is blue. Right: the candidate left material in the clearance (hole missing or too small), so it reads red. A hole drilled too big shows the opposite: an amber ring where it has eaten into the plate that should stay solid.
 
 ### Keep-in (KIR): a locating boss
 
@@ -43,6 +43,6 @@ Left: the candidate keeps the clearance empty, so the region is blue. Right: the
 | :--: | :--: |
 | ![KIR fits](illustrations/kir_fit.png) | ![KIR fails](illustrations/kir_fail.png) |
 
-Left: the candidate fills the boss region, so it is blue (the four bolt-hole keep-outs around it are satisfied too). Right: the boss is oversize — a round boss where a hex is specified — so it bulges past the region into the surrounding clearance (red, too much material), while any corner of the hex it fails to fill reads amber.
+Left: the candidate fills the boss region, so it is blue (the four bolt-hole keep-outs around it are satisfied too). Right: the boss is missing, so the keep-in region the candidate should fill reads amber. An oversize boss shows the opposite, red where it spills past the region into the surrounding clearance.
 
 Code: [`interface_match.py`](../../src/cadgenbench/eval/interface_match.py)

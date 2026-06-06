@@ -160,11 +160,10 @@ the raw and renormalized shape values are saved under
 `result.json["edit_metrics"]`.
 
 In the per-fixture report an editing candidate is shown as a ghost-diff
-against the ground truth, so a small or internal change is visible where
-a plain render of a near-no-op looks identical to the GT. Red marks
-material the candidate added that the GT doesn't have (too much); amber
-marks GT material the candidate is missing (too little). A no-op lights
-up as the entire edit it skipped.
+against the ground truth, which makes a small or internal change visible.
+Red marks material the candidate added that the GT doesn't have (too
+much); amber marks GT material the candidate is missing (too little). A
+no-op shows up as the whole edit it skipped.
 
 ![Edit diff](./metrics/illustrations/example_editing/edit_diff.png)
 
@@ -238,12 +237,12 @@ whole interface score to `0.00`. The result is
 | :--: | :--: |
 | ![GT iso](./metrics/illustrations/example_3_interface/gt_iso.png) | ![Candidate iso](./metrics/illustrations/example_3_interface/candidate_iso.png) |
 
-The overlay makes it concrete: the candidate is the grey ghost, and each
-mating region is drawn **blue where it fits**, **red where the candidate
-has material it shouldn't** (too much), and **amber where it's missing
-material it should have** (too little). The two bolt holes are clear, so
-they read blue; the slot is shifted off its position, so the required
-opening is blocked (red) and the slot the candidate did cut sits where the
-plate should stay solid (amber).
+In the overlay, the candidate is the grey ghost and each mating region is
+**blue where it fits**, **red where the candidate has material it
+shouldn't** (too much), and **amber where it's missing material it should
+have** (too little). The two bolt holes are clear, so they read blue. The
+slot is shifted off its position, so the required opening is blocked (red)
+and the slot the candidate did cut sits where the plate should stay solid
+(amber).
 
 ![Interface overlay](./metrics/illustrations/example_3_interface/interface_overlay.png)

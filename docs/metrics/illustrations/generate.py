@@ -51,14 +51,17 @@ def _plain_iso(step: Path, dest: Path) -> None:
     print("wrote", dest.relative_to(REPO))
 
 
-def _overlay(test: str, candidate: str, dest: Path) -> None:
-    """Interface overlay (grey ghost / blue fits / red too-much / amber too-little)."""
+def _overlay_for_part(test: str, part_step: Path, dest: Path) -> None:
+    """Interface overlay of *part_step* against *test*'s GT + sub-volumes.
+
+    Colours: grey ghost / blue fits / red too-much / amber too-little.
+    """
     from cadgenbench.eval.interface_match import discover_sub_volumes
     from cadgenbench.eval.interface_match_viz import render_part_with_subvolumes
 
     d = FIX / test
     img = render_part_with_subvolumes(
-        d / "candidates" / f"{candidate}.step",
+        part_step,
         discover_sub_volumes(d),
         gt_step=d / "gt.step",
         views=("iso",),
@@ -68,6 +71,34 @@ def _overlay(test: str, candidate: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(img.data)
     print("wrote", dest.relative_to(REPO))
+
+
+def _overlay(test: str, candidate: str, dest: Path) -> None:
+    """Overlay of a named ``candidates/<candidate>.step`` fixture."""
+    _overlay_for_part(test, FIX / test / "candidates" / f"{candidate}.step", dest)
+
+
+# L-bracket constants, mirroring tests/fixtures/jig_metric/generate.py, used to
+# author the "boss missing" KIR-fail candidate (no such fixture ships).
+_BR_FLOOR_LEN, _BR_FLOOR_W, _BR_T, _BR_WALL_H = 80.0, 60.0, 8.0, 70.0
+_BR_BOLTS = [(24.0, -15.0), (24.0, 15.0), (64.0, -15.0), (64.0, 15.0)]
+_BR_BOLT_DIA = 8.0
+
+
+def _bracket_without_boss():
+    """The test_3 bracket (floor + wall + bolt holes) with the boss left off."""
+    from build123d import Box, BuildPart, Cylinder, Locations, Mode
+
+    with BuildPart() as b:
+        with Locations((_BR_FLOOR_LEN / 2, 0.0, _BR_T / 2)):
+            Box(_BR_FLOOR_LEN, _BR_FLOOR_W, _BR_T)
+        wall_h = _BR_WALL_H - _BR_T
+        with Locations((_BR_T / 2, 0.0, _BR_T + wall_h / 2)):
+            Box(_BR_T, _BR_FLOOR_W, wall_h)
+        for hx, hy in _BR_BOLTS:
+            with Locations((hx, hy, _BR_T / 2)):
+                Cylinder(radius=_BR_BOLT_DIA / 2, height=_BR_T + 1.0, mode=Mode.SUBTRACT)
+    return b.part
 
 
 def _plate_with_boss(boss_xy: tuple[float, float]):
@@ -81,13 +112,14 @@ def _plate_with_boss(boss_xy: tuple[float, float]):
     return p.part
 
 
-def _edit_diff_small_move(dest: Path) -> None:
-    """Edit diff of a small feature moved a little: a boss nudged 6 mm.
+def _edit_diff_moved_feature(dest: Path) -> None:
+    """Edit diff of a small feature moved to a new position: a boss relocated.
 
-    GT boss at (-12, 0), candidate at (-6, 0). The move is small relative to
-    the part, so the diff is two localized crescents -- red where the moved
-    boss adds material, amber where the original boss is now missing -- which
-    reads far cleaner than a large symmetric edit.
+    GT boss at (-15, 0), candidate at (1, 0) -- moved far enough to fully clear
+    its old footprint. The diff colours only what changed, so a clean move
+    shows two whole shapes (no carved-open crescents): amber where the feature
+    used to be (now missing), red where it moved to (added). The move is still
+    small relative to the part.
     """
     from build123d import export_step
     from cadgenbench.common.artifacts import StepArtifacts
@@ -95,8 +127,8 @@ def _edit_diff_small_move(dest: Path) -> None:
 
     tmp = Path(tempfile.mkdtemp(prefix="cgb-docedit-"))
     gt_path, cand_path = tmp / "gt.step", tmp / "cand.step"
-    export_step(_plate_with_boss((-12.0, 0.0)), str(gt_path))
-    export_step(_plate_with_boss((-6.0, 0.0)), str(cand_path))
+    export_step(_plate_with_boss((-15.0, 0.0)), str(gt_path))
+    export_step(_plate_with_boss((1.0, 0.0)), str(cand_path))
 
     gt = StepArtifacts(gt_path)
     cand = StepArtifacts(cand_path, deflection_override=gt.deflection())
@@ -107,6 +139,11 @@ def _edit_diff_small_move(dest: Path) -> None:
 
 
 def main() -> None:
+    # interface_match.md concept image: the ground-truth plate with its three
+    # mating regions in blue (the regions the metric checks; the GT satisfies
+    # them, hence blue). Replaces the old blue-plate / red-regions figure.
+    _overlay("test_4", "correct", ILL / "interface_concept.png")
+
     # metrics.md Example 3: single-group plate (2 holes + central slot), slot
     # shifted. All three panels from one fixture so they stay consistent.
     ex3 = ILL / "example_3_interface"
@@ -122,10 +159,17 @@ def main() -> None:
     _overlay("test_1", "correct", ILL / "kor_fit.png")
     _overlay("test_1", "broken_3_no_hole", ILL / "kor_fail.png")
     _overlay("test_3", "correct", ILL / "kir_fit.png")
-    _overlay("test_3", "broken_1_cylinder_boss", ILL / "kir_fail.png")
+    # KIR fail = boss missing -> one clean amber hex (too little). Authored,
+    # since test_3 ships only oversize / rotated boss candidates, whose thin
+    # boolean overflow tessellates into jagged slivers.
+    from build123d import export_step
 
-    # metrics.md editing section: ghost-diff of a small feature moved a little.
-    _edit_diff_small_move(ILL / "example_editing" / "edit_diff.png")
+    noboss = Path(tempfile.mkdtemp(prefix="cgb-kir-")) / "bracket_no_boss.step"
+    export_step(_bracket_without_boss(), str(noboss))
+    _overlay_for_part("test_3", noboss, ILL / "kir_fail.png")
+
+    # metrics.md editing section: ghost-diff of a feature moved to a new spot.
+    _edit_diff_moved_feature(ILL / "example_editing" / "edit_diff.png")
 
 
 if __name__ == "__main__":
