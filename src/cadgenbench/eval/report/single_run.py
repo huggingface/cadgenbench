@@ -280,23 +280,6 @@ _EDIT_DIFF_LEGEND = [
     ("#f5991a", "missing material (too little)"),
 ]
 
-# One-line plain-language caption under each viz heading, so the picture is
-# self-explaining even for a reader who doesn't know the metric internals.
-_IFACE_CAPTION = (
-    "Your part (grey) against each mating region the interface score checks. "
-    "Blue = fits (a keep-out clearance left empty, or a keep-in feature "
-    "filled). Red = extra material where it should be clear; amber = missing "
-    "material where it should be filled. A wrong-size feature shows both."
-)
-_EDIT_DIFF_CAPTION = (
-    "Your output (grey ghost) compared to the ground truth. The material that "
-    "differs is lit up in two warm tones (both mean \u201cwrong\u201d): red = "
-    "material you added that the ground truth does not have (too much); amber = "
-    "ground-truth material you are missing (too little). Less colour = closer "
-    "to the target."
-)
-
-
 def _images_html(pngs: list[Path], *, base_url: str | None = None) -> str:
     """Render a row of view thumbnails.
 
@@ -552,7 +535,6 @@ def _render_fixture_card(
             "<h3>Output vs ground truth (edit diff) "
             f"{_legend_html(_EDIT_DIFF_LEGEND)}</h3>"
         )
-        p.append(f'<p class="viz-caption">{html.escape(_EDIT_DIFF_CAPTION)}</p>')
         p.append(_render_edit_diff(result_dir, base_url=fixture_base))
         p.append("</div>")
     else:
@@ -568,7 +550,8 @@ def _render_fixture_card(
 
     p.append("</div>")  # three-col
 
-    # Interface overlay (only when fixture has sub-volumes; yellow = disagreement).
+    # Interface overlay (only when the fixture has sub-volumes; blue fits,
+    # red too-much, amber too-little).
     # The overlay is a per-submission artifact, so on the hosted report it is
     # referenced from the public render bucket (the eval job uploads it next to
     # the turntable renders) rather than base64-inlined.
@@ -585,7 +568,6 @@ def _render_fixture_card(
                 "<h3>Interface overlay "
                 f"{_legend_html(_IFACE_LEGEND)}</h3>"
             )
-            p.append(f'<p class="viz-caption">{html.escape(_IFACE_CAPTION)}</p>')
             p.append(
                 f'<img src="{src}" alt="interface overlay" '
                 f'class="iface-overlay-img" loading="lazy">'
@@ -928,9 +910,6 @@ h2 { margin-top: 0; }
 .legend-chip { display: inline-block; width: 11px; height: 11px;
                border-radius: 3px; vertical-align: middle;
                margin: 0 5px 0 14px; border: 1px solid rgba(0,0,0,0.18); }
-/* Plain-language caption under a viz heading (interface overlay + edit diff). */
-.viz-caption { color: #6b7785; font-size: 0.82em; line-height: 1.5;
-               margin: 2px 0 8px; max-width: 70ch; }
 .iface-overlay-img { max-width: 100%; border: 1px solid #ddd; border-radius: 4px;
                      display: block; }
 .meta-bar   { background: #fff8e1; }
