@@ -8,16 +8,16 @@
 **CADGenBench** measures how well AI systems produce correct 3D
 mechanical parts. It covers two tasks:
 
-- **Generation** — from an engineering drawing of a part, produce a
+- **Generation**: from an engineering drawing of a part, produce a
   valid, geometrically correct 3D model.
-- **Editing** — given an existing STEP file and a requested change,
+- **Editing**: given an existing STEP file and a requested change,
   apply that change.
 
-The benchmark is tool-agnostic: it makes no assumption about how you
-build the model (`build123d`, Autodesk Fusion, Onshape), since a
-submission is simply one STEP file per sample. Each sample declares its
-task type (`generation` or `editing`) in `description.yaml`, and the
-same metrics and `output.step` contract apply to both.
+The benchmark is tool-agnostic. It makes no assumption about how you
+build the model (`build123d`, Autodesk Fusion, Onshape): a submission
+is one STEP file per sample. Each sample declares its task type
+(`generation` or `editing`) in `description.yaml`, and the same metrics
+and `output.step` contract apply to both.
 
 **Submit and view the leaderboard:**
 [`HuggingAI4Engineering/cadgenbench-leaderboard`](https://huggingface.co/spaces/HuggingAI4Engineering/cadgenbench-leaderboard).
