@@ -34,9 +34,9 @@ here:
   (iteratively writes [`build123d`](https://github.com/gumyr/build123d)
   Python, validates the STEP, and repeats until valid).
 
-Evaluation itself happens on the Space: ground truth is held privately
-in [`cadgenbench-data-gt`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data-gt)
-and the Space is the only consumer.
+Evaluation runs on the Space, scoring submissions against the privately
+held ground truth in
+[`cadgenbench-data-gt`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data-gt).
 
 ## How to submit
 
@@ -53,9 +53,8 @@ short:
 3. Upload via the **Submit** tab on the
    [leaderboard Space](https://huggingface.co/spaces/HuggingAI4Engineering/cadgenbench-leaderboard).
 
-The Space validates the zip, runs the eval, publishes a row to the
-leaderboard, and writes a self-contained per-submission HTML report
-that you can link to or download.
+The Space validates the zip, runs the eval, publishes a leaderboard
+row, and writes a per-submission HTML report you can share or download.
 
 Rows publish as unvalidated; promotion to a validated tier is a
 separate methodology review by the maintainer team. See
@@ -171,7 +170,6 @@ Fixtures live in two HF dataset repos:
   **private**; ground truth (`ground_truth.step`, optional jig
   sub-volumes, renders) and the labeller-facing `AUTHORING.md` /
   sanity-check scripts. Only the leaderboard Space reads from it.
-  Keeping GT private makes the Space's eval the source of truth.
 
 ## License
 
