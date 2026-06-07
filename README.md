@@ -5,10 +5,13 @@
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 
-A benchmark for **AI-driven CAD generation and editing**. Given an
-engineering drawing of a mechanical part, a system must produce a
-valid, geometrically correct 3D model. Given an existing STEP file and
-a requested edit, it must apply that edit.
+A benchmark for **AI-driven CAD generation and editing**. Two task
+types:
+
+- **Generation** — given an engineering drawing of a mechanical part,
+  produce a valid, geometrically correct 3D model.
+- **Editing** — given an existing STEP file and a requested change,
+  apply that edit.
 
 The benchmark targets AI models and makes no assumption about the CAD
 environment (`build123d`, Autodesk Fusion, OnShape): a submission is
