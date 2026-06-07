@@ -5,10 +5,10 @@
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 
-A benchmark for **AI-driven CAD generation and editing**. Given a
-textual or visual description of a mechanical part, a system must
-produce a valid, geometrically correct 3D model. Given an existing STEP
-file and a requested edit, it must apply that edit.
+A benchmark for **AI-driven CAD generation and editing**. Given an
+engineering drawing of a mechanical part, a system must produce a
+valid, geometrically correct 3D model. Given an existing STEP file and
+a requested edit, it must apply that edit.
 
 The benchmark targets AI models and makes no assumption about the CAD
 environment (`build123d`, Autodesk Fusion, OnShape): a submission is
@@ -86,7 +86,8 @@ per-axis details.
 ## Reference baseline (optional)
 
 The reference baseline is an iterative agent that writes `build123d`
-Python in a loop until it produces a valid STEP. Use it to see what an
+Python, renders the resulting STEP, and reviews those renders to refine
+its code in a loop until the part is valid. Use it to see what an
 end-to-end run looks like, or as a starting point for your own
 generator. It targets Python 3.12 and installs entirely via pip.
 
