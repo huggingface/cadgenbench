@@ -96,8 +96,8 @@ Aggregates every per-fixture `result.json` (and reads
                    "n_valid": 1, "n_invalid": 0, "n_missing": 0}
   },
   "per_fixture_scores": {
-    "jig-01-single-hole-plate":  {"status": "valid", "cad_score": 0.832, "task_type": "generation"},
-    "jig-01-edit-double-hole":   {"status": "valid", "cad_score": 0.792, "task_type": "editing"},
+    "101":  {"status": "valid", "cad_score": 0.832, "task_type": "generation"},
+    "201":  {"status": "valid", "cad_score": 0.792, "task_type": "editing"},
     "...":                       {...}
   }
 }

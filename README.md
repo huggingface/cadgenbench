@@ -98,18 +98,19 @@ python -m venv .venv && source .venv/bin/activate
 # 2. Editable install with the baseline + dev extras
 pip install -e ".[baseline,dev]"
 
-# 3. One-time: headless Chromium for per-turn visual feedback to the
-# agent. Cached per machine.
-playwright install chromium
-
-# 4. Provider API keys for whichever model(s) you plan to run
+# 3. Provider API keys for whichever model(s) you plan to run
 cp .env.example .env   # then fill in ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.
 
-# 5. Point at the public fixture-inputs dataset on the Hub. cadgenbench
+# 4. Point at the public fixture-inputs dataset on the Hub. cadgenbench
 # snapshot-downloads it on first use and caches under
 # ~/.cache/huggingface/hub/.
 export CADGENBENCH_DATA_REPO=HuggingAI4Engineering/cadgenbench-data
 ```
+
+Rendering (per-turn visual feedback to the agent) is in-process via
+PyVista/VTK; no Chromium or browser install is needed. On a bare
+headless Linux box VTK needs system OpenGL libs (e.g. `libgl1` /
+Mesa); macOS works out of the box.
 
 Verify:
 
@@ -123,25 +124,36 @@ pytest tests/ -q
 Run on one fixture, or in parallel on all of them:
 
 ```bash
-# Single fixture
-cadgenbench baseline run jig-01-single-hole-plate \
-    --model anthropic/claude-opus-4-7
+# Single fixture (fixture names are the dataset's folder names, e.g. 101)
+cadgenbench baseline run 101 --model openai/gpt-5.5
 
 # All fixtures, in parallel
-cadgenbench baseline run --all --parallel 4 \
-    --model anthropic/claude-opus-4-7
+cadgenbench baseline run --all --parallel 4 --model openai/gpt-5.5
 ```
 
+**Using a different LLM.** `--model` takes any
+[LiteLLM](https://docs.litellm.ai/docs/providers) `provider/model`
+string; just set the matching key in `.env`. For example:
+
+```bash
+cadgenbench baseline run 101 --model anthropic/claude-opus-4-7   # ANTHROPIC_API_KEY
+cadgenbench baseline run 101 --model gemini/gemini-3.1-pro-preview  # GEMINI_API_KEY
+cadgenbench baseline run 101 --model openai/gpt-5.5             # OPENAI_API_KEY
+```
+
+For reasoning models, `--reasoning-effort {minimal,low,medium,high}`
+sets the thinking budget (mapped per provider by LiteLLM). See
+`cadgenbench baseline run --help` for the full flag set.
+
 Output lands at `results/<timestamp>_<model_slug>/<fixture>/output.step`.
-`cadgenbench baseline --help` lists the full flag set. The baseline only
-*generates* candidates; scoring against ground truth happens on the
-leaderboard Space after you submit.
+The baseline only *generates* candidates; scoring against ground truth
+happens on the leaderboard Space after you submit.
 
 Bundle a run directory into a submission zip (top-level `meta.json` +
 one `output.step` per fixture, per the submission contract):
 
 ```bash
-cadgenbench baseline package results/20260602_120000_claude-opus-4-7 \
+cadgenbench baseline package results/20260602_120000_gpt-5.5 \
     --submitter "Your Name" --name "My agent v1" --agree
 ```
 

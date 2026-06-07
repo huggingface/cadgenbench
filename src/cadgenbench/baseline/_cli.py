@@ -22,9 +22,9 @@ results to ``results/<timestamp>_<model_slug>/<fixture>/``.
 
 Usage::
 
-    cadgenbench baseline run jig-01-single-hole-plate
-    cadgenbench baseline run jig-01-single-hole-plate \\
-        --model anthropic/claude-sonnet-4-6
+    cadgenbench baseline run 101
+    cadgenbench baseline run 101 \\
+        --model openai/gpt-5.5
     cadgenbench baseline run --all --parallel 4
     cadgenbench baseline run --all --max-tokens 100000 --max-iter 50
 """
@@ -76,7 +76,7 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
             examples:
-              %(prog)s jig-01-single-hole-plate
+              %(prog)s 101
               %(prog)s --all --parallel 4
               %(prog)s --all --limit 3
               %(prog)s --all --max-tokens 100000 --max-iter 50
