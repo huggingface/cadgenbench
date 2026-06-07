@@ -42,6 +42,7 @@ from litellm import (
     RateLimitError,
     ServiceUnavailableError,
     Timeout,
+    UnsupportedParamsError,
 )
 
 # Silence LiteLLM's unconditional ``print()`` banners ("Give Feedback / Get
@@ -392,6 +393,17 @@ class LLMClient:
                         **kwargs,
                     )
                 return self._parse_response(response)
+
+            except UnsupportedParamsError as exc:
+                # Not all providers accept every reasoning_effort level (e.g.
+                # OpenAI's gpt-5.5 rejects "minimal"). Fail fast with a clear
+                # message instead of a raw provider traceback; this is a config
+                # error, not a transient one, so don't retry.
+                raise RuntimeError(
+                    f"reasoning_effort={effort!r} is not supported for model "
+                    f"{self.model!r}. Use a different --reasoning-effort "
+                    "(low/medium/high) or omit it to use the provider default."
+                ) from exc
 
             except RETRYABLE_ERRORS as exc:
                 last_error = exc

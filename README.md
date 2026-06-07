@@ -140,10 +140,7 @@ cadgenbench baseline run 101 --model gemini/gemini-3.1-pro-preview  # GEMINI_API
 cadgenbench baseline run 101 --model openai/gpt-5.5             # OPENAI_API_KEY
 ```
 
-For reasoning models, `--reasoning-effort {minimal,low,medium,high}`
-sets the thinking budget (mapped per provider by LiteLLM). It defaults
-to unset, i.e. each provider's own default. See
-`cadgenbench baseline run --help` for the full flag set.
+See `cadgenbench baseline run --help` for the full flag set.
 
 Output lands at `results/<timestamp>_<model_slug>/<fixture>/output.step`.
 The baseline only *generates* candidates; scoring against ground truth
