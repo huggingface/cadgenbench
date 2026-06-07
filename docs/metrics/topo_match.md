@@ -38,13 +38,13 @@ Betti numbers are computed once on the tessellated  mesh. The [validity gate](./
 Each Betti axis gets a fuzzy log-ratio against the GT, raised to a sharpness exponent $\alpha = 2$ so a wrong count counts as a real defect rather than a near miss:
 
 $$
-s_i \;=\; \exp\!\Bigl(-\alpha\,\bigl|\log\bigl((b_i^{\text{cand}}+1)/(b_i^{\text{gt}}+1)\bigr)\bigr|\Bigr) \;=\; \Bigl(\tfrac{\min+1}{\max+1}\Bigr)^{\alpha} \;\in\; [0, 1]
+s_i = \exp\left(-\alpha\left|\log\frac{b_i^{\text{cand}}+1}{b_i^{\text{gt}}+1}\right|\right) = \left(\frac{\min+1}{\max+1}\right)^{\alpha} \in [0, 1]
 $$
 
 It is $1$ when the counts match and decays smoothly otherwise; the $+1$ shift keeps it finite when a count is zero. The aggregate is the **product** over the three axes:
 
 $$
-s_0 \cdot s_1 \cdot s_2 \;\in\; [0, 1]
+s_0 \cdot s_1 \cdot s_2 \in [0, 1]
 $$
 
 The product, not the mean, means one wrong axis collapses the score: topology is discrete, so getting two of three invariants right is not a partial match. Per-axis scores are saved under `topology_metrics.per_axis_scores` in `result.json`.
