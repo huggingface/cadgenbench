@@ -159,7 +159,7 @@ cadgenbench baseline package results/20260602_120000_gpt-5.5 \
 ```
 
 Writes `<run_dir>.zip`, ready to upload on the Space's **Submit** tab.
-`agree_to_publish` is `false` until you pass `--agree`.
+`agree_to_publish` stays `false` unless you pass `--agree`.
 
 ## Dataset
 
