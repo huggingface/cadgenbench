@@ -40,6 +40,17 @@ import yaml
 
 VIEWS = ["iso", "front", "top", "right", "bottom"]
 
+# Anchor on the metrics explainer page for each headline metric. Used to
+# deep-link a card's pill label to its explanation when a ``metrics_base_url``
+# is supplied (the hosted report). Must stay in sync with the page's section
+# ids (the leaderboard Space's ``metrics_page.METRIC_ANCHORS``).
+_METRIC_ANCHORS = {
+    "cad": "cad-score",
+    "shape": "shape-similarity",
+    "iface": "interface-match",
+    "topo": "topology-match",
+}
+
 # Static frame-0 still of the editing edit-diff turntable (written by the eval
 # pipeline beside ``edit_diff.webp`` and backfilled into the render bucket). Used
 # as the editing card's output thumbnail in the summary grid.
@@ -298,7 +309,8 @@ def _images_html(pngs: list[Path], *, base_url: str | None = None) -> str:
     for vp in pngs:
         src = f"{base_url}/{vp.name}" if base_url else _data_uri(vp)
         parts.append(
-            f'<div class="view"><img src="{src}" alt="{vp.stem}" loading="lazy">'
+            f'<div class="view"><img src="{src}" alt="{vp.stem}" '
+            f'class="zoomable" loading="lazy">'
             f"<span>{vp.stem}</span></div>"
         )
     parts.append("</div>")
@@ -351,12 +363,35 @@ def _render_edit_diff(result_dir: Path, *, base_url: str | None = None) -> str:
     if not webp.exists():
         return '<p class="note">No edit-diff render</p>'
     src = f"{base_url}/edit_diff.webp" if base_url else _data_uri(webp)
-    return f'<img src="{src}" alt="edit diff" class="edit-diff-img" loading="lazy">'
+    return (
+        f'<img src="{src}" alt="edit diff" class="edit-diff-img zoomable" '
+        f'loading="lazy">'
+    )
 
 
 # ---------------------------------------------------------------------------
 # Fixture card
 # ---------------------------------------------------------------------------
+
+def _headline_label(text: str, key: str, metrics_base_url: str | None) -> str:
+    """Render a headline pill label, deep-linked to the metrics page if known.
+
+    With *metrics_base_url* set (hosted report), the label becomes a link to
+    ``{metrics_base_url}#<anchor>`` opening the metric's explanation in a new
+    tab; otherwise it stays a plain label (the portable local report has no
+    metrics page to point at).
+    """
+    safe = html.escape(text)
+    anchor = _METRIC_ANCHORS.get(key)
+    if not metrics_base_url or anchor is None:
+        return f'<span class="headline-label">{safe}</span>'
+    href = html.escape(f"{metrics_base_url}#{anchor}", quote=True)
+    return (
+        f'<span class="headline-label"><a href="{href}" target="_blank" '
+        f'rel="noopener" title="What is this? See the Metrics page">{safe}</a>'
+        f"</span>"
+    )
+
 
 def _render_fixture_card(
     fix: dict,
@@ -365,6 +400,7 @@ def _render_fixture_card(
     render_base_url: str | None = None,
     gt_base_url: str | None = None,
     input_base_url: str | None = None,
+    metrics_base_url: str | None = None,
 ) -> str:
     result = fix["result"]
     gt_dir = fix["gt_dir"]
@@ -431,7 +467,7 @@ def _render_fixture_card(
             )
             p.append(
                 f'<div class="headline-pill headline-cad">'
-                f'<span class="headline-label">CAD Score</span>'
+                f'{_headline_label("CAD Score", "cad", metrics_base_url)}'
                 f'<span class="headline-value">'
                 f"{_fmt_metric('cad_score', cad_score)}</span>"
                 f'<span class="headline-sub">{cad_sub}</span>'
@@ -450,7 +486,7 @@ def _render_fixture_card(
                 shape_sub = ""
             p.append(
                 f'<div class="headline-pill headline-shape">'
-                f'<span class="headline-label">Shape Similarity</span>'
+                f'{_headline_label("Shape Similarity", "shape", metrics_base_url)}'
                 f'<span class="headline-value">{shape_value}</span>'
                 f"{shape_sub}"
                 f'</div>'
@@ -459,7 +495,7 @@ def _render_fixture_card(
             n_ctx = len(iface_m.get("contexts", {}))
             p.append(
                 f'<div class="headline-pill headline-iface">'
-                f'<span class="headline-label">Interface match</span>'
+                f'{_headline_label("Interface match", "iface", metrics_base_url)}'
                 f'<span class="headline-value">{float(iface_score):.3f}</span>'
                 f'<span class="headline-sub">{n_ctx} context(s)</span>'
                 f'</div>'
@@ -469,7 +505,7 @@ def _render_fixture_card(
             gt_b = topo_m.get("gt") or {}
             p.append(
                 f'<div class="headline-pill headline-topo">'
-                f'<span class="headline-label">Topo match</span>'
+                f'{_headline_label("Topo match", "topo", metrics_base_url)}'
                 f'<span class="headline-value">{float(topo_score):.3f}</span>'
                 f'<span class="headline-sub">'
                 f'cand ({cand_b.get("b0")},{cand_b.get("b1")},{cand_b.get("b2")}) '
@@ -509,7 +545,10 @@ def _render_fixture_card(
         for img_path in input_imgs:
             src = _input_src(img_path, inputs_dir, input_base)
             if src:
-                p.append(f'<img src="{src}" alt="input" class="input-img" loading="lazy">')
+                p.append(
+                    f'<img src="{src}" alt="input" class="input-img zoomable" '
+                    f'loading="lazy">'
+                )
         # Editing tasks: show the starting shape's canonical views
         # (same grid as GT/Output). Falls back to a note if the render
         # PNGs weren't shipped with the input fixture.
@@ -570,7 +609,7 @@ def _render_fixture_card(
             )
             p.append(
                 f'<img src="{src}" alt="interface overlay" '
-                f'class="iface-overlay-img" loading="lazy">'
+                f'class="iface-overlay-img zoomable" loading="lazy">'
             )
             p.append("</div>")
 
@@ -886,6 +925,11 @@ h2 { margin-top: 0; }
                  box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
 .headline-label { font-size: 0.78em; text-transform: uppercase;
                   letter-spacing: 0.04em; color: #607d8b; font-weight: 600; }
+/* Deep-link to the metrics explainer (hosted report only): keep the label's
+   color, add a dotted underline as the only "clickable" cue. */
+.headline-label a { color: inherit; text-decoration: none;
+                    border-bottom: 1px dotted currentColor; cursor: help; }
+.headline-label a:hover { opacity: 0.75; }
 .headline-value { font-size: 1.8em; font-weight: 700; color: #1a1a1a;
                   line-height: 1.1; }
 .headline-sub { font-size: 0.78em; color: #90a4ae; font-style: italic; }
@@ -944,6 +988,17 @@ h2 { margin-top: 0; }
 .method-code   { background: #f3e5f5; color: #6a1b9a; }
 .code-snippet-toggle { font-size: 0.78em; color: #888; cursor: pointer;
                         text-decoration: underline; }
+
+/* Click-to-zoom: any image tagged `zoomable` (input drawing, GT / output
+   views, edit diff, interface overlay) opens full-size in the lightbox
+   overlay below. */
+img.zoomable { cursor: zoom-in; }
+#lightbox { position: fixed; inset: 0; background: rgba(0,0,0,0.85);
+            display: none; align-items: center; justify-content: center;
+            z-index: 1000; cursor: zoom-out; padding: 24px; }
+#lightbox.open { display: flex; }
+#lightbox img { max-width: 96vw; max-height: 96vh; border-radius: 4px;
+                background: #fff; box-shadow: 0 6px 40px rgba(0,0,0,0.5); }
 """
 
 # Summary-grid styles. Kept as a standalone constant (appended to CSS in the
@@ -1041,6 +1096,9 @@ function updateNav() {
 
 document.addEventListener('keydown', function(e) {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  // While the zoom lightbox is open, Esc closes it (handled below) and the
+  // j/k card navigation is suppressed so the two don't fight over the key.
+  if (window._lightboxOpen) return;
   if (currentIdx === -1) return;
   if (e.key === 'j' || e.key === 'ArrowRight') {
     e.preventDefault(); showDetail(currentIdx + 1);
@@ -1126,6 +1184,47 @@ _GRID_JS = """\
 })();
 """
 
+# Click-to-zoom lightbox. Standalone (appended after JS in the generator) so the
+# HTML backfill can inject the identical behavior into published reports. A
+# single delegated click handler opens any `img.zoomable` full-size in a shared
+# overlay; clicking the overlay or pressing Esc closes it. `window._lightboxOpen`
+# is the flag the main keydown handler reads to suppress card navigation while
+# the overlay is up.
+_LIGHTBOX_JS = """\
+(function lightbox() {
+  const ov = document.createElement('div');
+  ov.id = 'lightbox';
+  const big = document.createElement('img');
+  big.alt = 'zoomed view';
+  ov.appendChild(big);
+  document.body.appendChild(ov);
+  window._lightboxOpen = false;
+
+  function open(src) {
+    big.src = src;
+    ov.classList.add('open');
+    window._lightboxOpen = true;
+  }
+  function close() {
+    ov.classList.remove('open');
+    big.removeAttribute('src');
+    window._lightboxOpen = false;
+  }
+
+  document.addEventListener('click', function(e) {
+    const t = e.target;
+    if (t && t.tagName === 'IMG' && t.classList.contains('zoomable') && t.src) {
+      e.preventDefault();
+      open(t.src);
+    }
+  });
+  ov.addEventListener('click', close);
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && window._lightboxOpen) { e.preventDefault(); close(); }
+  });
+})();
+"""
+
 
 # ---------------------------------------------------------------------------
 # HTML assembly
@@ -1186,15 +1285,24 @@ def _render_run_summary_header(summary: dict, n_fixtures_fallback: int) -> str:
 def generate_html(
     run: dict,
     *,
+    submission_name: str | None = None,
     render_base_url: str | None = None,
     gt_base_url: str | None = None,
     input_base_url: str | None = None,
+    metrics_base_url: str | None = None,
     download_url: str | None = None,
 ) -> str:
     """Build the single-run report HTML.
 
     Args:
         run: The discovered run (see :func:`discover_run`).
+        submission_name: Optional human-readable name of the submission
+            being reported (e.g. "MyAgent v2.3"). When set it becomes the
+            report's title/heading so a reader landing on the page knows
+            which submission it is; the run timestamp drops to a subline.
+            When ``None`` (a local ``cadgenbench report single`` run with
+            no submission identity) the heading falls back to
+            ``CADGenBench / <timestamp>`` as before.
         render_base_url: Optional public base URL for the candidate renders and
             interface overlay. When ``None`` (a submitter running ``cadgenbench
             report single`` locally), these are inlined as base64. When set (the
@@ -1207,6 +1315,12 @@ def generate_html(
         input_base_url: Optional base URL for input drawings / starting-shape
             renders. ``None`` inlines base64; set (hosted report) references
             them as ``{input_base_url}/<fixture>/...`` via the Space input proxy.
+        metrics_base_url: Optional base URL of the metrics explainer page.
+            When set (hosted report), each fixture card's headline metric
+            labels (CAD Score / Shape / Interface / Topo) become deep-links to
+            ``{metrics_base_url}#<anchor>`` so a reader can jump straight to
+            that metric's explanation. ``None`` (local report) leaves them as
+            plain labels.
         download_url: Optional URL of the submission's STEP zip. When set, a
             "Download submission ZIP" button is rendered in the run header
             (mirrors the leaderboard gallery's per-submission download). ``None``
@@ -1224,11 +1338,17 @@ def generate_html(
 
     fixture_names_js = json.dumps([f["name"] for f in fixtures])
 
-    title = f"CADGenBench / {timestamp}"
+    # Heading is the submission name when known (so a reader landing on the
+    # hosted report immediately sees which submission it is); the run
+    # timestamp then drops to a subline. Local runs with no submission
+    # identity keep the timestamp as the heading.
+    run_tag = f"CADGenBench / {timestamp}"
+    heading = submission_name.strip() if submission_name and submission_name.strip() else run_tag
+    subtitle = run_tag if heading != run_tag else None
     p = [
         "<!DOCTYPE html><html><head>",
         "<meta charset='utf-8'>",
-        f"<title>Results: {html.escape(title)}</title>",
+        f"<title>Results: {html.escape(heading)}</title>",
         f"<style>{CSS}{_GRID_CSS}</style>",
         "</head><body>",
     ]
@@ -1238,7 +1358,7 @@ def generate_html(
     # top-right (mirrors the gallery's per-submission download).
     p.append('<div class="run-header">')
     p.append('<div class="run-header-top">')
-    p.append(f"<h1>Results: {html.escape(title)}</h1>")
+    p.append(f"<h1>Results: {html.escape(heading)}</h1>")
     if download_url:
         href = html.escape(str(download_url), quote=True)
         p.append(
@@ -1246,6 +1366,8 @@ def generate_html(
             f'rel="noopener">&#11015; Download submission ZIP</a>'
         )
     p.append("</div>")
+    if subtitle:
+        p.append(f'<div class="run-meta"><span>{html.escape(subtitle)}</span></div>')
     p.append(_render_run_summary_header(summary, len(fixtures)))
     p.append("</div>")
 
@@ -1291,12 +1413,13 @@ def generate_html(
             render_base_url=render_base_url,
             gt_base_url=gt_base_url,
             input_base_url=input_base_url,
+            metrics_base_url=metrics_base_url,
         ))
     p.append("</div>")
 
     p.append(
         f"<script>window._fixtureNames = {fixture_names_js};\n"
-        f"{JS}\n{_GRID_JS}</script>"
+        f"{JS}\n{_GRID_JS}\n{_LIGHTBOX_JS}</script>"
     )
     p.append("</body></html>")
     return "\n".join(p)
@@ -1311,6 +1434,15 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> None:
     )
     p.add_argument("run_dir", type=Path, help="Path to a result run directory.")
     p.add_argument("-o", "--output", type=Path, help="Output HTML path.")
+    p.add_argument(
+        "--submission-name",
+        default=None,
+        help=(
+            "Optional human-readable submission name to use as the report's "
+            "title/heading (e.g. 'MyAgent v2.3'). Omit for a local run; the "
+            "heading then falls back to 'CADGenBench / <timestamp>'."
+        ),
+    )
     p.add_argument(
         "--render-base-url",
         default=None,
@@ -1340,6 +1472,15 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     p.add_argument(
+        "--metrics-base-url",
+        default=None,
+        help=(
+            "Optional base URL of the metrics explainer page (e.g. the Space's "
+            "'/metrics'). When set, each card's headline metric labels deep-link "
+            "to <base>#<anchor>; omit for a local report (plain labels)."
+        ),
+    )
+    p.add_argument(
         "--download-url",
         default=None,
         help=(
@@ -1361,9 +1502,11 @@ def run(args: argparse.Namespace) -> int:
 
     html_out = generate_html(
         run_data,
+        submission_name=args.submission_name,
         render_base_url=args.render_base_url,
         gt_base_url=args.gt_base_url,
         input_base_url=args.input_base_url,
+        metrics_base_url=args.metrics_base_url,
         download_url=args.download_url,
     )
     out_path = args.output or Path(f"results_{run_data['timestamp']}.html")
