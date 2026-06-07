@@ -68,6 +68,8 @@ try:
 except Exception:
     METRIC_DISPLAY = {}  # type: ignore[assignment]
 
+from cadgenbench.common.axes_gizmo import gizmo_svg
+
 
 # ---------------------------------------------------------------------------
 # Utilities
@@ -302,15 +304,24 @@ def _images_html(pngs: list[Path], *, base_url: str | None = None) -> str:
     live in object storage rather than bloating the HTML. ``base_url`` only
     changes how ``<img src>`` is written; it grants no write access and the
     local file is still used to know which views exist and in what order.
+
+    Each tile carries a small orientation gizmo (see
+    :func:`cadgenbench.common.axes_gizmo.gizmo_svg`) overlaid in the corner so a
+    reader can read the world X/Y/Z directions the prompts refer to. The gizmo
+    is keyed off the view name (the PNG stem) and is part-independent, so it
+    needs no per-fixture render; an unrecognized stem yields no gizmo.
     """
     if not pngs:
         return ""
     parts = ['<div class="images">']
     for vp in pngs:
         src = f"{base_url}/{vp.name}" if base_url else _data_uri(vp)
+        giz = gizmo_svg(vp.stem)
+        giz_html = f'<span class="axis-giz">{giz}</span>' if giz else ""
         parts.append(
-            f'<div class="view"><img src="{src}" alt="{vp.stem}" '
-            f'class="zoomable" loading="lazy">'
+            f'<div class="view"><span class="imgwrap">'
+            f'<img src="{src}" alt="{vp.stem}" class="zoomable" loading="lazy">'
+            f"{giz_html}</span>"
             f"<span>{vp.stem}</span></div>"
         )
     parts.append("</div>")
@@ -451,20 +462,26 @@ def _render_fixture_card(
     edit_m = result.get("edit_metrics") or {}
     is_editing = bool(edit_m)
     shape_renorm = edit_m.get("shape_similarity_renormalized")
-    shape_baseline = edit_m.get("baseline_shape_similarity")
+    # Shape sub-metrics (Point Cloud F1 / Volume IoU). Rendered as the Shape
+    # Similarity pill's own sub-line (like Topo's "cand vs gt"), so the
+    # breakdown sits with the metric it explains rather than on a separate row.
+    component_keys = ("shape_point_cloud_f1", "shape_volume_iou")
+    _component_pairs = [
+        (k, gt_m.get(k)) for k in component_keys if gt_m.get(k) is not None
+    ]
+    components_str = " &middot; ".join(
+        f"{html.escape(METRIC_DISPLAY[k].label if k in METRIC_DISPLAY else k)}: "
+        f"{_fmt_metric(k, v)}"
+        for k, v in _component_pairs
+    )
     if any(v is not None for v in (cad_score, shape_score, iface_score, topo_score)):
         n_components = sum(
             1 for v in (shape_score, iface_score, topo_score) if v is not None
         )
         p.append('<div class="headline-metrics">')
         if cad_score is not None:
-            cad_sub = (
-                "editing &middot; weighted 0.5 / 0.3 / 0.2 "
-                "(shape renormalized vs no-op)"
-                if is_editing
-                else "weighted 0.4 / 0.4 / 0.2 over "
-                f"{n_components} available component(s)"
-            )
+            weights = "0.5 / 0.3 / 0.2" if is_editing else "0.4 / 0.4 / 0.2"
+            cad_sub = f"weighted {weights} over {n_components} components"
             p.append(
                 f'<div class="headline-pill headline-cad">'
                 f'{_headline_label("CAD Score", "cad", metrics_base_url)}'
@@ -474,21 +491,22 @@ def _render_fixture_card(
                 f'</div>'
             )
         if shape_score is not None:
+            # Editing fixtures headline the renormalized shape value; generation
+            # the raw similarity. Both show the Point Cloud F1 / Volume IoU
+            # breakdown as the sub-line (no renorm/no-op annotation).
             if is_editing and shape_renorm is not None:
                 shape_value = _fmt_metric("shape_similarity_score", shape_renorm)
-                shape_sub = (
-                    f'<span class="headline-sub">renormalized &middot; '
-                    f"no-op b={float(shape_baseline):.3f} &middot; "
-                    f"raw {float(shape_score):.3f}</span>"
-                )
             else:
                 shape_value = _fmt_metric("shape_similarity_score", shape_score)
-                shape_sub = ""
+            shape_sub_html = (
+                f'<span class="headline-sub">{components_str}</span>'
+                if components_str else ""
+            )
             p.append(
                 f'<div class="headline-pill headline-shape">'
                 f'{_headline_label("Shape Similarity", "shape", metrics_base_url)}'
                 f'<span class="headline-value">{shape_value}</span>'
-                f"{shape_sub}"
+                f"{shape_sub_html}"
                 f'</div>'
             )
         if iface_score is not None:
@@ -497,7 +515,7 @@ def _render_fixture_card(
                 f'<div class="headline-pill headline-iface">'
                 f'{_headline_label("Interface match", "iface", metrics_base_url)}'
                 f'<span class="headline-value">{float(iface_score):.3f}</span>'
-                f'<span class="headline-sub">{n_ctx} context(s)</span>'
+                f'<span class="headline-sub">{n_ctx} mating jig(s)</span>'
                 f'</div>'
             )
         if topo_score is not None:
@@ -514,23 +532,6 @@ def _render_fixture_card(
                 f'</div>'
             )
         p.append("</div>")
-
-    # Shape component breakdown (compact, muted), right under the headline.
-    component_keys = ("shape_point_cloud_f1", "shape_volume_iou")
-    components = [(k, gt_m.get(k)) for k in component_keys if gt_m.get(k) is not None]
-    if components:
-        parts: list[str] = []
-        for k, v in components:
-            meta = METRIC_DISPLAY.get(k)
-            label = meta.label if meta else k
-            parts.append(f"{html.escape(label)}: {_fmt_metric(k, v)}")
-        components_label = (
-            "Shape components (pre-renorm)" if is_editing else "Shape components"
-        )
-        p.append(
-            f'<div class="metrics-sub">{components_label} &middot; '
-            f'{" &middot; ".join(parts)}</div>'
-        )
 
     # Three-column: Input | GT | Output
     p.append('<div class="three-col">')
@@ -900,8 +901,14 @@ h2 { margin-top: 0; }
 .note { color: #888; font-style: italic; font-size: 0.9em; }
 .images { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
 .view { text-align: center; }
-.view img { max-height: 180px; border: 1px solid #ddd; border-radius: 4px; }
+.view .imgwrap { position: relative; display: inline-block; line-height: 0; }
+.view img { max-height: 180px; border: 1px solid #ddd; border-radius: 4px;
+            display: block; }
 .view span { display: block; font-size: 0.7em; color: #888; margin-top: 2px; }
+/* Orientation gizmo overlaid in the corner of each render tile. Wrapper is
+   inline-block so the absolute gizmo pins to the image, not the column. */
+.axis-giz { position: absolute; left: 4px; bottom: 4px; pointer-events: none;
+            line-height: 0; }
 .input-img { max-height: 250px; max-width: 100%; border: 1px solid #ddd; border-radius: 4px; }
 .edit-diff-img { display: block; max-width: 100%; border: 1px solid #ddd; border-radius: 4px; margin: 8px 0; }
 .pdf-embed { width: 100%; height: 400px; border: 1px solid #ddd;
