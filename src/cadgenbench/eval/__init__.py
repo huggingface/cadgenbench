@@ -17,7 +17,7 @@
 The benchmark scores a candidate STEP against a ground-truth STEP along
 three orthogonal axes, each with its own module:
 
-- :mod:`.shape_similarity`: point-cloud F1 and volume IoU against the
+- :mod:`.shape_similarity`: surface distance F1 and volume IoU against the
   ground truth.
 - :mod:`.interface_match`:  keep-in / keep-out region matching against
   authored sub-volumes.

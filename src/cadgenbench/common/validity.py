@@ -42,8 +42,8 @@ Answers three questions about a STEP file:
 These come back together in :class:`ValidityResult` so callers never have
 to load or mesh the STEP twice. Companion modules in this package:
 
-- :mod:`cadgenbench.eval.shape_similarity`, point-cloud / volume /
-  edge-F1 metrics comparing candidate to ground truth.
+- :mod:`cadgenbench.eval.shape_similarity`, surface distance / volume
+  metrics comparing candidate to ground truth.
 - :mod:`cadgenbench.eval.interface_match`, keep-in / keep-out region
   matching against authored sub-volumes (jig metric).
 - :mod:`cadgenbench.eval.topo_match`, Betti-number agreement

@@ -101,7 +101,7 @@ A hard gate on the raw candidate STEP, checking that it is a well-formed BREP, w
 
 ### 2. Shape Similarity
 
-Does the bulk geometry match? The mean of two complementary sub-metrics: a surface point-cloud agreement score (sensitive to where surfaces sit) and a volumetric IoU (sensitive to occupied volume).
+Does the bulk geometry match? The mean of two complementary sub-metrics: a surface distance F1 score (sensitive to where surfaces sit) and a volumetric IoU (sensitive to occupied volume).
 
 → [Deep dive](./metrics/shape_similarity.md).
 

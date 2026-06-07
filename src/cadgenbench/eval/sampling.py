@@ -141,6 +141,94 @@ def sample_points_and_normals_from_mesh(
     )
 
 
+def vertex_normals(verts: np.ndarray, tris: np.ndarray) -> np.ndarray:
+    """Area-weighted unit vertex normals for an orientation-consistent mesh.
+
+    Identical estimator to the smooth-normal path of :func:`_area_weighted_sample`
+    (accumulate each triangle's ``cross = 2*area * unit_facet_normal`` onto its
+    vertices, then normalise), so a sample's smooth normal and the interpolated
+    vertex normal at that same surface point agree exactly. ``(V, 3)`` float64.
+    """
+    v0 = verts[tris[:, 0]]
+    v1 = verts[tris[:, 1]]
+    v2 = verts[tris[:, 2]]
+    cross = np.cross(v1 - v0, v2 - v0)
+    vn = np.zeros((verts.shape[0], 3), dtype=np.float64)
+    np.add.at(vn, tris[:, 0], cross)
+    np.add.at(vn, tris[:, 1], cross)
+    np.add.at(vn, tris[:, 2], cross)
+    return vn / np.maximum(np.linalg.norm(vn, axis=1, keepdims=True), 1e-12)
+
+
+def closest_point_distances_and_normals(
+    query_points: np.ndarray,
+    verts: np.ndarray,
+    tris: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Point-to-SURFACE distance + smooth normal at the foot point, per query.
+
+    For each query point, find the closest point on the *mesh surface* (not on a
+    discrete sample of it) via Open3D's ``RaycastingScene``, and the smooth
+    (area-weighted, barycentric-interpolated) unit normal of the surface there.
+
+    This is the correct primitive for shape comparison: sampling one mesh and
+    matching to the *nearest sample* of the other injects two errors that vanish
+    here -- the discretisation gap (nearest sample != closest surface point) and,
+    at sharp edges, the matched sample landing on a different facet. On a perfect
+    match the foot point IS the query and its normal equals the query's own
+    normal, so distance is 0 and ``|dot|`` is 1 -- exact, artifact-free.
+
+    Returns ``(dist, normals)``: ``(N,)`` distances and ``(N, 3)`` unit normals.
+    """
+    import open3d as o3d  # noqa: PLC0415
+
+    verts = np.ascontiguousarray(verts, dtype=np.float64)
+    tris = np.ascontiguousarray(tris)
+    q = np.ascontiguousarray(query_points, dtype=np.float64)
+
+    scene = o3d.t.geometry.RaycastingScene()
+    scene.add_triangles(
+        o3d.t.geometry.TriangleMesh(
+            o3d.core.Tensor(verts.astype(np.float32)),
+            o3d.core.Tensor(tris.astype(np.int32)),
+        )
+    )
+    res = scene.compute_closest_points(
+        o3d.core.Tensor(q.astype(np.float32)),
+    )
+    foot = res["points"].numpy().astype(np.float64)
+    prim = res["primitive_ids"].numpy().astype(np.int64)
+    dist = np.linalg.norm(q - foot, axis=1)
+
+    # Barycentric weights of the foot point in its triangle, recomputed from
+    # geometry (independent of Open3D's uv ordering) for robustness.
+    vn = vertex_normals(verts, tris)
+    tri_v = tris[prim]
+    a = verts[tri_v[:, 0]]
+    b = verts[tri_v[:, 1]]
+    c = verts[tri_v[:, 2]]
+    e0 = b - a
+    e1 = c - a
+    e2 = foot - a
+    d00 = np.einsum("ij,ij->i", e0, e0)
+    d01 = np.einsum("ij,ij->i", e0, e1)
+    d11 = np.einsum("ij,ij->i", e1, e1)
+    d20 = np.einsum("ij,ij->i", e2, e0)
+    d21 = np.einsum("ij,ij->i", e2, e1)
+    denom = d00 * d11 - d01 * d01
+    safe = np.abs(denom) > 1e-20
+    wv = np.where(safe, (d11 * d20 - d01 * d21) / np.where(safe, denom, 1.0), 0.0)
+    ww = np.where(safe, (d00 * d21 - d01 * d20) / np.where(safe, denom, 1.0), 0.0)
+    wu = 1.0 - wv - ww
+    normals = (
+        wu[:, None] * vn[tri_v[:, 0]]
+        + wv[:, None] * vn[tri_v[:, 1]]
+        + ww[:, None] * vn[tri_v[:, 2]]
+    )
+    normals /= np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-12)
+    return dist, normals
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------

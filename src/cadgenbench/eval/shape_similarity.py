@@ -19,11 +19,12 @@ already-aligned candidate/GT STEP files.
 
 Reported shape metrics:
 
-- ``shape_point_cloud_f1``:
-  Symmetric F1 of surface point clouds with a normal-agreement gate.
-  A point counts as a hit when its nearest neighbor on the other
-  cloud is within ``0.5%`` of the GT bounding-box diagonal **and** the
-  two outward unit normals dot above ``cos(20°) ≈ 0.94``.
+- ``shape_surface_distance_f1``:
+  Symmetric F1 of surface samples matched to the other mesh's *surface*,
+  with a normal-agreement gate. A sample counts as a hit when its distance
+  to the closest point on the other mesh is within ``0.5%`` of the GT
+  bounding-box diagonal **and** its outward normal and the surface normal
+  at that foot point dot above ``cos(20°) ≈ 0.94``.
 - ``shape_volume_iou``:
   Volumetric IoU of candidate and GT solids.
 - ``shape_similarity_score``:
@@ -169,8 +170,8 @@ MetricFn = Callable[[MetricContext, MetricContext], float | None]
 # ---------------------------------------------------------------------------
 
 
-POINT_CLOUD_F1_THRESHOLD_FRACTION = 0.005
-# Normal-agreement gate on point-cloud F1 hits. A match requires the
+SURFACE_DISTANCE_F1_THRESHOLD_FRACTION = 0.005
+# Normal-agreement gate on surface distance F1 hits. A match requires the
 # candidate and GT surface normals at the matched pair to agree in
 # direction within this cosine, applied to the **absolute** dot product
 # (|dot|): we accept a point on the right surface regardless of which way
@@ -182,12 +183,12 @@ POINT_CLOUD_F1_THRESHOLD_FRACTION = 0.005
 # (Combined with smooth_normals=True sampling, this makes the metric
 # continuous in the triangulation.) "Right place, wrong side" is still
 # excluded upstream by the watertight + manifold + winding gate.
-POINT_CLOUD_F1_NORMAL_DOT_THRESHOLD = 0.9396926207859084  # cos(20°)
+SURFACE_DISTANCE_F1_NORMAL_DOT_THRESHOLD = 0.9396926207859084  # cos(20°)
 
 
-def shape_point_cloud_f1(candidate: MetricContext, gt: MetricContext) -> float | None:
-    """Symmetric surface-point-cloud F1 in ``[0, 1]`` (threshold = 0.5% of GT bbox diag)."""
-    stats = _point_cloud_f1_stats(candidate, gt)
+def shape_surface_distance_f1(candidate: MetricContext, gt: MetricContext) -> float | None:
+    """Symmetric surface distance F1 in ``[0, 1]`` (threshold = 0.5% of GT bbox diag)."""
+    stats = _surface_distance_f1_stats(candidate, gt)
     if stats is None:
         return None
     return _clamp01(stats["f1"])
@@ -209,7 +210,7 @@ def shape_volume_iou(candidate: MetricContext, gt: MetricContext) -> float | Non
 # ---------------------------------------------------------------------------
 
 DEFAULT_METRICS: dict[str, MetricFn] = {
-    "shape_point_cloud_f1": shape_point_cloud_f1,
+    "shape_surface_distance_f1": shape_surface_distance_f1,
     "shape_volume_iou": shape_volume_iou,
 }
 
@@ -226,7 +227,7 @@ class MetricMeta:
 METRIC_DISPLAY: dict[str, MetricMeta] = {
     "cad_score":              MetricMeta("CAD Score", ".3f"),
     "shape_similarity_score": MetricMeta("Shape Similarity", ".3f"),
-    "shape_point_cloud_f1":   MetricMeta("Point Cloud F1", ".3f"),
+    "shape_surface_distance_f1":   MetricMeta("Surface Distance F1", ".3f"),
     "shape_volume_iou":       MetricMeta("Volume IoU", ".3f"),
     # interface_match (jig sub-volumes)
     "interface_match_score":  MetricMeta("Interface Match", ".3f"),
@@ -451,15 +452,15 @@ def _compute_default_scores_and_diagnostics(
         diagnostics["part_diagonal"] = diag
 
     try:
-        pc_stats = _point_cloud_f1_stats(candidate, gt)
+        pc_stats = _surface_distance_f1_stats(candidate, gt)
     except Exception as exc:
-        logger.error("Metric shape_point_cloud_f1 raised; scoring it 0", exc_info=True)
-        scores["shape_point_cloud_f1"] = 0.0
-        errors["shape_point_cloud_f1"] = f"{type(exc).__name__}: {exc}"
+        logger.error("Metric shape_surface_distance_f1 raised; scoring it 0", exc_info=True)
+        scores["shape_surface_distance_f1"] = 0.0
+        errors["shape_surface_distance_f1"] = f"{type(exc).__name__}: {exc}"
         pc_stats = None
     if pc_stats is not None:
-        scores["shape_point_cloud_f1"] = _clamp01(pc_stats["f1"])
-        _add_point_cloud_diagnostics(diagnostics, pc_stats)
+        scores["shape_surface_distance_f1"] = _clamp01(pc_stats["f1"])
+        _add_surface_distance_diagnostics(diagnostics, pc_stats)
 
     try:
         volume_stats = _volume_overlap_stats(candidate, gt)
@@ -475,7 +476,7 @@ def _compute_default_scores_and_diagnostics(
         _add_volume_diagnostics(diagnostics, volume_stats)
 
     component_keys = (
-        "shape_point_cloud_f1",
+        "shape_surface_distance_f1",
         "shape_volume_iou",
     )
     component_values = [scores[k] for k in component_keys if scores.get(k) is not None]
@@ -490,25 +491,25 @@ def _compute_diagnostics(candidate: MetricContext, gt: MetricContext) -> dict[st
     diag = _bbox_diagonal(gt)
     if diag is not None:
         diagnostics["part_diagonal"] = diag
-    pc_stats = _point_cloud_f1_stats(candidate, gt)
+    pc_stats = _surface_distance_f1_stats(candidate, gt)
     if pc_stats is not None:
-        _add_point_cloud_diagnostics(diagnostics, pc_stats)
+        _add_surface_distance_diagnostics(diagnostics, pc_stats)
     stats = _volume_overlap_stats(candidate, gt)
     if stats is not None:
         _add_volume_diagnostics(diagnostics, stats)
     return diagnostics
 
 
-def _add_point_cloud_diagnostics(
+def _add_surface_distance_diagnostics(
     diagnostics: dict[str, float],
-    pc_stats: dict[str, float],
+    stats: dict[str, float],
 ) -> None:
-    diagnostics["point_cloud_f1"] = pc_stats["f1"]
-    diagnostics["point_cloud_precision"] = pc_stats["precision"]
-    diagnostics["point_cloud_recall"] = pc_stats["recall"]
-    diagnostics["point_cloud_threshold"] = pc_stats["threshold"]
-    diagnostics["point_cloud_mean_chamfer"] = pc_stats["mean_chamfer"]
-    diagnostics["point_cloud_mean_normal_dot"] = pc_stats["mean_normal_dot"]
+    diagnostics["surface_distance_f1"] = stats["f1"]
+    diagnostics["surface_distance_precision"] = stats["precision"]
+    diagnostics["surface_distance_recall"] = stats["recall"]
+    diagnostics["surface_distance_threshold"] = stats["threshold"]
+    diagnostics["surface_distance_mean_chamfer"] = stats["mean_chamfer"]
+    diagnostics["surface_distance_mean_normal_dot"] = stats["mean_normal_dot"]
 
 
 def _add_volume_diagnostics(
@@ -520,22 +521,31 @@ def _add_volume_diagnostics(
     diagnostics["volume_symmetric_difference"] = stats[2]
 
 
-def _point_cloud_f1_stats(
+def _surface_distance_f1_stats(
     candidate: MetricContext, gt: MetricContext,
 ) -> dict[str, float] | None:
-    """Symmetric point-cloud F1 + diagnostics (mean chamfer, threshold).
+    """Symmetric point-to-SURFACE F1 + diagnostics (mean chamfer, threshold).
 
-    A point counts as a hit only when both gates pass:
+    Sample points on each mesh (area-weighted, same seed), then match every
+    sample to the *closest point on the other mesh's surface* -- not to the
+    nearest sample of the other cloud. A sample counts as a hit when both gates
+    pass:
 
-    1. Distance to its nearest neighbour on the other cloud is within
-       :data:`POINT_CLOUD_F1_THRESHOLD_FRACTION` of the GT bbox diagonal.
-    2. The outward normal at the source point and at the matched point
-       dot above :data:`POINT_CLOUD_F1_NORMAL_DOT_THRESHOLD` (i.e. they
-       face roughly the same direction; ≈20° tolerance at cos(20°)).
+    1. Its distance to the other surface is within
+       :data:`SURFACE_DISTANCE_F1_THRESHOLD_FRACTION` of the GT bbox diagonal.
+    2. Its own outward normal and the surface normal at the foot point dot above
+       :data:`SURFACE_DISTANCE_F1_NORMAL_DOT_THRESHOLD` (≈20° tolerance at cos(20°)).
 
-    The second gate rejects "right place, wrong side" matches (back-face
-    of a thin wall, or a flipped-orientation copy of the part) that
-    would otherwise pass on distance alone.
+    Point-to-surface (vs the old point-to-point-cloud) removes the sampling
+    artifacts that made the metric noisy under small deformations / differing
+    tessellations and only *looked* exact when the two clouds happened to
+    coincide: nearest-sample distance over-estimates the true surface distance,
+    and the matched sample's normal can come from a different facet at edges. On
+    a perfect match this is exactly 1.0.
+
+    The second gate rejects "right place, wrong side" matches (back-face of a
+    thin wall, or a flipped-orientation copy of the part) that would otherwise
+    pass on distance alone.
     """
     pts_a = candidate.point_cloud
     pts_b = gt.point_cloud
@@ -543,29 +553,36 @@ def _point_cloud_f1_stats(
     nrm_b = gt.point_cloud_normals
     if pts_a is None or pts_b is None or nrm_a is None or nrm_b is None:
         return None
+    mesh_a = candidate.get_mesh()
+    mesh_b = gt.get_mesh()
+    if mesh_a is None or mesh_b is None:
+        return None
     diag = _bbox_diagonal(gt)
     if diag is None or diag <= 0:
         return None
 
-    threshold = max(1e-6, POINT_CLOUD_F1_THRESHOLD_FRACTION * diag)
+    threshold = max(1e-6, SURFACE_DISTANCE_F1_THRESHOLD_FRACTION * diag)
 
-    from scipy.spatial import cKDTree
+    from cadgenbench.eval.sampling import closest_point_distances_and_normals
 
-    tree_a = cKDTree(pts_a)
-    tree_b = cKDTree(pts_b)
-    a_to_b_dist, a_to_b_idx = tree_b.query(pts_a)
-    b_to_a_dist, b_to_a_idx = tree_a.query(pts_b)
+    # Each sample vs the closest point on the OTHER mesh's surface.
+    a_to_b_dist, a_foot_nrm = closest_point_distances_and_normals(
+        pts_a, mesh_b.vertices, mesh_b.triangles,
+    )
+    b_to_a_dist, b_foot_nrm = closest_point_distances_and_normals(
+        pts_b, mesh_a.vertices, mesh_a.triangles,
+    )
 
-    a_to_b_dot = np.einsum("ij,ij->i", nrm_a, nrm_b[a_to_b_idx])
-    b_to_a_dot = np.einsum("ij,ij->i", nrm_b, nrm_a[b_to_a_idx])
+    a_to_b_dot = np.einsum("ij,ij->i", nrm_a, a_foot_nrm)
+    b_to_a_dot = np.einsum("ij,ij->i", nrm_b, b_foot_nrm)
 
     # |dot|: orientation-insensitive (accept the right surface regardless of
-    # winding direction); see POINT_CLOUD_F1_NORMAL_DOT_THRESHOLD.
+    # winding direction); see SURFACE_DISTANCE_F1_NORMAL_DOT_THRESHOLD.
     a_hit = (a_to_b_dist <= threshold) & (
-        np.abs(a_to_b_dot) > POINT_CLOUD_F1_NORMAL_DOT_THRESHOLD
+        np.abs(a_to_b_dot) > SURFACE_DISTANCE_F1_NORMAL_DOT_THRESHOLD
     )
     b_hit = (b_to_a_dist <= threshold) & (
-        np.abs(b_to_a_dot) > POINT_CLOUD_F1_NORMAL_DOT_THRESHOLD
+        np.abs(b_to_a_dot) > SURFACE_DISTANCE_F1_NORMAL_DOT_THRESHOLD
     )
 
     precision = float(a_hit.mean())

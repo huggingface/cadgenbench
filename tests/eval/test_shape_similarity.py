@@ -8,7 +8,7 @@ import pytest
 from cadgenbench.eval.shape_similarity import (
     MetricContext,
     compute_metrics,
-    shape_point_cloud_f1,
+    shape_surface_distance_f1,
     shape_volume_iou,
 )
 from cadgenbench.common.measurements import BBox, Measurements
@@ -49,52 +49,55 @@ def _ctx_with_step(x: float, y: float, z: float) -> MetricContext:
 
 
 # ---------------------------------------------------------------------------
-# shape_point_cloud_f1
+# shape_surface_distance_f1
 # ---------------------------------------------------------------------------
 
 class TestShapePointCloudF1:
 
-    def test_identical_shape_near_one(self) -> None:
+    def test_identical_shape_exactly_one(self) -> None:
+        # Point-to-surface matching is exact on identical geometry: every sample's
+        # closest point on the other mesh is itself (distance 0) and the foot
+        # normal equals the sample's own normal (|dot|=1). No sampling artifacts.
         a = _ctx_with_step(10, 20, 30)
-        score = shape_point_cloud_f1(a, a)
+        score = shape_surface_distance_f1(a, a)
         assert score is not None
-        assert score > 0.95
+        assert score == pytest.approx(1.0, abs=1e-9)
 
     def test_symmetric(self) -> None:
         a = _ctx_with_step(10, 20, 30)
         b = _ctx_with_step(12, 22, 32)
-        ab = shape_point_cloud_f1(a, b)
-        ba = shape_point_cloud_f1(b, a)
+        ab = shape_surface_distance_f1(a, b)
+        ba = shape_surface_distance_f1(b, a)
         assert ab is not None and ba is not None
         assert ab == pytest.approx(ba, rel=0.15)
 
     def test_dissimilar_shapes_lower_score(self) -> None:
         a = _ctx_with_step(10, 10, 10)
         b = _ctx_with_step(10, 10, 50)
-        score = shape_point_cloud_f1(a, b)
-        self_score = shape_point_cloud_f1(a, a)
+        score = shape_surface_distance_f1(a, b)
+        self_score = shape_surface_distance_f1(a, a)
         assert score is not None
         assert self_score is not None
         assert score < self_score - 0.05
 
     def test_returns_float_in_range(self) -> None:
         a = _ctx_with_step(10, 10, 10)
-        score = shape_point_cloud_f1(a, a)
+        score = shape_surface_distance_f1(a, a)
         assert isinstance(score, float)
         assert 0.0 <= score <= 1.0
 
     def test_returns_none_without_step(self) -> None:
         a = _ctx_with_step(10, 10, 10)
         b = MetricContext()
-        assert shape_point_cloud_f1(a, b) is None
-        assert shape_point_cloud_f1(b, a) is None
+        assert shape_surface_distance_f1(a, b) is None
+        assert shape_surface_distance_f1(b, a) is None
 
     def test_returns_none_without_gt_step(self) -> None:
         """Without a STEP path on GT the metric can't sample, returns None."""
         path = _make_step_box(10, 10, 10)
         a = MetricContext(step_path=path, measurements=_meas())
         b = MetricContext()
-        assert shape_point_cloud_f1(a, b) is None
+        assert shape_surface_distance_f1(a, b) is None
 
     def test_normal_gate_accepts_flipped_normals_via_absdot(self) -> None:
         """Inverted normals at coincident points are ACCEPTED (|dot| gate).
@@ -108,13 +111,13 @@ class TestShapePointCloudF1:
         import numpy as np
 
         a = _ctx_with_step(10, 10, 10)
-        baseline = shape_point_cloud_f1(a, a)
+        baseline = shape_surface_distance_f1(a, a)
         assert baseline is not None and baseline > 0.95
 
         b = _ctx_with_step(10, 10, 10)
         _ = b.point_cloud
         b._pc_normals = -1.0 * b._pc_normals  # noqa: SLF001
-        flipped = shape_point_cloud_f1(a, b)
+        flipped = shape_surface_distance_f1(a, b)
         assert flipped is not None
         assert flipped > 0.95, flipped  # |dot| -> flip accepted
         sanity = float(np.linalg.norm(
@@ -165,7 +168,7 @@ class TestComputeMetrics:
         """Same STEP on both sides -> both shape sub-metrics report."""
         a = _ctx_with_step(10, 10, 10)
         scores, errors = compute_metrics(a, a)
-        assert "shape_point_cloud_f1" in scores
+        assert "shape_surface_distance_f1" in scores
         assert "shape_volume_iou" in scores
         assert errors == {}
 
@@ -177,7 +180,7 @@ class TestComputeMetrics:
 
     def test_custom_subset(self) -> None:
         a = _ctx_with_step(10, 10, 10)
-        scores, _ = compute_metrics(a, a, metrics={"pc_f1": shape_point_cloud_f1})
+        scores, _ = compute_metrics(a, a, metrics={"pc_f1": shape_surface_distance_f1})
         assert list(scores.keys()) == ["pc_f1"]
 
     def test_custom_metric_function(self) -> None:
@@ -203,7 +206,7 @@ class TestComputeMetrics:
         a = MetricContext(measurements=_meas())
         scores, errors = compute_metrics(
             a, a,
-            metrics={"broken": broken, "pc_f1": shape_point_cloud_f1},
+            metrics={"broken": broken, "pc_f1": shape_surface_distance_f1},
         )
         assert scores["broken"] == 0.0
         assert "broken" in errors

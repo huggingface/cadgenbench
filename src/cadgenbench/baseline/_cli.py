@@ -58,7 +58,7 @@ GT_STEP_NAME = "ground_truth.step"
 DISPLAYED_METRICS: tuple[str, ...] = (
     "cad_score",
     "shape_similarity_score",
-    "shape_point_cloud_f1",
+    "shape_surface_distance_f1",
     "shape_volume_iou",
 )
 

@@ -462,10 +462,10 @@ def _render_fixture_card(
     edit_m = result.get("edit_metrics") or {}
     is_editing = bool(edit_m)
     shape_renorm = edit_m.get("shape_similarity_renormalized")
-    # Shape sub-metrics (Point Cloud F1 / Volume IoU). Rendered as the Shape
+    # Shape sub-metrics (Surface Distance F1 / Volume IoU). Rendered as the Shape
     # Similarity pill's own sub-line (like Topo's "cand vs gt"), so the
     # breakdown sits with the metric it explains rather than on a separate row.
-    component_keys = ("shape_point_cloud_f1", "shape_volume_iou")
+    component_keys = ("shape_surface_distance_f1", "shape_volume_iou")
     _component_pairs = [
         (k, gt_m.get(k)) for k in component_keys if gt_m.get(k) is not None
     ]
@@ -492,7 +492,7 @@ def _render_fixture_card(
             )
         if shape_score is not None:
             # Editing fixtures headline the renormalized shape value; generation
-            # the raw similarity. Both show the Point Cloud F1 / Volume IoU
+            # the raw similarity. Both show the Surface Distance F1 / Volume IoU
             # breakdown as the sub-line (no renorm/no-op annotation).
             if is_editing and shape_renorm is not None:
                 shape_value = _fmt_metric("shape_similarity_score", shape_renorm)

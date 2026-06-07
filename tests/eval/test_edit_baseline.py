@@ -160,7 +160,7 @@ def test_compute_baseline_identical_input_gt_scores_near_perfect() -> None:
     # the no-op problem in its most extreme form. It does not hit exactly
     # 1.0 because of tessellation + alignment residue (the input is meshed
     # and re-aligned, not transformed in place), which the tightened 0.5%
-    # point-cloud F1 threshold now registers; so the tiny EDIT_HEADROOM_FLOOR
+    # surface distance F1 threshold now registers; so the tiny EDIT_HEADROOM_FLOOR
     # (numerical-stability guard, not a "meaningful edit" threshold) does not
     # by itself reject a no-edit.
     gt = FIXTURES_DIR / "test_1" / "gt.step"
