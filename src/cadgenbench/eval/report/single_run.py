@@ -292,6 +292,12 @@ _EDIT_DIFF_LEGEND = [
     ("#e62929", "extra material (too much)"),
     ("#f5991a", "missing material (too little)"),
 ]
+# Ground-truth "answer key" edit diff: a single blue chip for the correct
+# change (GT vs the input). Pairs with _EDIT_DIFF_LEGEND so the GT and Output
+# columns read as a matched pair on editing fixtures.
+_GT_EDIT_DIFF_LEGEND = [
+    ("#2173f5", "correct change (ground truth)"),
+]
 
 def _images_html(pngs: list[Path], *, base_url: str | None = None) -> str:
     """Render a row of view thumbnails.
@@ -345,6 +351,45 @@ def _render_gt_images(gt_dir: Path | None, *, base_url: str | None = None) -> st
     pngs = [renders_dir / f"{v}.png" for v in VIEWS if (renders_dir / f"{v}.png").exists()]
     renders_base = f"{base_url}/renders" if base_url else None
     return _images_html(pngs, base_url=renders_base) or '<p class="note">No GT renders</p>'
+
+
+#: GT "answer key" edit-diff turntable, written once per data revision into the
+#: GT dataset by ``cadgenbench-leaderboard/tools/generate_gt_edit_diff.py`` at
+#: ``<fixture>/renders/edit_diff_gt.webp``. Not a per-submission artifact, so the
+#: eval pipeline never produces it; the hosted report references it through the
+#: GT proxy and a local report falls back to the static GT views.
+GT_EDIT_DIFF_WEBP = "edit_diff_gt.webp"
+
+
+def _render_gt_edit_diff(gt_dir: Path | None, *, base_url: str | None = None) -> str | None:
+    """GT "answer key" edit-diff turntable for an editing fixture (or ``None``).
+
+    A translucent GT ghost with the correct change (GT vs the *input*) painted
+    blue -- the reference companion to the candidate edit diff, so the Ground
+    Truth column reads the same way as the Output column. Sourced from the GT
+    dataset's one-time ``<fixture>/renders/edit_diff_gt.webp``: referenced by URL
+    on the hosted report (``base_url`` = the fixture's GT proxy root), or
+    base64-inlined locally when the file happens to be present.
+
+    Returns ``None`` when the asset is unavailable (the usual case for a local
+    portable report, which never ships the GT answer key) so the caller falls
+    back to the static GT views.
+    """
+    if base_url:
+        src: str | None = f"{base_url}/renders/{GT_EDIT_DIFF_WEBP}"
+    else:
+        if not gt_dir:
+            return None
+        src = _data_uri(gt_dir / "renders" / GT_EDIT_DIFF_WEBP)
+        if not src:
+            return None
+    return (
+        '<div class="images">'
+        '<div class="view"><span class="imgwrap">'
+        f'<img src="{src}" alt="ground truth (edit diff)" class="zoomable" '
+        'loading="lazy"></span><span>correct change</span></div>'
+        "</div>"
+    )
 
 
 def _render_output_images(result_dir: Path, *, base_url: str | None = None) -> str:
@@ -609,10 +654,23 @@ def _render_fixture_card(
     p.append("</div>")
 
     # Ground Truth column -- always shown, so editing and generation share the
-    # same Input | GT | Output shape.
+    # same Input | GT | Output shape. Editing fixtures show the GT "answer key"
+    # edit diff (blue = the correct change vs the input) so the column mirrors
+    # the Output edit diff; it falls back to the static GT views when the
+    # answer-key webp isn't available (e.g. a local portable report).
     p.append('<div class="col">')
-    p.append("<h3>Ground Truth</h3>")
-    p.append(_render_gt_images(gt_dir, base_url=gt_base))
+    gt_edit = (
+        _render_gt_edit_diff(gt_dir, base_url=gt_base) if is_editing_fixture else None
+    )
+    if gt_edit is not None:
+        p.append(
+            "<h3>Ground truth (correct change) "
+            f"{_legend_html(_GT_EDIT_DIFF_LEGEND)}</h3>"
+        )
+        p.append(gt_edit)
+    else:
+        p.append("<h3>Ground Truth</h3>")
+        p.append(_render_gt_images(gt_dir, base_url=gt_base))
     p.append("</div>")
 
     # Output column. Editing fixtures carry the edit-diff (output iso + full

@@ -235,6 +235,54 @@ def build_edit_diff_shapes(gt_mesh: Mesh, candidate_mesh: Mesh) -> list:
     ]
 
 
+def build_gt_edit_diff_shapes(gt_mesh: Mesh, input_mesh: Mesh) -> list:
+    """Build the ground-truth "answer key" shapes: GT ghost + blue edit highlight.
+
+    The candidate diff (:func:`build_edit_diff_shapes`) shows where a *model*
+    deviates from the GT in red/amber; this is the reference companion for the
+    gallery's ground-truth row. The GT is drawn as the same translucent ghost,
+    with the **correct change painted blue** -- symmetric so both edit directions
+    read, mirroring the candidate diff's two halves but in a single
+    "this is the change" colour:
+
+    - **added** material (GT outside the *input*) paints blue on the GT ghost,
+    - **removed** material (input outside the GT) paints blue on a transparent
+      *input* body (``ghost=False``), so a deletion shows as a blue phantom of
+      what used to be there rather than leaving the answer key blank.
+
+    Distance-only (``normal=False``): the intended edit is overwhelmingly an
+    add/remove of material, and the candidate-side normal term dapples here
+    because the GT and input are independently tessellated, so smooth normals
+    wobble across matching curved surfaces (the false-positive HANDOFF warned of).
+
+    Returns a ``shapes`` list in the ``(polydata, rgb, alpha)`` form the viewer's
+    turntable renderer consumes (the per-vertex ``"rgba"`` arrays drive the
+    colour; the tuple rgb/alpha are placeholders).
+    """
+    from cadgenbench.common.viewer import (  # noqa: PLC0415
+        DIFF_GHOST_RGB,
+        DIFF_REFERENCE_RGB,
+        DIFF_TOL_FLOOR_MM,
+        DIFF_TOL_FRACTION,
+    )
+
+    lo = gt_mesh.vertices.min(axis=0)
+    hi = gt_mesh.vertices.max(axis=0)
+    diag = float(np.linalg.norm(hi - lo))
+    f1_tol = max(DIFF_TOL_FLOOR_MM, DIFF_TOL_FRACTION * diag)
+
+    gt_sub = _subdivide(gt_mesh)
+    input_sub = _subdivide(input_mesh)
+    added = _smooth_scalar(gt_sub, _severity(
+        gt_sub, input_mesh, gt_mesh, f1_tol=f1_tol, normal=False))
+    removed = _smooth_scalar(input_sub, _severity(
+        input_sub, gt_mesh, input_mesh, f1_tol=f1_tol, normal=False))
+    return [
+        (_field_polydata(gt_sub, added, DIFF_REFERENCE_RGB, ghost=True), DIFF_GHOST_RGB, 1.0),
+        (_field_polydata(input_sub, removed, DIFF_REFERENCE_RGB, ghost=False), DIFF_GHOST_RGB, 1.0),
+    ]
+
+
 # --- zoom framing (candidate-independent: GT vs input) ----------------------
 
 # Barycentric face-sample weights (centroid, edge midpoints, two-thirds points):
@@ -395,3 +443,46 @@ def render_edit_diff_turntables(
         if zoom is not None:
             zoom_webp = _webp(zoom[0], zoom[1])
     return full_webp, zoom_webp
+
+
+def render_gt_edit_diff_turntable(
+    gt_mesh: Mesh,
+    input_mesh: Mesh,
+    *,
+    frames: int = 120,
+    width: int = 512,
+    height: int = 384,
+    duration_ms: int = 150,
+    quality: int = 68,
+) -> bytes:
+    """Render the ground-truth "answer key" edit-diff as a single turntable WebP.
+
+    The reference companion to :func:`render_edit_diff_turntables`: a translucent
+    GT ghost with the correct change painted blue (GT vs *input*; see
+    :func:`build_gt_edit_diff_shapes`). Framed on the GT/input union so neither is
+    clipped. Unlike the candidate diff there is no separate zoom clip -- the GT
+    row shows one full turntable. ``input_mesh`` is required (no edit to show
+    without it).
+
+    Returns the full-turntable WebP bytes.
+    """
+    if gt_mesh.n_triangles == 0:
+        raise ValueError("render_gt_edit_diff_turntable: GT mesh has zero triangles")
+    if input_mesh.n_triangles == 0:
+        raise ValueError("render_gt_edit_diff_turntable: input mesh has zero triangles")
+    if frames < 2:
+        raise ValueError("render_gt_edit_diff_turntable: frames must be >= 2")
+
+    from cadgenbench.common.viewer import (  # noqa: PLC0415
+        _diff_bbox,
+        _encode_webp,
+        _render_turntable_frames,
+    )
+
+    shapes = build_gt_edit_diff_shapes(gt_mesh, input_mesh)
+    full_min, full_max = _diff_bbox(gt_mesh, input_mesh)
+    frames_png = _render_turntable_frames(
+        shapes=shapes, bbox_min=full_min, bbox_max=full_max,
+        frames=frames, width=width, height=height,
+    )
+    return _encode_webp(frames_png, duration_ms=duration_ms, quality=quality)

@@ -73,6 +73,7 @@ __all__ = [
     "DIFF_EXTRA_RGB",
     "DIFF_GHOST_RGB",
     "DIFF_MISSING_RGB",
+    "DIFF_REFERENCE_RGB",
     "MeshDiff",
     "OVERLAY_PALETTE",
     "RenderedImage",
@@ -131,6 +132,12 @@ OVERLAY_PALETTE: tuple[tuple[float, float, float, float], ...] = (
 DIFF_GHOST_RGB: tuple[float, float, float] = (0.74, 0.77, 0.82)
 DIFF_EXTRA_RGB: tuple[float, float, float] = (0.90, 0.16, 0.16)    # added by candidate (too much)
 DIFF_MISSING_RGB: tuple[float, float, float] = (0.96, 0.60, 0.10)  # missing from candidate (too little)
+# Reference ("answer key") highlight for the ground-truth edit-diff: blue marks
+# where the GT differs from the *input*, i.e. the correct change. Shares the
+# blue = matched/correct meaning of cadgenbench.eval.interface_match_viz so the
+# GT row and the per-fixture reports read as one palette (grey = body, blue =
+# correct/reference, red = too much, amber = too little).
+DIFF_REFERENCE_RGB: tuple[float, float, float] = (0.13, 0.45, 0.96)
 DIFF_GHOST_ALPHA: float = 0.16
 # "A bit of alpha" on the highlight (vs fully opaque) so where extra and missing
 # patches stack, or sit over the ghost body, both still read through.
