@@ -357,45 +357,55 @@ def _render_output_images(result_dir: Path, *, base_url: str | None = None) -> s
     return _images_html(pngs, base_url=base_url) or '<p class="note">No output renders</p>'
 
 
+def _edit_diff_tile(path: Path, label: str, *, base_url: str | None) -> str:
+    """One edit-diff tile (image + caption), matching the view-grid tile markup."""
+    src = f"{base_url}/{path.name}" if base_url else _data_uri(path)
+    gizmo = gizmo_svg(path.stem)
+    gizmo_html = f'<span class="axis-giz">{gizmo}</span>' if gizmo else ""
+    return (
+        f'<div class="view"><span class="imgwrap">'
+        f'<img src="{src}" alt="{html.escape(label)}" class="zoomable" '
+        f'loading="lazy">{gizmo_html}</span>'
+        f"<span>{html.escape(label)}</span></div>"
+    )
+
+
 def _render_edit_diff(result_dir: Path, *, base_url: str | None = None) -> str:
-    """Embed the editing-task edit-diff panel: output iso + diff + zoomed diff.
+    """Embed the editing-task edit-diff panel.
 
-    Three tiles, in order:
-
-    - ``iso.png``             -- the aligned output rendered plainly (what you
-      submitted), for reference;
-    - ``edit_diff.webp``      -- the full ghost-body turntable, every surface
-      that differs from GT lit in two warm tones (red = material the output
-      added / too much, amber = GT material it is missing / too little);
-    - ``edit_diff_zoom.webp`` -- the same turntable framed on the intended edit,
-      so a small or internal change is legible; omitted when absent.
+    Laid out as two rows: the top row pairs the aligned **output** iso (what you
+    submitted, for reference) with the full **edit diff** ghost-body turntable
+    (red = material the output added / too much, amber = GT material it is missing
+    / too little); the bottom row centres the **zoom** turntable framed on the
+    intended edit, so a small or internal change is legible.
 
     Inlined as base64 by default (portable local report); when *base_url* is
-    given (hosted report) each tile is referenced from the public render bucket
-    instead. No fallback: a missing tile is simply not shown, and an empty panel
-    yields an explicit note rather than reverting to the static views.
+    given (hosted report) each tile is referenced from the public render bucket.
+    No fallback: a missing tile is simply not shown, and an empty panel yields an
+    explicit note rather than reverting to the static views.
     """
     renders = result_dir / "renders"
-    tiles = [
+    top = [
         (renders / "iso.png", "output"),
         (renders / "edit_diff.webp", "edit diff"),
-        (renders / "edit_diff_zoom.webp", "edit diff (zoom)"),
     ]
-    present = [(p, label) for p, label in tiles if p.exists()]
-    if not present:
-        return '<p class="note">No edit-diff render</p>'
-    parts = ['<div class="images">']
-    for path, label in present:
-        src = f"{base_url}/{path.name}" if base_url else _data_uri(path)
-        gizmo = gizmo_svg(path.stem)
-        gizmo_html = f'<span class="axis-giz">{gizmo}</span>' if gizmo else ""
+    top = [(p, label) for p, label in top if p.exists()]
+    zoom = renders / "edit_diff_zoom.webp"
+    if not top and not zoom.exists():
+        return '<p class="note">No output renders</p>'
+    parts = []
+    if top:
         parts.append(
-            f'<div class="view"><span class="imgwrap">'
-            f'<img src="{src}" alt="{html.escape(label)}" class="zoomable" '
-            f'loading="lazy">{gizmo_html}</span>'
-            f"<span>{html.escape(label)}</span></div>"
+            '<div class="images">'
+            + "".join(_edit_diff_tile(p, label, base_url=base_url) for p, label in top)
+            + "</div>"
         )
-    parts.append("</div>")
+    if zoom.exists():
+        parts.append(
+            '<div class="images" style="justify-content:center">'
+            + _edit_diff_tile(zoom, "edit diff (zoom)", base_url=base_url)
+            + "</div>"
+        )
     return "\n".join(parts)
 
 
@@ -480,6 +490,15 @@ def _render_fixture_card(
     # present, surface the renormalized shape value + the no-op baseline.
     edit_m = result.get("edit_metrics") or {}
     is_editing = bool(edit_m)
+    # Whether this is an *editing* fixture is a property of the fixture (it ships
+    # an edit baseline), not of the candidate -- ``edit_metrics`` is only present
+    # for a valid candidate, so an invalid/missing output would otherwise fall
+    # back to the generation layout. Keying off the GT-side baseline keeps the
+    # Input | GT | Output shape identical whether or not there is an output.
+    from cadgenbench.eval.edit_baseline import EDIT_BASELINE_NAME  # noqa: PLC0415
+    is_editing_fixture = is_editing or (
+        gt_dir is not None and (gt_dir / EDIT_BASELINE_NAME).exists()
+    )
     shape_renorm = edit_m.get("shape_similarity_renormalized")
     # Shape sub-metrics (Surface Distance F1 / Volume IoU). Rendered as the Shape
     # Similarity pill's own sub-line (like Topo's "cand vs gt"), so the
@@ -589,28 +608,28 @@ def _render_fixture_card(
                 p.append(f'<iframe src="{src}" class="pdf-embed" loading="lazy"></iframe>')
     p.append("</div>")
 
-    if is_editing:
-        # Editing fixtures: the GT and aligned-output 4-view grids are visually
-        # near-identical for a small or internal edit, so replace both with the
-        # single ghost-diff turntable that isolates what actually changed. GT
-        # column is dropped entirely; the diff already carries the GT reference.
-        p.append('<div class="col">')
+    # Ground Truth column -- always shown, so editing and generation share the
+    # same Input | GT | Output shape.
+    p.append('<div class="col">')
+    p.append("<h3>Ground Truth</h3>")
+    p.append(_render_gt_images(gt_dir, base_url=gt_base))
+    p.append("</div>")
+
+    # Output column. Editing fixtures carry the edit-diff (output iso + full
+    # ghost-diff turntable + a turntable zoomed on the change) which isolates the
+    # edit; generation shows the plain aligned-output views. Either is empty (a
+    # note) when there's no valid output.
+    p.append('<div class="col">')
+    if is_editing_fixture:
         p.append(
             "<h3>Output vs ground truth (edit diff) "
             f"{_legend_html(_EDIT_DIFF_LEGEND)}</h3>"
         )
         p.append(_render_edit_diff(result_dir, base_url=fixture_base))
-        p.append("</div>")
     else:
-        p.append('<div class="col">')
-        p.append("<h3>Ground Truth</h3>")
-        p.append(_render_gt_images(gt_dir, base_url=gt_base))
-        p.append("</div>")
-
-        p.append('<div class="col">')
         p.append("<h3>Output (aligned)</h3>")
         p.append(_render_output_images(result_dir, base_url=fixture_base))
-        p.append("</div>")
+    p.append("</div>")
 
     p.append("</div>")  # three-col
 
