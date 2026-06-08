@@ -86,6 +86,11 @@ ZOOM_CLUSTER_LINK_FLOOR_MM: float = 5.0
 ZOOM_MARGIN_FRACTION: float = 0.35
 ZOOM_MARGIN_FLOOR_MM: float = 8.0
 
+#: Drop the zoom clip when its box (clamped to the full view) is at least this
+#: fraction of the full diagonal -- a near-whole-part "zoom" is redundant with
+#: the full clip and can otherwise read as *more* zoomed out than it.
+ZOOM_SKIP_FRACTION: float = 0.8
+
 
 # --- per-vertex severity field ---------------------------------------------
 
@@ -312,6 +317,31 @@ def edit_region_zoom_bbox(
     return lo - margin, hi + margin
 
 
+def _zoom_within_full(
+    zoom_bbox: tuple[np.ndarray, np.ndarray] | None,
+    full_min: np.ndarray,
+    full_max: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Clamp the zoom box to the full view and drop it when it fills most of it.
+
+    A large edit's region + margin can exceed the geometry-tight full-diff box,
+    which would make the "zoom" render *more* zoomed out than the full clip.
+    Clamping keeps it a subset; dropping it past :data:`ZOOM_SKIP_FRACTION` of the
+    full diagonal avoids a near-whole-part zoom that is redundant with the full
+    clip. Returns the clamped ``(lo, hi)`` or ``None`` (render only the full clip).
+    """
+    if zoom_bbox is None:
+        return None
+    lo = np.maximum(zoom_bbox[0], full_min)
+    hi = np.minimum(zoom_bbox[1], full_max)
+    if not np.all(hi > lo):
+        return None
+    full_diag = float(np.linalg.norm(full_max - full_min))
+    if float(np.linalg.norm(hi - lo)) >= ZOOM_SKIP_FRACTION * full_diag:
+        return None
+    return lo, hi
+
+
 # --- rendering --------------------------------------------------------------
 
 
@@ -359,7 +389,9 @@ def render_edit_diff_turntables(
 
     zoom_webp = None
     if input_mesh is not None:
-        zoom_bbox = edit_region_zoom_bbox(gt_mesh, input_mesh)
-        if zoom_bbox is not None:
-            zoom_webp = _webp(zoom_bbox[0], zoom_bbox[1])
+        zoom = _zoom_within_full(
+            edit_region_zoom_bbox(gt_mesh, input_mesh), full_min, full_max,
+        )
+        if zoom is not None:
+            zoom_webp = _webp(zoom[0], zoom[1])
     return full_webp, zoom_webp

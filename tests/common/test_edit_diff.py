@@ -73,6 +73,33 @@ class TestZoomBbox:
         assert np.all(hi > lo)
 
 
+class TestZoomWithinFull:
+    _FULL = (np.zeros(3), np.full(3, 100.0))
+
+    def test_none_passthrough(self) -> None:
+        assert edit_diff._zoom_within_full(None, *self._FULL) is None
+
+    def test_small_subset_kept(self) -> None:
+        zoom = (np.array([10.0, 10, 10]), np.array([20.0, 20, 20]))
+        out = edit_diff._zoom_within_full(zoom, *self._FULL)
+        assert out is not None
+        assert np.allclose(out[0], [10, 10, 10]) and np.allclose(out[1], [20, 20, 20])
+
+    def test_clamped_to_full(self) -> None:
+        # Extends below the full box but small enough after clamping -> kept,
+        # clamped to the full lower bound.
+        zoom = (np.array([-5.0, -5, -5]), np.array([20.0, 20, 20]))
+        out = edit_diff._zoom_within_full(zoom, *self._FULL)
+        assert out is not None
+        assert np.allclose(out[0], [0, 0, 0]) and np.allclose(out[1], [20, 20, 20])
+
+    def test_near_whole_part_dropped(self) -> None:
+        # Region + margin spilling past the part clamps to ~the full box and is
+        # dropped (would otherwise read as more zoomed out than the full clip).
+        zoom = (np.full(3, -50.0), np.full(3, 150.0))
+        assert edit_diff._zoom_within_full(zoom, *self._FULL) is None
+
+
 class TestBuildShapes:
     def test_returns_two_rgba_fields(self) -> None:
         shapes = edit_diff.build_edit_diff_shapes(_box(10, 10, 10), _box(14, 10, 10))
