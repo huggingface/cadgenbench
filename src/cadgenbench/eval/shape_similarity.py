@@ -346,7 +346,7 @@ def compare_step_files(
             step_for_metrics = candidate_step
         else:
             # Untrusted candidate (e.g. a submission): align via STEP export,
-            # then re-tessellate the aligned geometry. Unchanged behavior.
+            # then re-tessellate the aligned geometry.
             from cadgenbench.eval.alignment import align_step
 
             ar = align_step(

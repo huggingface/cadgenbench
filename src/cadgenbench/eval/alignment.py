@@ -15,13 +15,11 @@
 """Rigid-body alignment of STEP files and trusted meshes.
 
 Alignment is rotation + translation only; scale, shear, and mirrors are
-explicitly projected away. The pipeline generates a small pool of plausible
-rigid transforms (identity, PCA multi-start candidates, and Open3D FGR), refines
-each with Open3D multi-scale point-to-plane ICP, then selects the winner by a
-downstream-like shape agreement score: bidirectional F1, capped symmetric
-Chamfer, and nearest-neighbor RMSE. ICP residual is diagnostic only; it does not
-choose the final pose, which keeps exact/self and symmetric cases from drifting
-to a lower-IoU pose.
+projected away. The pipeline refines a pool of candidate poses (identity and the
+24 octahedral PCA orientations) with Open3D multi-scale point-to-plane ICP, then
+selects the pose by shape agreement (bidirectional surface F1, capped symmetric
+Chamfer, nearest-neighbour RMSE) with a canonical tie-break so near-symmetric
+parts resolve to one deterministic pose.
 
 STEP candidates are exported as aligned STEP files. Trusted sidecar meshes are
 aligned in memory and never re-tessellated.
@@ -42,6 +40,13 @@ from cadgenbench.eval.sampling import (
 )
 
 _OPEN3D_ICP_VOXEL_DIVISOR = 150.0
+
+# Poses whose surface F1 ties within this tolerance, and whose capped Chamfer
+# then ties within this fraction of the target diagonal, are treated as equally
+# good geometric fits; the canonical least-rotation tie-break decides between
+# them so near-symmetric parts resolve to one deterministic pose.
+_TIE_F1_TOLERANCE = 0.005
+_TIE_CHAMFER_FRACTION = 0.005
 
 
 @dataclass(frozen=True)
@@ -67,7 +72,6 @@ def align_step(
     icp_max_iter: int = 50,
     icp_tolerance: float = 1e-6,
     seed: int | None = None,
-    pca_top_k: int = 5,
 ) -> AlignmentResult:
     """Rigidly align *source* STEP file to *target* STEP file.
 
@@ -115,7 +119,6 @@ def align_step(
         selector_target=tgt_pts,
         icp_max_iter=icp_max_iter,
         icp_tolerance=icp_tolerance,
-        pca_top_k=pca_top_k,
     )
 
     # --- Apply transform to BREP and export ---
@@ -145,17 +148,14 @@ def align_cached_mesh(
     *,
     n_samples: int = 10_000,
     seed: int = 0,
-    pca_top_k: int = 12,
 ) -> CachedAlignmentResult:
     """Rigidly align *source*'s trusted mesh to *target*'s — no re-tessellation.
 
-    Both meshes come from :meth:`StepArtifacts.mesh` (sidecar-aware), so a
-    part with a supplied mesh is **never** re-meshed from its STEP. The rigid
-    transform is recovered from area-weighted point clouds via
-    :func:`align_points` (identity + PCA/FGR candidates, Open3D multi-scale ICP
-    refinement, Chamfer/F1 selection), then applied to the source mesh's
-    vertices. ``align_points`` returns a proper rotation (det +1), so triangle
-    winding is preserved and only the vertices move.
+    Both meshes come from :meth:`StepArtifacts.mesh` (sidecar-aware), so a part
+    with a supplied mesh is never re-meshed from its STEP. The transform is
+    recovered from area-weighted point clouds via :func:`align_points` and
+    applied to the source mesh's vertices; it is a proper rotation (det +1), so
+    triangle winding is preserved and only the vertices move.
     """
     from cadgenbench.common.mesh import Mesh
     from cadgenbench.eval.sampling import _area_weighted_sample
@@ -169,7 +169,6 @@ def align_cached_mesh(
         tgt_pts,
         selector_source=np.asarray(src_mesh.vertices, dtype=np.float64),
         selector_target=np.asarray(tgt_mesh.vertices, dtype=np.float64),
-        pca_top_k=pca_top_k,
     )
     aligned = Mesh(
         vertices=np.asarray(src_mesh.vertices, dtype=np.float64) @ R.T + t,
@@ -184,15 +183,12 @@ def align_points(
     target: np.ndarray,
     icp_max_iter: int = 50,
     icp_tolerance: float = 1e-6,
-    pca_top_k: int = 12,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Align two (N, 3) point clouds.  Returns ``(R, t, rmse)``.
 
-    Candidate generation starts from identity, the top-*pca_top_k* PCA
-    candidates (of the 24 octahedral orientations), and a best-effort Open3D
-    FGR candidate. Each is refined with Open3D multi-scale point-to-plane ICP.
-    Final selection is by downstream-like shape agreement (F1, capped symmetric
-    Chamfer, RMSE), not ICP residual.
+    Candidates are identity and the 24 octahedral PCA orientations, each refined
+    with Open3D multi-scale point-to-plane ICP. The pose is chosen by shape
+    agreement (F1, capped symmetric Chamfer, RMSE) with a canonical tie-break.
     """
     return _align_points_with_selector(
         source,
@@ -201,7 +197,6 @@ def align_points(
         selector_target=target,
         icp_max_iter=icp_max_iter,
         icp_tolerance=icp_tolerance,
-        pca_top_k=pca_top_k,
     )
 
 
@@ -213,12 +208,10 @@ def _align_points_with_selector(
     selector_target: np.ndarray,
     icp_max_iter: int = 50,
     icp_tolerance: float = 1e-6,
-    pca_top_k: int = 12,
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    """Align points, selecting candidates by shape agreement rather than ICP residual."""
+    """Refine identity + all PCA candidates and pick by shape agreement."""
     identity = (np.eye(3, dtype=np.float64), np.zeros(3, dtype=np.float64))
-    top_k = _pca_align_candidates(source, target)[:pca_top_k]
-    candidates = [identity, *top_k, *_open3d_fgr_candidates(source, target)]
+    candidates = [identity, *_pca_align_candidates(source, target)]
     return _refine_alignment_candidates(
         source,
         target,
@@ -240,37 +233,41 @@ def _refine_alignment_candidates(
     icp_max_iter: int,
     icp_tolerance: float,
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    """Refine candidate transforms and choose by downstream-like shape agreement."""
+    """Refine every candidate with ICP and pick the best pose by shape agreement.
+
+    Selection narrows by surface F1, then by capped Chamfer (geometry), each
+    within a tie tolerance; among the poses that remain genuinely tied — the
+    near-symmetric cases — the smallest rotation wins. This keeps the pose
+    deterministic and stable across point-sampling seeds.
+    """
     if not candidates:
         raise ValueError("alignment requires at least one initial candidate")
 
-    best: tuple[float, float, float, np.ndarray, np.ndarray] | None = None
+    scored: list[tuple[float, float, float, np.ndarray, np.ndarray]] = []
     for R_c, t_c in candidates:
-        candidate_transforms = [(R_c, t_c)]
         R_ref, t_ref = _open3d_multiscale_icp(
-            source,
-            target,
-            R_c,
-            t_c,
-            max_iter=icp_max_iter,
-            tolerance=icp_tolerance,
+            source, target, R_c, t_c, max_iter=icp_max_iter, tolerance=icp_tolerance,
         )
-        candidate_transforms.append((R_ref, t_ref))
-        for R, t in candidate_transforms:
-            f1, capped_chamfer, point_rmse = _shape_agreement_selector(
-                selector_source,
-                selector_target,
-                R,
-                t,
+        for R, t in ((R_c, t_c), (R_ref, t_ref)):
+            f1, capped_chamfer, _ = _shape_agreement_selector(
+                selector_source, selector_target, R, t,
             )
-            score = (f1, -capped_chamfer, -point_rmse)
-            if best is None or score > (best[0], best[1], best[2]):
-                best = (*score, R, t)
+            scored.append((f1, capped_chamfer, _rotation_angle(R), R, t))
 
-    assert best is not None
-    _f1, _neg_capped_chamfer, _neg_point_rmse, R_best, t_best = best
+    diag = float(np.linalg.norm(np.ptp(selector_target, axis=0)))
+    best_f1 = max(s[0] for s in scored)
+    f1_ties = [s for s in scored if s[0] >= best_f1 - _TIE_F1_TOLERANCE]
+    min_chamfer = min(s[1] for s in f1_ties)
+    geom_ties = [s for s in f1_ties if s[1] <= min_chamfer + _TIE_CHAMFER_FRACTION * diag]
+    geom_ties.sort(key=lambda s: (s[2], s[1]))  # least rotation, then Chamfer
+    _f1, _chamfer, _angle, R_best, t_best = geom_ties[0]
     _, point_rmse = _point_distance_rmse(source, target, R_best, t_best)
     return R_best, t_best, point_rmse
+
+
+def _rotation_angle(R: np.ndarray) -> float:
+    """Geodesic angle of a rotation matrix, in radians."""
+    return float(np.arccos(np.clip((np.trace(R) - 1.0) / 2.0, -1.0, 1.0)))
 
 
 def _open3d_multiscale_icp(
@@ -318,48 +315,6 @@ def _open3d_multiscale_icp(
         T = np.asarray(reg.transformation, dtype=np.float64)
 
     return _rt_from_transform(T)
-
-
-def _open3d_fgr_candidates(
-    source: np.ndarray,
-    target: np.ndarray,
-) -> list[tuple[np.ndarray, np.ndarray]]:
-    """Return a best-effort Open3D FGR global candidate, or no candidates."""
-    import open3d as o3d
-
-    diag = float(np.linalg.norm(np.ptp(target, axis=0)))
-    voxel = max(diag / 50.0, 1e-6)
-    try:
-        src = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.asarray(source, dtype=np.float64)))
-        tgt = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.asarray(target, dtype=np.float64)))
-        src_d = src.voxel_down_sample(voxel)
-        tgt_d = tgt.voxel_down_sample(voxel)
-        if len(src_d.points) < 4 or len(tgt_d.points) < 4:
-            return []
-        _estimate_o3d_normals(src_d)
-        _estimate_o3d_normals(tgt_d)
-        src_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
-            src_d,
-            o3d.geometry.KDTreeSearchParamHybrid(radius=voxel * 5.0, max_nn=100),
-        )
-        tgt_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
-            tgt_d,
-            o3d.geometry.KDTreeSearchParamHybrid(radius=voxel * 5.0, max_nn=100),
-        )
-        reg = o3d.pipelines.registration.registration_fgr_based_on_feature_matching(
-            src_d,
-            tgt_d,
-            src_fpfh,
-            tgt_fpfh,
-            o3d.pipelines.registration.FastGlobalRegistrationOption(
-                maximum_correspondence_distance=voxel * 2.0,
-            ),
-        )
-    except RuntimeError:
-        return []
-
-    R, t = _rt_from_transform(np.asarray(reg.transformation, dtype=np.float64))
-    return [(R, t)]
 
 
 def _estimate_o3d_normals(point_cloud) -> None:  # type: ignore[no-untyped-def]

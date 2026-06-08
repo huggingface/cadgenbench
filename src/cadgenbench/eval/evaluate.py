@@ -486,7 +486,7 @@ def _align_or_reuse(
 
     from cadgenbench.eval.alignment import align_cached_mesh, export_aligned_shape
 
-    car = align_cached_mesh(raw_artifacts, gt_artifacts, pca_top_k=12)
+    car = align_cached_mesh(raw_artifacts, gt_artifacts)
     aligned_step.parent.mkdir(parents=True, exist_ok=True)
     export_aligned_shape(
         raw_artifacts.wrapped, car.rotation, car.translation, aligned_step,

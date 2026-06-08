@@ -83,12 +83,11 @@ EDITING_AXIS_WEIGHTS: dict[str, float] = {
 # Authoring gate: the edit must leave the shape metric at least this
 # much headroom (``1 - b_shape``). Below this the no-op already scores
 # essentially perfectly, so the renormalized axis cannot resolve the
-# edit — the *fixture* is rejected at authoring time, not special-cased
-# in the scorer. The shape metric is very stable (tessellation residue
-# saturates IoU near 0.99), so the floor is small; it sits ~10x above
-# the run-to-run alignment jitter on ``b_shape`` (~1e-3) so the gate is
-# a stable pass/fail rather than noise.
-EDIT_HEADROOM_FLOOR = 1e-2
+# edit — the fixture is rejected at authoring time, not special-cased in
+# the scorer. Alignment is deterministic, so the only noise in ``b_shape``
+# is F1 point-sampling (~2e-4); the floor sits ~10x above it so the
+# renormalized shape axis carries signal rather than noise.
+EDIT_HEADROOM_FLOOR = 2e-3
 
 
 def compute_edit_baseline(input_step: str | Path, gt_step: str | Path) -> dict:

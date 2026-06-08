@@ -40,12 +40,12 @@ the shape axis against the no-op input and reweight differently. See
 We instruct submissions to centre their models at $(0, 0, 0)$ and give
 rules for orientation (longest axis, mounting frame), but in any case
 rigidly align the outputs to the GT before scoring. Alignment is rotation
-+ translation only, never scale. The production aligner generates identity,
-PCA multi-start, and Open3D FGR candidates, refines them with Open3D
-multi-scale point-to-plane ICP, then selects the final pose by
-downstream-like shape agreement (bidirectional F1, capped symmetric
-Chamfer, RMSE) rather than ICP residual. Trusted mesh sidecars are aligned
-in memory and are not re-tessellated.
++ translation only, never scale. The aligner refines a pool of candidate
+poses (identity and the 24 octahedral PCA orientations) with Open3D
+multi-scale point-to-plane ICP, then selects the pose by shape agreement
+(bidirectional F1, capped symmetric Chamfer, RMSE) with a canonical
+tie-break so near-symmetric parts resolve to one deterministic pose.
+Trusted mesh sidecars are aligned in memory and are not re-tessellated.
 
 ---
 
