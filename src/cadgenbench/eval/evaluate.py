@@ -113,6 +113,10 @@ EDIT_DIFF_WEBP = "edit_diff.webp"
 # 35 looping clips on one page is wasteful); the full turntable still plays in
 # the detail card. Rides to the render bucket like any other ``renders/*.png``.
 EDIT_DIFF_PNG = "edit_diff.png"
+# Zoom turntable framed on the intended edit (GT vs input). Omitted only if the
+# edit region is degenerate (GT == input within tolerance), which should not
+# happen for a real editing fixture.
+EDIT_DIFF_ZOOM_WEBP = "edit_diff_zoom.webp"
 
 # Per-fixture status enum surfaced as ``result.json["status"]``.  Agnostic
 # to the generator: same three states whether the STEP was produced by the
@@ -350,8 +354,9 @@ def evaluate_result(
         # candidate's own renders so the (often tiny or internal) edit is
         # visible in the gallery.
         with phase("edit_diff", tag=name):
-            _maybe_render_edit_diff(
+            _ensure_edit_diff_renders(
                 gt_artifacts, aligned_artifacts, aligned_step, renders_dir,
+                fixture_name=name,
             )
 
     result_json.write_text(json.dumps(data, indent=2))
@@ -597,56 +602,85 @@ def _maybe_render_interface_overlay(
         )
 
 
-def _maybe_render_edit_diff(
+def _editing_input_mesh(fixture_name: str, deflection_mm: float):
+    """Original ``input.step`` mesh for an editing fixture.
+
+    Resolved from the inputs dataset via
+    :func:`cadgenbench.common.paths.data_inputs_dir`, tessellated at the GT's
+    deflection so the GT-vs-input edit region is found at one consistent scale.
+    This runs only for editing fixtures, which are *defined* by their
+    ``input.step`` seed -- a missing one is broken data, so it raises (surfaced
+    by the caller's guard) rather than silently skipping the zoom.
+    """
+    from cadgenbench.common.paths import data_inputs_dir  # noqa: PLC0415
+
+    input_step = data_inputs_dir() / fixture_name / "input.step"
+    if not input_step.exists():
+        raise FileNotFoundError(
+            f"editing fixture {fixture_name!r} has no input.step at {input_step}",
+        )
+    return StepArtifacts(input_step, deflection_override=deflection_mm).mesh()
+
+
+def _ensure_edit_diff_renders(
     gt_artifacts: StepArtifacts,
     candidate_artifacts: StepArtifacts,
     aligned_candidate_step: Path,
     renders_dir: Path,
+    *,
+    fixture_name: str,
 ) -> None:
-    """Render the edit-diff turntable WebP (``renders/edit_diff.webp``).
+    """Write the editing-task edit-diff renders into ``renders_dir``.
 
-    Editing fixtures only. Ghosts the aligned candidate translucent and lights
-    up every surface that differs from GT in two warm tones, classified by
-    signed distance to the other solid (red = material the candidate added /
-    too much, amber = GT material it is missing / too little). This makes a
-    small or internal edit legible where a plain shaded render of a near-no-op
-    output is indistinguishable from a correct one. Reuses the welded meshes both artifacts already cache, so no
-    re-tessellation and no re-alignment happen here.
+    Ghosts the aligned candidate translucent and paints a per-vertex
+    surface-deviation field mirroring the shape-similarity metric -- red = extra
+    material (candidate outside GT), amber = missing material (GT outside
+    candidate) -- so a small or internal edit is legible where a plain shaded
+    render of a near-no-op output is not. See
+    :mod:`cadgenbench.common.edit_diff`. Writes:
 
-    Idempotent: only renders when the output is missing or older than the
-    aligned candidate. Renderer failures are logged but never abort the run.
+    - ``edit_diff.webp``      -- full turntable,
+    - ``edit_diff_zoom.webp`` -- turntable framed on the intended edit (GT vs
+      input); omitted when the edit region can't be located,
+    - ``edit_diff.png``       -- frame-0 still (grid thumbnail).
+
+    Reuses the welded meshes both artifacts already cache (no re-tessellation /
+    re-alignment). Idempotent on the full clip's freshness vs the aligned
+    candidate. The render is cosmetic: a failure is logged with its traceback and
+    never aborts the fixture's evaluation.
     """
     try:
-        output_webp = renders_dir / EDIT_DIFF_WEBP
-        output_png = renders_dir / EDIT_DIFF_PNG
-        webp_fresh = (
-            output_webp.exists()
-            and output_webp.stat().st_mtime >= aligned_candidate_step.stat().st_mtime
+        full_webp = renders_dir / EDIT_DIFF_WEBP
+        still_png = renders_dir / EDIT_DIFF_PNG
+        fresh = (
+            full_webp.exists()
+            and full_webp.stat().st_mtime >= aligned_candidate_step.stat().st_mtime
         )
-        # Already current and the still exists -> nothing to do.
-        if webp_fresh and output_png.exists():
+        if fresh and still_png.exists():
             return
+
+        from cadgenbench.common.edit_diff import render_edit_diff_turntables
         from cadgenbench.common.imaging import first_frame_png
-        from cadgenbench.common.viewer import render_mesh_diff_turntable_webp
+
+        gt_mesh = gt_artifacts.mesh()
+        input_mesh = _editing_input_mesh(fixture_name, gt_mesh.linear_deflection_mm)
+        full_bytes, zoom_bytes = render_edit_diff_turntables(
+            gt_mesh, candidate_artifacts.mesh(), input_mesh=input_mesh,
+        )
 
         renders_dir.mkdir(parents=True, exist_ok=True)
-        if webp_fresh:
-            # Clip is current but the still is missing (e.g. evaluated
-            # before the still existed) -> derive it from the clip, no
-            # re-render.
-            webp_bytes = output_webp.read_bytes()
-        else:
-            webp_bytes = render_mesh_diff_turntable_webp(
-                gt_artifacts.mesh(), candidate_artifacts.mesh(),
-            )
-            output_webp.write_bytes(webp_bytes)
-        # Frame-0 still beside the clip, picked up by the bucket uploader.
-        output_png.write_bytes(first_frame_png(webp_bytes))
+        full_webp.write_bytes(full_bytes)
+        still_png.write_bytes(first_frame_png(full_bytes))
+        zoom_webp = renders_dir / EDIT_DIFF_ZOOM_WEBP
+        if zoom_bytes is not None:
+            zoom_webp.write_bytes(zoom_bytes)
+        elif zoom_webp.exists():
+            # A prior run wrote a zoom but this one found no region -> drop the
+            # stale clip so the renders dir reflects the current result.
+            zoom_webp.unlink()
     except Exception:
         logger.warning(
-            "Edit-diff render failed for %s",
-            aligned_candidate_step,
-            exc_info=True,
+            "Edit-diff render failed for %s", aligned_candidate_step, exc_info=True,
         )
 
 

@@ -904,6 +904,32 @@ def _cross_process_render_lock():
             lock_file.close()
 
 
+# Shared lighting/material for the diff renderers, kept in one place so the
+# solid-colour and per-vertex-rgba paths -- and the static and turntable
+# renderers -- stay visually identical.
+_SHAPE_MATERIAL: dict = dict(
+    smooth_shading=False, show_edges=False,
+    ambient=0.45, diffuse=0.65, specular=0.10, specular_power=15,
+)
+
+
+def _add_diff_shapes(plotter: pv.Plotter, shapes: list) -> None:
+    """Add diff shapes to *plotter*, solid-colour or per-vertex-rgba.
+
+    A shape whose polydata carries a per-point ``"rgba"`` ``uint8`` array is
+    drawn as a per-vertex colour field (the tuple's ``rgb``/``alpha`` are then
+    placeholders); otherwise the solid ``rgb``/``alpha`` are used. Both paths
+    share :data:`_SHAPE_MATERIAL` so the looks match.
+    """
+    for body, rgb, alpha in shapes:
+        if "rgba" in body.point_data:
+            plotter.add_mesh(
+                body, scalars="rgba", rgba=True, show_scalar_bar=False, **_SHAPE_MATERIAL,
+            )
+        else:
+            plotter.add_mesh(body, color=rgb, opacity=alpha, **_SHAPE_MATERIAL)
+
+
 def _render_views(
     *,
     shapes: list[tuple[pv.PolyData, tuple[float, float, float], float]],
@@ -925,6 +951,13 @@ def _render_views(
     Serialised by ``_RENDER_LOCK`` (in-process threads) and
     ``_cross_process_render_lock`` (sibling eval workers); timed as the
     ``render`` phase when profiling is enabled.
+
+    Per-shape colour is solid (the ``rgb`` / ``alpha`` of the tuple) UNLESS the
+    polydata carries a per-point ``"rgba"`` ``uint8`` array, in which case it is
+    rendered as a per-vertex colour field (the tuple's rgb/alpha are ignored).
+    Both paths share the identical camera / background / lighting, so a solid
+    diff and a per-vertex severity field look consistent. Solid callers are
+    unaffected -- they never set an ``"rgba"`` array.
     """
     pngs: list[bytes] = []
     with _RENDER_LOCK, _cross_process_render_lock(), phase(
@@ -934,18 +967,7 @@ def _render_views(
             pl = pv.Plotter(off_screen=True, window_size=(width, height))
             try:
                 pl.set_background(BACKGROUND_RGB)
-                for body, rgb, alpha in shapes:
-                    pl.add_mesh(
-                        body,
-                        color=rgb,
-                        opacity=alpha,
-                        smooth_shading=False,
-                        show_edges=False,
-                        ambient=0.45,
-                        diffuse=0.65,
-                        specular=0.10,
-                        specular_power=15,
-                    )
+                _add_diff_shapes(pl, shapes)
 
                 eye, target, up = camera_placement(view, bbox_min, bbox_max)
                 cam = pl.camera
@@ -1024,18 +1046,7 @@ def _render_turntable_frames(
             pl = pv.Plotter(off_screen=True, window_size=(width, height))
             try:
                 pl.set_background(BACKGROUND_RGB)
-                for body, rgb, alpha in shapes:
-                    pl.add_mesh(
-                        body,
-                        color=rgb,
-                        opacity=alpha,
-                        smooth_shading=False,
-                        show_edges=False,
-                        ambient=0.45,
-                        diffuse=0.65,
-                        specular=0.10,
-                        specular_power=15,
-                    )
+                _add_diff_shapes(pl, shapes)
 
                 cam = pl.camera
                 cam.position = tuple(map(float, eye))

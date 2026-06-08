@@ -358,26 +358,45 @@ def _render_output_images(result_dir: Path, *, base_url: str | None = None) -> s
 
 
 def _render_edit_diff(result_dir: Path, *, base_url: str | None = None) -> str:
-    """Embed the editing-task diff turntable (``renders/edit_diff.webp``).
+    """Embed the editing-task edit-diff panel: output iso + diff + zoomed diff.
 
-    The ghost-body turntable lights up every surface that differs from GT in two
-    warm tones (red = material the output added / too much, amber = GT material
-    it is missing / too little), which makes a small or internal edit legible
-    where the plain aligned output looks identical to the ground truth. Inlined as base64 by default; when *base_url*
-    is given (hosted report) it is referenced from the public render bucket
-    instead, which is what keeps the WebP out of the HTML. No fallback: when the
-    WebP is absent (an invalid candidate that never rendered, or a fixture
-    evaluated before the diff existed) the column shows an explicit note rather
-    than reverting to the static views.
+    Three tiles, in order:
+
+    - ``iso.png``             -- the aligned output rendered plainly (what you
+      submitted), for reference;
+    - ``edit_diff.webp``      -- the full ghost-body turntable, every surface
+      that differs from GT lit in two warm tones (red = material the output
+      added / too much, amber = GT material it is missing / too little);
+    - ``edit_diff_zoom.webp`` -- the same turntable framed on the intended edit,
+      so a small or internal change is legible; omitted when absent.
+
+    Inlined as base64 by default (portable local report); when *base_url* is
+    given (hosted report) each tile is referenced from the public render bucket
+    instead. No fallback: a missing tile is simply not shown, and an empty panel
+    yields an explicit note rather than reverting to the static views.
     """
-    webp = result_dir / "renders" / "edit_diff.webp"
-    if not webp.exists():
+    renders = result_dir / "renders"
+    tiles = [
+        (renders / "iso.png", "output"),
+        (renders / "edit_diff.webp", "edit diff"),
+        (renders / "edit_diff_zoom.webp", "edit diff (zoom)"),
+    ]
+    present = [(p, label) for p, label in tiles if p.exists()]
+    if not present:
         return '<p class="note">No edit-diff render</p>'
-    src = f"{base_url}/edit_diff.webp" if base_url else _data_uri(webp)
-    return (
-        f'<img src="{src}" alt="edit diff" class="edit-diff-img zoomable" '
-        f'loading="lazy">'
-    )
+    parts = ['<div class="images">']
+    for path, label in present:
+        src = f"{base_url}/{path.name}" if base_url else _data_uri(path)
+        gizmo = gizmo_svg(path.stem)
+        gizmo_html = f'<span class="axis-giz">{gizmo}</span>' if gizmo else ""
+        parts.append(
+            f'<div class="view"><span class="imgwrap">'
+            f'<img src="{src}" alt="{html.escape(label)}" class="zoomable" '
+            f'loading="lazy">{gizmo_html}</span>'
+            f"<span>{html.escape(label)}</span></div>"
+        )
+    parts.append("</div>")
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -492,16 +511,21 @@ def _render_fixture_card(
             )
         if shape_score is not None:
             # Editing fixtures headline the renormalized shape value; generation
-            # the raw similarity. Both show the Surface Distance F1 / Volume IoU
-            # breakdown as the sub-line (no renorm/no-op annotation).
+            # the raw similarity. The component breakdown (Surface Distance F1 /
+            # Volume IoU) is always the raw metric, so for editing a second line
+            # notes "(pre editing normalization)" -- that is what explains a high
+            # F1/IoU sitting under a low renormalized Shape Similarity. Generation
+            # needs no qualifier.
             if is_editing and shape_renorm is not None:
                 shape_value = _fmt_metric("shape_similarity_score", shape_renorm)
+                sub = (
+                    f"{components_str}<br>(pre editing normalization)"
+                    if components_str else ""
+                )
             else:
                 shape_value = _fmt_metric("shape_similarity_score", shape_score)
-            shape_sub_html = (
-                f'<span class="headline-sub">{components_str}</span>'
-                if components_str else ""
-            )
+                sub = components_str
+            shape_sub_html = f'<span class="headline-sub">{sub}</span>' if sub else ""
             p.append(
                 f'<div class="headline-pill headline-shape">'
                 f'{_headline_label("Shape Similarity", "shape", metrics_base_url)}'
