@@ -29,7 +29,7 @@ anything at or below the no-op floors at ``0``. Topology and interface
 match stay **raw** (most edits leave them unchanged, and where they do
 not they already discriminate). For editing fixtures the per-fixture
 ``cad_score`` reweights the three axes :data:`EDITING_AXIS_WEIGHTS`
-(shape ``0.5``, interface ``0.3``, topology ``0.2``); generation uses
+(shape ``0.6``, interface ``0.3``, topology ``0.1``); generation uses
 ``GENERATION_AXIS_WEIGHTS`` (shape ``0.4``, interface ``0.4``, topology
 ``0.2``). The validity gate still hard-zeros.
 
