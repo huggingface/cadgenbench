@@ -61,6 +61,8 @@ class McpSession:
 
     def start(self) -> None:
         """Start the background event loop and connect to the MCP server."""
+        if self._thread is not None:
+            return  # already started; idempotent
         self._thread = threading.Thread(
             target=self._run_loop, daemon=True, name="mcp-event-loop"
         )
@@ -139,6 +141,8 @@ class McpSession:
         except Exception as exc:  # noqa: BLE001
             self._init_error = exc
             self._ready.set()
+        finally:
+            self._session = None  # guard: call_tool() raises RuntimeError if session dies
 
     async def _call_async(
         self, name: str, arguments: dict[str, Any]

@@ -547,7 +547,7 @@ class LLMClient:
             )
 
         raw_tool_calls = getattr(message, "tool_calls", None) or None
-        stop_reason = response.choices[0].finish_reason if response.choices else None
+        stop_reason = getattr(response.choices[0], "finish_reason", None) if response.choices else None
 
         return CompletionResult(
             content=content,

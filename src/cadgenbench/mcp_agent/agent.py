@@ -87,6 +87,7 @@ def run_mcp_agent(
     Returns:
         McpAgentResult with per-turn records, totals, and stopping reason.
     """
+    _work_dir_owned = work_dir is None
     if work_dir is None:
         work_dir = Path(tempfile.mkdtemp(prefix="cadgenbench_mcp_"))
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -135,7 +136,14 @@ def run_mcp_agent(
         except Exception:
             logger.warning("Incremental save failed", exc_info=True)
 
-    with McpSession(config.mcp_server_command, config.mcp_server_args) as mcp:
+    mcp = McpSession(config.mcp_server_command, config.mcp_server_args)
+    try:
+        mcp.start()
+    except BaseException:
+        if _work_dir_owned:
+            shutil.rmtree(work_dir, ignore_errors=True)
+        raise
+    with mcp:
         # Build the tool list: filtered MCP tools + synthetic signal_done.
         tools = [
             t for t in mcp.tools
@@ -268,6 +276,14 @@ def run_mcp_agent(
                         "tool_call_id": tc.id,
                         "content": result_text,
                     })
+                    tool_records.append(McpToolCall(
+                        tool_name=tool_name,
+                        arguments=args,
+                        result_text=result_text,
+                        had_image=had_image,
+                        duration_s=duration_s,
+                    ))
+                    break  # don't dispatch any further tools in this batch
                 else:
                     t_call = time.monotonic()
                     print(f"  {tag} → {tool_name}(…)", end="", flush=True)
@@ -384,9 +400,9 @@ def _append_seed_render(
                 "execute",
                 {"code": (
                     f"from build123d import import_step\n"
-                    f"_seed = import_step('{step_path.name}')\n"
+                    f"_seed = import_step(r'{step_path}')\n"
                     f"show(_seed, 'input')\n"
-                    f"print('Loaded input STEP:', '{step_path.name}')"
+                    f"print('Loaded input STEP:', r'{step_path}')"
                 )},
             )
             render_text, render_png = mcp.call_tool(

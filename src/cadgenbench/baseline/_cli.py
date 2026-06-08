@@ -42,8 +42,6 @@ from pathlib import Path
 
 import yaml
 
-from cadgenbench.baseline import AgentConfig, AgentResult, run_agent
-from cadgenbench.baseline.llm import LLMClient
 from cadgenbench.eval.evaluate import evaluate_candidate_only, evaluate_result
 from cadgenbench.eval.shape_similarity import METRIC_DISPLAY
 
@@ -85,6 +83,7 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> None:
 
     # Argparse defaults come straight from AgentConfig(), which itself reads
     # default_config.yaml at import time.  Single source of truth.
+    from cadgenbench.baseline import AgentConfig  # noqa: PLC0415
     defaults = AgentConfig()
 
     p.add_argument("fixtures", nargs="*",
@@ -181,6 +180,8 @@ def run(args: argparse.Namespace) -> int:
         limit=args.limit,
     )
 
+    from cadgenbench.baseline import AgentConfig  # noqa: PLC0415
+    from cadgenbench.baseline.llm import LLMClient  # noqa: PLC0415
     parallel = max(1, args.parallel)
     resolved_model = LLMClient(model=args.model).model
 
@@ -374,6 +375,7 @@ def _run_one_task(
     if input_files:
         logs.append(f"Input files: {', '.join(f.name for f in input_files)}")
 
+    from cadgenbench.baseline import run_agent  # noqa: PLC0415
     out_dir = run_dir / name
     result = run_agent(
         description,

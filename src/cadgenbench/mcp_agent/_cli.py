@@ -35,18 +35,10 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-import yaml
-
 from cadgenbench.mcp_agent.types import McpAgentConfig, McpAgentResult
 from cadgenbench.eval.evaluate import evaluate_candidate_only, evaluate_result
 
 GT_STEP_NAME = "ground_truth.step"
-DISPLAYED_METRICS: tuple[str, ...] = (
-    "cad_score",
-    "shape_similarity_score",
-    "shape_surface_distance_f1",
-    "shape_volume_iou",
-)
 
 _DEFAULT_OUTPUT_REL = Path("results")
 
