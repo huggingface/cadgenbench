@@ -1,6 +1,6 @@
 # CADGenBench
 
-[![HF Space](https://img.shields.io/badge/🤗%20Space-Leaderboard-yellow)](https://huggingface.co/spaces/HuggingAI4Engineering/cadgenbench-leaderboard)
+[![HF Space](https://img.shields.io/badge/🤗%20Space-Leaderboard-yellow)](https://huggingface.co/spaces/HuggingAI4Engineering/CADGenBench)
 [![HF Dataset](https://img.shields.io/badge/🤗%20Dataset-Submissions-yellow)](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-submissions)
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
@@ -20,7 +20,7 @@ is one STEP file per sample. Each sample declares its task type
 and `output.step` contract apply to both.
 
 **Submit and view the leaderboard:**
-[`HuggingAI4Engineering/cadgenbench-leaderboard`](https://huggingface.co/spaces/HuggingAI4Engineering/cadgenbench-leaderboard).
+[`HuggingAI4Engineering/CADGenBench`](https://huggingface.co/spaces/HuggingAI4Engineering/CADGenBench).
 
 ## What this repo contains
 
@@ -53,7 +53,7 @@ short:
 2. Zip them as `submission.zip` with one folder per sample plus a
    small `meta.json` at the root.
 3. Upload via the **Submit** tab on the
-   [leaderboard Space](https://huggingface.co/spaces/HuggingAI4Engineering/cadgenbench-leaderboard).
+   [leaderboard Space](https://huggingface.co/spaces/HuggingAI4Engineering/CADGenBench).
 
 The Space validates the zip, runs the eval, publishes a leaderboard
 row, and writes a per-submission HTML report you can share or download.
