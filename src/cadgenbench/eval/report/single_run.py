@@ -1294,7 +1294,7 @@ def _render_run_summary_header(summary: dict, n_fixtures_fallback: int) -> str:
             f'</div>'
         )
 
-    n = summary.get("n_fixtures", n_fixtures_fallback)
+    n = summary.get("n_samples", n_fixtures_fallback)
     n_valid = summary.get("n_valid", 0)
     n_invalid = summary.get("n_invalid", 0)
     n_missing = summary.get("n_missing", 0)

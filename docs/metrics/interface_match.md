@@ -23,11 +23,11 @@ For each group:
 2. **Bounded pose search.** The region is searched over a small window around its specified pose (±1° and ±1% of the part size per axis) and the best fit is kept, so a feature is not penalized for the small residual left by whole-part alignment.
 3. **Pass/fail ramp.** Each IoU is mapped through a soft ramp (≥ 0.95 maps to 1, ≤ 0.80 maps to 0, linear between), so a sloppy fit scores 0 instead of banking partial credit.
 
-A group scores as its **worst** feature (the minimum), and the fixture scores as the **mean** over its groups, so a part that nails one independent interface and misses another still earns partial credit.
+A group scores as its **worst** feature (the minimum), and the sample scores as the **mean** over its groups, so a part that nails one independent interface and misses another still earns partial credit.
 
 ## What a fit looks like
 
-The per-fixture report overlays the candidate (grey ghost) against each region: **blue** where it fits, **red** where the candidate has material it shouldn't (too much), and **amber** where it's missing material it should have (too little). Both region kinds use the verification shell, so a wrong-*size* feature shows up too, not just one in the wrong place.
+The per-sample report overlays the candidate (grey ghost) against each region: **blue** where it fits, **red** where the candidate has material it shouldn't (too much), and **amber** where it's missing material it should have (too little). Both region kinds use the verification shell, so a wrong-*size* feature shows up too, not just one in the wrong place.
 
 ### Keep-out (KOR): a bolt-hole clearance
 

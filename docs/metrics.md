@@ -121,7 +121,7 @@ Would it bolt up to the same fixture? Each mating feature is specified as a keep
 
 ## Editing tasks: no-op renormalization
 
-**Editing** fixtures (`task_type: editing`) ship an `input.step` plus an
+**Editing** samples (`task_type: editing`) ship an `input.step` plus an
 edit request, and the GT is a small local change to that input. Since all
 three axes measure global similarity, submitting the input unchanged (the
 "no-op") already scores high, so scoring an edit with the raw composition
@@ -138,7 +138,7 @@ This maps the no-op to `0` and a perfect candidate to `1`. Topology and
 interface stay raw: most edits leave them unchanged, and a candidate that
 breaks them should still be penalized.
 
-Editing fixtures then use shape-dominant weights:
+Editing samples then use shape-dominant weights:
 
 ```
 cad_score = 0.6·s_renorm + 0.3·interface + 0.1·topo_match     (0 if not valid)
@@ -147,19 +147,19 @@ cad_score = 0.6·s_renorm + 0.3·interface + 0.1·topo_match     (0 if not valid
 A no-op therefore caps at `0.3 + 0.1 = 0.4`, and any real shape
 improvement clears it.
 
-`b_shape` is a fixture constant: it depends only on `input.step`,
+`b_shape` is a per-sample constant: it depends only on `input.step`,
 `ground_truth.step`, and the shape/alignment code, so it is precomputed at
 authoring time and committed to the GT dataset as
-`<fixture>/edit_baseline.json`. The grader reads it back instead of
+`<sample>/edit_baseline.json`. The grader reads it back instead of
 recomputing it, and the presence of that file is how the grader knows a
-fixture is an editing task.
+sample is an editing task.
 
 Implementation: [`edit_baseline.py`](../src/cadgenbench/eval/edit_baseline.py),
 wired into `_cad_score` in [`evaluate.py`](../src/cadgenbench/eval/evaluate.py);
 the raw and renormalized shape values are saved under
 `result.json["edit_metrics"]`.
 
-In the per-fixture report an editing candidate is shown as a ghost-diff
+In the per-sample report an editing candidate is shown as a ghost-diff
 against the ground truth, which makes a small or internal change visible.
 Red marks material the candidate added that the GT doesn't have (too
 much); amber marks GT material the candidate is missing (too little). A

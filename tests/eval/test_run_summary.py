@@ -58,7 +58,7 @@ def test_includes_zeros_in_aggregate(tmp_path: Path) -> None:
 
     # Aggregate is mean over ALL 3 fixtures (0.9 + 0 + 0) / 3 = 0.3.
     assert summary["aggregate_score"] == 0.3
-    assert summary["n_fixtures"] == 3
+    assert summary["n_samples"] == 3
     assert summary["n_valid"] == 1
     assert summary["n_invalid"] == 1
     assert summary["n_missing"] == 1
@@ -81,8 +81,8 @@ def test_per_task_scores_split(tmp_path: Path) -> None:
 
     assert summary["score_by_task_type"]["generation"] == 0.7
     assert summary["score_by_task_type"]["editing"] == 0.4
-    assert summary["per_task_scores"]["generation"]["n_fixtures"] == 2
-    assert summary["per_task_scores"]["editing"]["n_fixtures"] == 1
+    assert summary["per_task_scores"]["generation"]["n_samples"] == 2
+    assert summary["per_task_scores"]["editing"]["n_samples"] == 1
 
 
 def test_missing_description_defaults_to_generation(tmp_path: Path) -> None:
@@ -94,7 +94,7 @@ def test_missing_description_defaults_to_generation(tmp_path: Path) -> None:
     write_run_summary(run_dir, data_inputs_dir=inputs_dir)
     summary = json.loads((run_dir / "run_summary.json").read_text())
 
-    assert summary["per_fixture_scores"]["orphan"]["task_type"] == "generation"
+    assert summary["per_sample_scores"]["orphan"]["task_type"] == "generation"
     assert summary["score_by_task_type"]["generation"] == 0.5
 
 
@@ -107,6 +107,6 @@ def test_empty_run_dir(tmp_path: Path) -> None:
     write_run_summary(run_dir, data_inputs_dir=inputs_dir)
     summary = json.loads((run_dir / "run_summary.json").read_text())
 
-    assert summary["n_fixtures"] == 0
+    assert summary["n_samples"] == 0
     assert summary["aggregate_score"] == 0.0
     assert summary["validity_rate"] == 0.0

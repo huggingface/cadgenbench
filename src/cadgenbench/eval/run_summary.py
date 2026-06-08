@@ -18,9 +18,9 @@ single ``run_summary.json`` at the root of a results directory.
 Schema produced (a sibling of ``params.json`` inside ``results/<run>/``)::
 
     {
-        "aggregate_score":   float in [0, 1],     # mean cad_score over all fixtures
-        "validity_rate":     float in [0, 1],     # n_valid / n_fixtures
-        "n_fixtures":        int,
+        "aggregate_score":   float in [0, 1],     # mean cad_score over all samples
+        "validity_rate":     float in [0, 1],     # n_valid / n_samples
+        "n_samples":         int,
         "n_valid":           int,
         "n_invalid":         int,
         "n_missing":         int,
@@ -32,14 +32,14 @@ Schema produced (a sibling of ``params.json`` inside ``results/<run>/``)::
             "<task_type>": {
                 "score":         float,
                 "validity_rate": float,
-                "n_fixtures":    int,
+                "n_samples":     int,
                 "n_valid":       int,
                 "n_invalid":     int,
                 "n_missing":     int
             }
         },
-        "per_fixture_scores": {
-            "<fixture_name>": {
+        "per_sample_scores": {
+            "<sample_name>": {
                 "status":     "valid" | "invalid" | "missing",
                 "cad_score":  float in [0, 1],
                 "task_type":  "generation" | "editing"
@@ -48,10 +48,10 @@ Schema produced (a sibling of ``params.json`` inside ``results/<run>/``)::
     }
 
 Design rules:
-- Aggregate **includes zeros** from invalid and missing fixtures (this is
+- Aggregate **includes zeros** from invalid and missing samples (this is
   the leaderboard convention; gating by validity must not let bad runs
   silently inflate by averaging only successes).
-- Reads exclusively from ``result.json`` per fixture + the fixture's
+- Reads exclusively from ``result.json`` per sample + the sample's
   authored ``description.yaml`` (for ``task_type``). Never touches
   baseline-only debug files.
 - One unknown task type ⇒ it gets its own bucket in
@@ -162,7 +162,7 @@ def _build_run_summary(run_dir: Path, data_inputs_dir: Path) -> dict[str, Any]:
         per_task_scores[task_type] = {
             "score": round(sum(scores) / n, 4) if n else 0.0,
             "validity_rate": round(valid / n, 4) if n else 0.0,
-            "n_fixtures": n,
+            "n_samples": n,
             "n_valid": valid,
             "n_invalid": bucket.get("n_invalid", 0),
             "n_missing": bucket.get("n_missing", 0),
@@ -182,13 +182,13 @@ def _build_run_summary(run_dir: Path, data_inputs_dir: Path) -> dict[str, Any]:
     return {
         "aggregate_score": round(aggregate, 4),
         "validity_rate": round(n_valid / n_fixtures, 4) if n_fixtures else 0.0,
-        "n_fixtures": n_fixtures,
+        "n_samples": n_fixtures,
         "n_valid": n_valid,
         "n_invalid": status_counts.get(STATUS_INVALID, 0),
         "n_missing": status_counts.get(STATUS_MISSING, 0),
         "score_by_task_type": ordered_headline,
         "per_task_scores": per_task_scores,
-        "per_fixture_scores": per_fixture,
+        "per_sample_scores": per_fixture,
     }
 
 
