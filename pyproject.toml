@@ -45,6 +45,14 @@ baseline = [
     "litellm",
     "python-dotenv",
 ]
+mcp-agent = [
+    # MCP tool-calling agent via build123d-mcp server.
+    # build123d-mcp itself must be installed separately (pip install build123d-mcp
+    # or uvx build123d-mcp). This extra only covers the cadgenbench-side deps.
+    "mcp>=1.0",
+    "litellm",
+    "python-dotenv",
+]
 dev = [
     "pytest",
     "ruff",

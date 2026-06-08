@@ -59,6 +59,9 @@ def main(argv: list[str] | None = None) -> int:
     from cadgenbench.eval.report.single_run import add_subparser as add_report_single
     add_report_single(report_sub)
 
+    # cadgenbench mcp-agent run (needs [mcp-agent] extra).
+    mcp_agent_p = _register_mcp_agent_subcommand(subparsers)
+
     args = parser.parse_args(argv)
 
     if not hasattr(args, "handler"):
@@ -68,6 +71,8 @@ def main(argv: list[str] | None = None) -> int:
             parser.print_help()
         elif args.command == "baseline" and baseline_p is not None:
             baseline_p.print_help()
+        elif args.command == "mcp-agent" and mcp_agent_p is not None:
+            mcp_agent_p.print_help()
         elif args.command == "report":
             report_p.print_help()
         else:
@@ -103,6 +108,28 @@ def _register_baseline_subcommand(
     add_baseline_run(baseline_sub)
     add_baseline_package(baseline_sub)
     return baseline_p
+
+
+def _register_mcp_agent_subcommand(
+    subparsers: argparse._SubParsersAction,
+) -> argparse.ArgumentParser | None:
+    """Register the ``mcp-agent`` subcommand if its extras are installed.
+
+    Requires the ``cadgenbench[mcp-agent]`` optional dependencies (mcp SDK,
+    litellm, python-dotenv). Degrades gracefully when not installed.
+    """
+    try:
+        from cadgenbench.mcp_agent._cli import add_subparser as add_mcp_run
+    except ImportError:
+        return None
+
+    mcp_p = subparsers.add_parser(
+        "mcp-agent",
+        help="MCP tool-calling agent commands.",
+    )
+    mcp_sub = mcp_p.add_subparsers(dest="mcp_agent_action")
+    add_mcp_run(mcp_sub)
+    return mcp_p
 
 
 if __name__ == "__main__":

@@ -192,6 +192,15 @@ class CompletionResult:
     ``usage.completion_tokens_details.reasoning_tokens``. ``reasoning_content``
     mirrors LiteLLM's ``message.reasoning_content`` and is the decoded CoT
     text when the provider returns it separately from the answer.
+
+    ``tool_calls`` is populated when the model responds with tool-use calls
+    instead of (or in addition to) text. Each element is a LiteLLM
+    ``ChatCompletionMessageToolCall`` with ``.id``, ``.function.name``, and
+    ``.function.arguments`` (JSON string). ``None`` means the model did not
+    call any tools this turn.
+
+    ``stop_reason`` mirrors ``choices[0].finish_reason`` (e.g. ``"stop"``,
+    ``"tool_calls"``, ``"end_turn"``).
     """
 
     content: str
@@ -202,6 +211,8 @@ class CompletionResult:
     raw: Any = field(repr=False)
     reasoning_tokens: int | None = None
     reasoning_content: str | None = None
+    tool_calls: list[Any] | None = None
+    stop_reason: str | None = None
 
 
 # Matches a full ``<think>...</think>`` block (greedy across newlines), with
@@ -535,6 +546,9 @@ class LLMClient:
                 reasoning_tokens,
             )
 
+        raw_tool_calls = getattr(message, "tool_calls", None) or None
+        stop_reason = response.choices[0].finish_reason if response.choices else None
+
         return CompletionResult(
             content=content,
             prompt_tokens=prompt_tokens,
@@ -544,4 +558,6 @@ class LLMClient:
             raw=response,
             reasoning_tokens=reasoning_tokens,
             reasoning_content=reasoning_content,
+            tool_calls=raw_tool_calls,
+            stop_reason=stop_reason,
         )

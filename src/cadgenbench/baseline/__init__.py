@@ -19,15 +19,6 @@ gets a render + validity check of its output each turn, and signals
 completion with ``[DONE]``.
 """
 
-from cadgenbench.baseline.agent import run_agent
-from cadgenbench.baseline.types import (
-    AgentConfig,
-    AgentResult,
-    CodeExecution,
-    TurnRecord,
-    save_conversation,
-)
-
 __all__ = [
     "run_agent",
     "AgentConfig",
@@ -36,3 +27,21 @@ __all__ = [
     "TurnRecord",
     "save_conversation",
 ]
+
+_LAZY = {
+    "run_agent": ("cadgenbench.baseline.agent", "run_agent"),
+    "AgentConfig": ("cadgenbench.baseline.types", "AgentConfig"),
+    "AgentResult": ("cadgenbench.baseline.types", "AgentResult"),
+    "CodeExecution": ("cadgenbench.baseline.types", "CodeExecution"),
+    "TurnRecord": ("cadgenbench.baseline.types", "TurnRecord"),
+    "save_conversation": ("cadgenbench.baseline.types", "save_conversation"),
+}
+
+
+def __getattr__(name: str):  # noqa: N807
+    if name in _LAZY:
+        module_name, attr = _LAZY[name]
+        import importlib
+        mod = importlib.import_module(module_name)
+        return getattr(mod, attr)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
