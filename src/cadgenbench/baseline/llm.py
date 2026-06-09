@@ -111,6 +111,14 @@ _TRANSIENT_HTTP_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 _KEEP_RECENT_IMAGE_MSGS = 2
 
 
+def _msg_has_image(msg: dict[str, Any]) -> bool:
+    """True iff *msg* carries at least one ``image_url`` content block."""
+    content = msg.get("content")
+    return isinstance(content, list) and any(
+        isinstance(b, dict) and b.get("type") == "image_url" for b in content
+    )
+
+
 def _prune_history_images(
     messages: list[dict[str, Any]],
     keep_recent: int = _KEEP_RECENT_IMAGE_MSGS,
@@ -123,12 +131,7 @@ def _prune_history_images(
     full turn-by-turn history and knows the earlier turns happened. The input
     list is never mutated, so the persisted conversation keeps every image.
     """
-    def _has_image(msg: dict[str, Any]) -> bool:
-        content = msg.get("content")
-        return isinstance(content, list) and any(
-            isinstance(b, dict) and b.get("type") == "image_url" for b in content
-        )
-
+    _has_image = _msg_has_image
     image_idxs = [i for i, m in enumerate(messages) if _has_image(m)]
     keep = set(image_idxs[-keep_recent:])
     # Always keep the task's input image, which lives in the first message
@@ -157,6 +160,96 @@ def _prune_history_images(
         else:
             pruned.append(msg)
     return pruned
+
+
+# Anthropic prompt caching is opt-in: a content block tagged with
+# ``cache_control`` tells the API to cache the whole prefix up to and including
+# that block, so later turns re-read it instead of re-encoding (and re-billing)
+# it. OpenAI and Gemini cache prefixes automatically and need no markup, so we
+# only inject these breakpoints for Anthropic/Claude models. Anthropic allows at
+# most 4 breakpoints per request.
+_CACHE_CONTROL = {"type": "ephemeral"}
+_MAX_CACHE_BREAKPOINTS = 4
+
+
+def _cache_breakpoint_indices(
+    messages: list[dict[str, Any]],
+    keep_recent: int = _KEEP_RECENT_IMAGE_MSGS,
+) -> list[int]:
+    """Pick message indices whose last content block should carry a cache
+    breakpoint, chosen so each prefix stays byte-identical across turns.
+
+    Indices are computed against the *pre-prune* ``messages`` but line up 1:1
+    with the pruned payload (the pruner preserves length and order), so the
+    caller can apply them directly to the outgoing payload.
+
+    Breakpoints, in prefix order:
+      - The system prompt: large (build123d cheat sheet) and fully static.
+      - The two most recent *already-pruned* image messages. ``_prune_history_images``
+        rewrites every image-bearing message except the last ``keep_recent`` into
+        a short text note; once rewritten a message never changes again, so it
+        and everything before it are stable on all later turns. Marking the last
+        two such messages gives the standard rolling pattern: the older prefix is
+        the one a previous turn already cached (read hit) and the newer one
+        extends the cache by a turn (write). Anything newer than the frontier is
+        an in-flux image that pruning will rewrite, so it is deliberately left
+        uncached.
+      - On early turns (before any image has been pruned) there is no stable
+        frontier yet, so the first user message is pinned instead to keep the
+        task text/input image cached while the history is still short.
+    """
+    idxs: set[int] = set()
+
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "system":
+            idxs.add(i)
+            break
+
+    image_idxs = [i for i, m in enumerate(messages) if _msg_has_image(m)]
+    pruned_idxs = image_idxs[:-keep_recent] if len(image_idxs) > keep_recent else []
+    idxs.update(pruned_idxs[-2:])
+
+    if not pruned_idxs:
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "user":
+                idxs.add(i)
+                break
+
+    return sorted(idxs)[-_MAX_CACHE_BREAKPOINTS:]
+
+
+def _mark_cache_control(msg: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of *msg* whose last content block carries ``cache_control``.
+
+    A string ``content`` is promoted to a single text block so the marker has
+    somewhere to live (Anthropic only accepts ``cache_control`` on block-shaped
+    content). The original message is never mutated.
+    """
+    content = msg.get("content")
+    if isinstance(content, str):
+        new_content: list[dict[str, Any]] = [
+            {"type": "text", "text": content, "cache_control": _CACHE_CONTROL}
+        ]
+    elif isinstance(content, list) and content:
+        new_content = list(content)
+        new_content[-1] = {**new_content[-1], "cache_control": _CACHE_CONTROL}
+    else:
+        return msg
+    return {**msg, "content": new_content}
+
+
+def _apply_cache_control(
+    payload: list[dict[str, Any]],
+    indices: list[int],
+) -> list[dict[str, Any]]:
+    """Return a copy of *payload* with ``cache_control`` set at *indices*."""
+    if not indices:
+        return payload
+    targets = set(indices)
+    return [
+        _mark_cache_control(msg) if i in targets else msg
+        for i, msg in enumerate(payload)
+    ]
 
 # Retry tuning: HF Inference Providers (Together/Novita/SambaNova via the HF
 # router) occasionally brownout on 502/503/504 for stretches of 30s–3min at
@@ -378,6 +471,16 @@ class LLMClient:
         # avoids provider many-image limits. Caller's list stays intact.
         payload = _prune_history_images(messages)
 
+        # Anthropic prompt caching: tag stable prefixes (the static system
+        # prompt + the rolling frontier of already-pruned history) so multi-turn
+        # runs re-read them instead of re-billing the same prefix every turn.
+        # Breakpoints are derived from the pre-prune messages but apply 1:1 to
+        # the pruned payload. Other providers cache automatically; skip them.
+        if self._is_anthropic_model():
+            payload = _apply_cache_control(
+                payload, _cache_breakpoint_indices(messages)
+            )
+
         last_error: Exception | None = None
         backoff = self.initial_backoff
 
@@ -492,6 +595,12 @@ class LLMClient:
 
     def _is_temperature_locked(self) -> bool:
         return any(p in self.model for p in self._TEMPERATURE_LOCKED_PATTERNS)
+
+    def _is_anthropic_model(self) -> bool:
+        """True for Anthropic/Claude models, which need explicit prompt-cache
+        breakpoints (OpenAI and Gemini cache prefixes automatically)."""
+        model = self.model.lower()
+        return "anthropic" in model or "claude" in model
 
     def _is_anthropic_adaptive_model(self) -> bool:
         if "anthropic" not in self.model and "claude" not in self.model:

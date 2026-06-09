@@ -10,6 +10,7 @@ from cadgenbench.baseline.llm import (
     DEFAULT_MODEL,
     CompletionResult,
     LLMClient,
+    _cache_breakpoint_indices,
     _short,
 )
 
@@ -533,6 +534,120 @@ class TestStreaming:
         result = client.complete(SIMPLE_MESSAGES)
         assert result.content == "ok"
         assert mock_llm.completion.call_count == 2
+
+
+def _img_msg(role: str = "user", text: str = "t") -> dict:
+    """A message carrying one text block + one image block."""
+    return {
+        "role": role,
+        "content": [
+            {"type": "text", "text": text},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ],
+    }
+
+
+def _cache_blocks(content) -> list:
+    """The content blocks in *content* that carry a cache_control marker."""
+    if not isinstance(content, list):
+        return []
+    return [b for b in content if isinstance(b, dict) and "cache_control" in b]
+
+
+class TestCacheBreakpointSelection:
+    """``_cache_breakpoint_indices`` must pin only byte-stable prefixes so the
+    cache actually hits turn-to-turn despite ``_prune_history_images`` rewriting
+    older image messages.
+    """
+
+    def test_short_history_pins_system_and_first_user(self) -> None:
+        # No image has been pruned yet (<= keep_recent images): fall back to the
+        # static system + first-user prefix.
+        messages = [
+            {"role": "system", "content": "sys"},
+            _img_msg("user", "task"),
+            {"role": "assistant", "content": "ok"},
+            _img_msg("user", "feedback-0"),
+        ]
+        assert _cache_breakpoint_indices(messages, keep_recent=2) == [0, 1]
+
+    def test_marks_system_plus_last_two_pruned_messages(self) -> None:
+        messages = [
+            {"role": "system", "content": "sys"},   # 0
+            {"role": "user", "content": "task"},     # 1 (no image)
+            {"role": "assistant", "content": "a0"},  # 2
+            _img_msg("user", "fb0"),                  # 3  pruned
+            {"role": "assistant", "content": "a1"},  # 4
+            _img_msg("user", "fb1"),                  # 5  pruned
+            {"role": "assistant", "content": "a2"},  # 6
+            _img_msg("user", "fb2"),                  # 7  volatile (kept full)
+            {"role": "assistant", "content": "a3"},  # 8
+            _img_msg("user", "fb3"),                  # 9  volatile (kept full)
+        ]
+        # image idxs = [3,5,7,9]; last keep_recent=2 are volatile (7,9), the two
+        # most recent already-pruned are 3 and 5. System (0) is always pinned.
+        assert _cache_breakpoint_indices(messages, keep_recent=2) == [0, 3, 5]
+
+    def test_never_exceeds_four_breakpoints(self) -> None:
+        messages = [{"role": "system", "content": "sys"}]
+        for k in range(8):
+            messages.append({"role": "assistant", "content": f"a{k}"})
+            messages.append(_img_msg("user", f"fb{k}"))
+        assert len(_cache_breakpoint_indices(messages, keep_recent=2)) <= 4
+
+
+class TestAnthropicPromptCaching:
+    """Anthropic needs explicit ``cache_control`` markers; OpenAI/Gemini cache
+    automatically and must be left untouched."""
+
+    @patch("cadgenbench.baseline.llm.litellm")
+    def test_anthropic_gets_cache_control(self, mock_llm: MagicMock) -> None:
+        mock_llm.completion.return_value = _fake_response()
+        client = _make_client(model="anthropic/claude-opus-4-7")
+        messages = [
+            {"role": "system", "content": "big static system prompt"},
+            {"role": "user", "content": "build a widget"},
+        ]
+        client.complete(messages, max_tokens=100)
+        sent = mock_llm.completion.call_args.kwargs["messages"]
+        # System prompt (string) is promoted to a block carrying cache_control.
+        assert _cache_blocks(sent[0]["content"])
+        assert _cache_blocks(sent[1]["content"])
+        # The caller's original list is never mutated.
+        assert messages[0]["content"] == "big static system prompt"
+
+    @patch("cadgenbench.baseline.llm.litellm")
+    def test_volatile_images_left_uncached(self, mock_llm: MagicMock) -> None:
+        mock_llm.completion.return_value = _fake_response()
+        client = _make_client(model="anthropic/claude-opus-4-7")
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "task"},
+            {"role": "assistant", "content": "a0"},
+            _img_msg("user", "fb0"),
+            {"role": "assistant", "content": "a1"},
+            _img_msg("user", "fb1"),
+            {"role": "assistant", "content": "a2"},
+            _img_msg("user", "fb2"),
+            {"role": "assistant", "content": "a3"},
+            _img_msg("user", "fb3"),
+        ]
+        client.complete(messages, max_tokens=100)
+        sent = mock_llm.completion.call_args.kwargs["messages"]
+        marked = [i for i, m in enumerate(sent) if _cache_blocks(m["content"])]
+        assert marked == [0, 3, 5]
+
+    @patch("cadgenbench.baseline.llm.litellm")
+    def test_non_anthropic_untouched(self, mock_llm: MagicMock) -> None:
+        mock_llm.completion.return_value = _fake_response()
+        client = _make_client(model="openai/gpt-5.5")
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "task"},
+        ]
+        client.complete(messages, max_tokens=100)
+        sent = mock_llm.completion.call_args.kwargs["messages"]
+        assert not any(_cache_blocks(m["content"]) for m in sent)
 
 
 class TestShortErrorFormatter:
