@@ -583,7 +583,8 @@ class LLMClient:
     # the only supported thinking mode; Opus 4.6 and Sonnet 4.6 also accept
     # it and have deprecated the legacy enabled+budget_tokens format.
     _ANTHROPIC_ADAPTIVE_PATTERNS = (
-        "opus-4-8", "opus-4-7", "opus-4-6", "sonnet-4-6", "claude-mythos",
+        "opus-4-8", "opus-4-7", "opus-4-6", "sonnet-4-6",
+        "claude-mythos", "claude-fable",
     )
 
     # Models that reject a non-default `temperature` kwarg outright. Covers
