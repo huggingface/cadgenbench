@@ -12,7 +12,7 @@ model: null               # null = let LLMClient resolve (env var, etc.)
 temperature: 0.0
 max_tokens: 16384         # per-LLM-call completion budget
 max_total_tokens: 1000000 # global token budget across all turns
-max_iterations: 100       # agent turn cap
+max_iterations: 1000      # agent turn cap; wall-clock timeout is the real guardrail
 max_duration_s: 1800.0    # wall-clock timeout (seconds)
 runner_timeout: 120       # per-script subprocess timeout (seconds)
 llm_timeout: 300.0        # per-LLM-call timeout (seconds)

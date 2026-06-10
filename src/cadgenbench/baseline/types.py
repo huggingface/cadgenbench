@@ -229,6 +229,15 @@ class AgentResult:
         canonical = _find_latest_turn_step(out)
         if canonical is not None:
             shutil.copy2(canonical, out / canonical.name)
+        elif self.work_dir and self.work_dir.exists():
+            # If the loop stops before a turn snapshot is materialised (for
+            # example timeout/max-token handling between a successful export
+            # and the final save), still preserve the latest live candidate.
+            for name in ("output.step", "output.stp"):
+                candidate = self.work_dir / name
+                if candidate.exists():
+                    shutil.copy2(candidate, out / name)
+                    break
 
         debug: dict[str, Any] = {
             "stopped_reason": self.stopped_reason,
