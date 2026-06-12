@@ -138,6 +138,15 @@ cadgenbench baseline run 101 --model openai/gpt-5.5
 cadgenbench baseline run --all --parallel 4 --model openai/gpt-5.5
 ```
 
+By default the baseline writes `build123d` Python and exports `output.step`
+(`--backend build123d`). You can also target CadQuery (STEP/BREP) or OpenSCAD
+(mesh/STL):
+
+```bash
+cadgenbench baseline run 101 --backend cadquery --model openai/gpt-5.5
+cadgenbench baseline run 101 --backend openscad --model openai/gpt-5.5
+```
+
 **Using a different LLM.** `--model` takes any
 [LiteLLM](https://docs.litellm.ai/docs/providers) `provider/model`
 string; just set the matching key in `.env`. For example:
