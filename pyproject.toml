@@ -15,6 +15,9 @@ dependencies = [
     # build123d 0.10 / cadquery-ocp 7.9, so the entire stack installs via
     # pip with no conda-forge detour.
     "build123d>=0.10.0",
+    # Alternative Python/OpenCascade authoring backend for the baseline agent.
+    # The evaluator still scores the exported STEP through the same BREP path.
+    "cadquery",
     # CAD geometry + mesh utilities (shared by the benchmark and the baseline)
     "trimesh",
     "manifold3d",

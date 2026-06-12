@@ -8,18 +8,34 @@ by the CAD Score pipeline. For the scoring methodology, see
 ## Submission layout
 
 Create one directory per sample under `results/<run_name>/`, and write each
-candidate to `results/<run_name>/<sample_name>/output.step` (or
-`output.stp`). No other files are required: no description, no metadata, no
-sub-volumes.
+candidate to `results/<run_name>/<sample_name>/output.<ext>`. No other files
+are required: no description, no metadata, no sub-volumes.
 
-The grader reads each candidate STEP, aligns it rigidly to the ground truth,
-and scores it. A sample directory without an `output.step` is recorded as
-`status: "missing"` and contributes `cad_score = 0`.
+Two candidate kinds are accepted:
+
+- **BREP / STEP** — `output.step` (or `output.stp`). Validated against the CAD
+  validity gate (well-formed, watertight BREP that meshes into a closed
+  manifold).
+- **Triangle mesh** — `output.stl`, `output.obj`, `output.off`, `output.3mf`,
+  or `output.ply`. Validated against the **mesh** validity gate (welded into a
+  watertight, manifold, orientation-consistent surface) instead of the BREP
+  gate, and scored without re-tessellation. This is the path for kernels that
+  emit meshes rather than B-reps (e.g. OpenSCAD).
+
+A STEP is preferred when both are present. The grader reads the candidate,
+aligns it rigidly to the ground truth, and scores it. A sample directory
+without any `output.*` candidate is recorded as `status: "missing"` and
+contributes `cad_score = 0`.
+
+The geometric metrics (alignment, shape similarity, topology, interface match)
+run on meshes regardless of candidate kind, so STEP and mesh submissions are
+scored by the same math. Only the validity gate differs: a mesh is held to the
+mesh-manifold gate, a STEP to the stricter watertight-BREP gate.
 
 The contract is task-agnostic: `generation` and `editing` samples both expect
-the same `output.step`. An editing sample additionally provides its starting
-STEP (`input.step`) in the working directory, but the file written back is
-still `output.step`.
+the same `output.*` candidate. An editing sample additionally provides its
+starting STEP (`input.step`) in the working directory, but the file written
+back is still a single `output.*` candidate.
 
 ## Grader output
 
@@ -54,11 +70,14 @@ agent, a script, or a human.
 ```
 
 `status` is the authoritative indicator of whether a sample produced a
-scorable STEP:
+scorable candidate:
 
-- `"valid"`: `output.step` exists and passed the validity gate.
-- `"invalid"`: `output.step` exists but failed the gate; `cad_score = 0`.
-- `"missing"`: no `output.step` in the working directory; `cad_score = 0`,
+- `"valid"`: an accepted `output.*` candidate exists and passed the relevant
+  validity gate.
+- `"invalid"`: an accepted `output.*` candidate exists but failed the gate;
+  `cad_score = 0`.
+- `"missing"`: no accepted `output.*` candidate in the working directory;
+  `cad_score = 0`,
   and the metric blocks (`gt_metrics`, `interface_metrics`, ...) are omitted.
 
 `metric_errors` appears only when a shape sub-metric raises on a valid
@@ -106,14 +125,17 @@ breaks the headline down by task family. A new `task_type` in
 ## Validity requirements
 
 Geometry must pass the CAD Validity gate; otherwise it scores `cad_score = 0`
-regardless of its performance on the other axes. The gate checks that the
-candidate is a well-formed, watertight BREP that meshes into a closed
-manifold; see [`docs/metrics/cad_validity.md`](../metrics/cad_validity.md) for
-the exact checks.
+regardless of its performance on the other axes. STEP/BREP candidates must be
+well-formed, watertight B-reps that mesh into a closed manifold. Mesh
+candidates skip BREP checks and must directly be watertight, manifold,
+orientation-consistent triangle meshes; see
+[`docs/metrics/cad_validity.md`](../metrics/cad_validity.md) for the exact
+checks.
 
 That document also defines advisory diagnostics (for example, sliver faces
 and loose tolerances) that flag fragile geometry without affecting the score.
-These are recommendations for robust B-reps, not requirements.
+These are recommendations for robust B-reps (and mesh hygiene where relevant),
+not requirements.
 
 ### Self-check before submitting
 
@@ -124,6 +146,8 @@ dataset against your candidate:
 ```bash
 DATA=$(python -c 'from cadgenbench.common.paths import data_inputs_dir; print(data_inputs_dir())')
 python "$DATA/sanity_check_submission.py" path/to/output.step
+# or, for a mesh submission:
+python "$DATA/sanity_check_submission.py" path/to/output.stl
 ```
 
 It applies the same gate as the grader, exits non-zero on any failure, and

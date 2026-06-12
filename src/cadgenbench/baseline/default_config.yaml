@@ -8,6 +8,7 @@
 # Override at the CLI level via flags (--model, --max-iter, ...). A future
 # --config <other.yaml> flag will allow loading a different preset.
 
+backend: build123d        # geometry kernel: build123d/cadquery (STEP) | openscad (mesh)
 model: null               # null = let LLMClient resolve (env var, etc.)
 temperature: 0.0
 max_tokens: 16384         # per-LLM-call completion budget

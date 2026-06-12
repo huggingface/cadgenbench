@@ -1,6 +1,6 @@
 # CADGenBench: CAD Score metrics overview
 
-How CADGenBench scores one generated CAD part (a STEP file)
+How CADGenBench scores one generated CAD part (a STEP/BREP or mesh file)
 against one ground-truth STEP file. This document
 is the canonical reference. Each metric is summarised here and
 detailed in its own deep-dive section below.
@@ -11,8 +11,9 @@ detailed in its own deep-dive section below.
 
 For one candidate against one GT:
 
-1. **Validity gate.** If the candidate STEP isn't a valid, watertight,
-   meshable solid, `cad_score = 0`.
+1. **Validity gate.** If the candidate is not a valid solid, `cad_score = 0`.
+   STEP/BREP submissions must be watertight and meshable; mesh submissions
+   must already be watertight, manifold, and orientable.
 2. Otherwise, `cad_score` is a **weighted** mean of three independent
    $[0, 1]$ metrics:
 
@@ -53,7 +54,7 @@ Trusted mesh sidecars are aligned in memory and are not re-tessellated.
 
 ```
                   ┌──────────────────┐
-                  │  candidate STEP  │
+                  │  candidate file  │
                   └─────────┬────────┘
                             │
                             ▼
@@ -95,7 +96,11 @@ Validity is a gate, not a term.
 
 ### 1. CAD Validity (gate)
 
-A hard gate on the raw candidate STEP, checking that it is a well-formed BREP, watertight, and meshable as a closed orientable manifold. Any failure zeroes `cad_score`, so an invalid solid never beats a worse but valid one.
+A hard gate on the raw candidate. STEP/BREP submissions are checked as
+well-formed, watertight B-reps that mesh into a closed orientable manifold.
+Mesh submissions are checked directly as closed, manifold,
+orientation-consistent triangle meshes. Any failure zeroes `cad_score`, so an
+invalid solid never beats a worse but valid one.
 
 → [Deep dive](./metrics/cad_validity.md).
 

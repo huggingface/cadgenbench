@@ -59,3 +59,18 @@ def test_package_includes_present_steps_and_missing_dirs(tmp_path: Path) -> None
         assert "101/output.step" in names
         assert "102/" in names
         assert "102/output.step" not in names
+
+
+def test_package_includes_present_mesh_candidates(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    (run_dir / "101").mkdir(parents=True)
+    (run_dir / "101" / "output.stl").write_text("solid candidate\nendsolid candidate\n")
+    out = tmp_path / "submission.zip"
+
+    assert package.run(_args(run_dir, out)) == 0
+
+    with zipfile.ZipFile(out) as zf:
+        names = set(zf.namelist())
+        assert "101/" in names
+        assert "101/output.stl" in names
+        assert "101/output.step" not in names

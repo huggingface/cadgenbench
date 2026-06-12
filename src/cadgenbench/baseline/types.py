@@ -55,16 +55,27 @@ _DEFAULTS: dict[str, Any] = yaml.safe_load(
     (Path(__file__).parent / "default_config.yaml").read_text()
 )
 
+_CANDIDATE_NAMES: tuple[str, ...] = (
+    "output.step",
+    "output.stp",
+    "output.3mf",
+    "output.obj",
+    "output.off",
+    "output.ply",
+    "output.stl",
+)
 
-def _find_latest_turn_step(fixture_dir: Path) -> Path | None:
-    """Return the highest-numbered ``turn_<N>/output.step`` (or ``.stp``).
+
+def _find_latest_turn_candidate(fixture_dir: Path) -> Path | None:
+    """Return the highest-numbered ``turn_<N>/output.*`` candidate.
 
     Mirrors the selection logic the evaluator used before becoming
     turn-unaware (see :func:`cadgenbench.eval.evaluate._find_candidate_step`
-    pre-refactor): of all per-iteration STEP snapshots the baseline kept,
-    the latest-turn one wins. Used to materialise the canonical candidate
-    at the fixture root so historical scoring is preserved across the
-    refactor.
+    pre-refactor): of all per-iteration candidate snapshots the baseline kept,
+    the latest-turn one wins. STEP/BREP wins within a turn if both STEP and
+    mesh exist, matching evaluator discovery. Used to materialise the canonical
+    candidate at the fixture root so historical scoring is preserved across the
+    refactor and mesh backends package cleanly.
     """
     found: list[tuple[int, Path]] = []
     for td in fixture_dir.iterdir():
@@ -74,7 +85,7 @@ def _find_latest_turn_step(fixture_dir: Path) -> Path | None:
             idx = int(td.name.split("_", 1)[1])
         except ValueError:
             continue
-        for name in ("output.step", "output.stp"):
+        for name in _CANDIDATE_NAMES:
             p = td / name
             if p.exists():
                 found.append((idx, p))
@@ -102,6 +113,7 @@ class AgentConfig:
     ``None`` means "provider default" (no override).
     """
 
+    backend: str = _DEFAULTS["backend"]
     model: str | None = _DEFAULTS["model"]
     temperature: float = _DEFAULTS["temperature"]
     max_tokens: int = _DEFAULTS["max_tokens"]
@@ -210,30 +222,29 @@ class AgentResult:
 
         if self.work_dir and self.work_dir.exists() and self.turns:
             last_turn_dir = out / f"turn_{self.turns[-1].turn}"
-            # STEP artifact + any PNG renders the agent saved.
-            preserve_suffixes = {".step", ".stp", ".png"}
+            # Candidate artifact + any PNG renders the agent saved.
+            preserve_suffixes = {".step", ".stp", ".stl", ".obj", ".off", ".3mf", ".ply", ".png"}
             for f in self.work_dir.iterdir():
                 if f.suffix.lower() in preserve_suffixes:
                     dest = last_turn_dir / f.name
                     if not dest.exists():
                         shutil.copy2(f, dest)
 
-        # Materialise the canonical candidate STEP at the fixture root.
-        # The evaluator (and external readers) look ONLY at
-        # <fixture>/output.step per the submission contract
-        # (docs/benchmark/submission.md). Selection mirrors the
-        # pre-refactor evaluator (highest-numbered turn with a STEP wins)
-        # so historical scores are preserved across the eval becoming
-        # turn-unaware. Per-iteration snapshots in turn_<N>/ are
+        # Materialise the canonical candidate at the fixture root. The
+        # evaluator (and external readers) look ONLY at <fixture>/output.*
+        # per the submission contract (docs/benchmark/submission.md).
+        # Selection mirrors the pre-refactor evaluator (highest-numbered turn
+        # with a candidate wins) so historical scores are preserved across the
+        # eval becoming turn-unaware. Per-iteration snapshots in turn_<N>/ are
         # untouched - they remain available for debugging.
-        canonical = _find_latest_turn_step(out)
+        canonical = _find_latest_turn_candidate(out)
         if canonical is not None:
             shutil.copy2(canonical, out / canonical.name)
         elif self.work_dir and self.work_dir.exists():
             # If the loop stops before a turn snapshot is materialised (for
             # example timeout/max-token handling between a successful export
             # and the final save), still preserve the latest live candidate.
-            for name in ("output.step", "output.stp"):
+            for name in _CANDIDATE_NAMES:
                 candidate = self.work_dir / name
                 if candidate.exists():
                     shutil.copy2(candidate, out / name)

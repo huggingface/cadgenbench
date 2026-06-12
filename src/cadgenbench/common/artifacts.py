@@ -384,3 +384,156 @@ class StepArtifacts:
             tmp.replace(path)
         except Exception:
             tmp.unlink(missing_ok=True)
+
+
+def _measure_mesh(mesh: Mesh) -> Measurements:
+    """Geometric measurements for a triangle mesh (no BREP available).
+
+    Volume and bounding box are real; the BREP topology counts
+    (``solid_count`` / ``shell_count`` / ``face_count``) have no faithful
+    mesh equivalent and are reported nominally — they are not used by
+    scoring (the real connectivity is surfaced by the topology metric's
+    Betti numbers). ``face_count`` carries the triangle count as the closest
+    honest analogue.
+    """
+    import trimesh
+
+    verts = np.asarray(mesh.vertices, dtype=np.float64)
+    tm = trimesh.Trimesh(
+        vertices=verts,
+        faces=np.asarray(mesh.triangles, dtype=np.int64),
+        process=False,
+    )
+    lo = verts.min(axis=0)
+    hi = verts.max(axis=0)
+    return Measurements(
+        solid_count=1,
+        shell_count=1,
+        face_count=int(mesh.n_triangles),
+        volume=float(abs(tm.volume)),
+        bounding_box=BBox(
+            x_min=float(lo[0]), x_max=float(hi[0]),
+            y_min=float(lo[1]), y_max=float(hi[1]),
+            z_min=float(lo[2]), z_max=float(hi[2]),
+        ),
+    )
+
+
+@dataclass
+class MeshArtifacts:
+    """Lazy artifacts for one submitted triangle-mesh file (no BREP).
+
+    Duck-types the subset of :class:`StepArtifacts` the evaluator and metric
+    modules consume (``mesh()``, ``manifold()``, ``betti()``, ``analysis``,
+    ``deflection()``, ``has_sidecar``), so a mesh submission flows through the
+    same alignment + metric path as a STEP — but is validated against the mesh
+    gate (watertight / manifold / orientation-consistent) instead of the BREP
+    gate, and is never re-tessellated.
+
+    A trusted ``.mesh.npz`` sidecar next to the file (written for the aligned
+    candidate) is preferred over re-reading the mesh file, keeping the exact
+    float64 geometry across the align → score handoff. An in-memory ``mesh``
+    can be injected directly (the fresh-alignment path) to skip any file I/O.
+    """
+
+    mesh_path: Path | str
+    injected_mesh: Mesh | None = None
+    _mesh: Mesh | None = field(default=None, init=False, repr=False)
+    _analysis: ValidityResult | None = field(default=None, init=False, repr=False)
+    _manifold: object | None = field(default=None, init=False, repr=False)
+    _betti: object | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.mesh_path = Path(self.mesh_path)
+
+    @property
+    def has_sidecar(self) -> bool:
+        """Always trusted: a submitted mesh *is* the reference geometry."""
+        return True
+
+    def mesh(self) -> Mesh:
+        """The welded mesh: injected > trusted sidecar > loaded mesh file."""
+        if self._mesh is None:
+            if self.injected_mesh is not None:
+                self._mesh = self.injected_mesh
+            else:
+                sidecar = self._load_sidecar_mesh()
+                if sidecar is not None:
+                    self._mesh = sidecar
+                else:
+                    from cadgenbench.common.mesh import mesh_from_file
+
+                    self._mesh = mesh_from_file(self.mesh_path)
+        return self._mesh
+
+    def deflection(self) -> float:
+        return float(self.mesh().linear_deflection_mm)
+
+    @property
+    def analysis(self) -> ValidityResult:
+        """Validity (mesh gate) + measurements, computed once and cached."""
+        if self._analysis is None:
+            from cadgenbench.common.mesh import MeshSanityError, validate_mesh
+            from cadgenbench.common.validity import _check_triangle_ceiling
+
+            try:
+                mesh = self.mesh()
+            except Exception as exc:  # noqa: BLE001 - load failure == invalid
+                self._analysis = ValidityResult(
+                    validation=ValidationResult(
+                        is_valid=False,
+                        is_watertight=False,
+                        topology_errors=(f"could not load mesh: {exc}",),
+                    ),
+                    measurements=Measurements(
+                        solid_count=0, shell_count=0, face_count=0,
+                        volume=0.0,
+                        bounding_box=BBox(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                    ),
+                )
+                return self._analysis
+
+            measurements = _measure_mesh(mesh)
+            try:
+                _check_triangle_ceiling(mesh)
+                validate_mesh(mesh)
+                validation = ValidationResult(
+                    is_valid=True, is_watertight=True, topology_errors=(),
+                )
+            except MeshSanityError as exc:
+                validation = ValidationResult(
+                    is_valid=False, is_watertight=False,
+                    topology_errors=(str(exc),),
+                )
+            self._analysis = ValidityResult(
+                validation=validation, measurements=measurements,
+            )
+        return self._analysis
+
+    def manifold(self):
+        """``manifold3d.Manifold`` for the submitted mesh."""
+        from cadgenbench.eval.booleans import mesh_to_manifold
+
+        if self._manifold is None:
+            self._manifold = mesh_to_manifold(self.mesh())
+        return self._manifold
+
+    def betti(self):
+        """Betti numbers for the submitted mesh."""
+        from cadgenbench.eval.topo_match import compute_betti_from_mesh
+
+        if self._betti is None:
+            self._betti = compute_betti_from_mesh(self.mesh())
+        return self._betti
+
+    def _load_sidecar_mesh(self) -> Mesh | None:
+        """Load the trusted ``.mesh.npz`` sidecar next to the file, if any."""
+        path = sidecar_path_for(self.mesh_path)
+        if not path.exists():
+            return None
+        with np.load(path, allow_pickle=False) as data:
+            return Mesh(
+                vertices=np.asarray(data["vertices"], dtype=np.float64),
+                triangles=np.asarray(data["triangles"], dtype=np.int64),
+                linear_deflection_mm=float(data["linear_deflection_mm"]),
+            )

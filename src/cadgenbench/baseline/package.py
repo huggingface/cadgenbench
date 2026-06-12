@@ -22,12 +22,12 @@ The submission contract (mirrored from the leaderboard's ``submit.py``):
 
 - a top-level ``meta.json`` with keys ``submitter_name``, ``submission_name``,
   ``agent_url``, ``notes``, ``agree_to_publish``;
-- one folder per fixture. A folder may omit ``output.step``; the evaluator
+- one folder per fixture. A folder may omit an ``output.*`` candidate; the evaluator
   records that fixture as ``status="missing"`` and scores it zero.
 
 A baseline run dir already materialises one directory per attempted fixture
 (see :meth:`AgentResult.save`), so packaging preserves those directories and
-copies any produced candidate STEP files into the zip.
+copies any produced candidate files into the zip.
 
 Usage::
 
@@ -49,8 +49,17 @@ logger = logging.getLogger(__name__)
 
 # Mirror of cadgenbench-leaderboard/submit.py REQUIRED_META_KEYS. Kept inline
 # (not imported) because the leaderboard is a separate repo; the contract is
-# documented in docs/benchmark/submission.md.
-_CANDIDATE_NAMES = ("output.step", "output.stp")
+# documented in docs/benchmark/submission.md. STEP/BREP wins when both are
+# present, matching evaluator and leaderboard-submit candidate discovery.
+_CANDIDATE_NAMES = (
+    "output.step",
+    "output.stp",
+    "output.3mf",
+    "output.obj",
+    "output.off",
+    "output.ply",
+    "output.stl",
+)
 
 
 def add_subparser(subparsers: argparse._SubParsersAction) -> None:
@@ -62,7 +71,7 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("run_dir", type=Path,
-                   help="A baseline run directory (contains <fixture>/output.step).")
+                   help="A baseline run directory (contains <fixture>/output.*).")
     p.add_argument("-o", "--output", type=Path, default=None,
                    help="Output zip path (default: <run_dir>.zip next to the run dir).")
     p.add_argument("--submitter", default=None,
@@ -81,24 +90,24 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> None:
 
 
 def _discover_fixture_entries(run_dir: Path) -> list[tuple[str, Path | None]]:
-    """Return ``(fixture_name, output_step_path_or_none)`` for each fixture.
+    """Return ``(fixture_name, output_candidate_path_or_none)`` for each fixture.
 
-    A fixture is any immediate subdirectory. If it has ``output.step`` (or
-    ``.stp``) at its root, that file is packaged as ``output.step``. If it has
-    no candidate STEP, the directory is still preserved so the evaluator can
+    A fixture is any immediate subdirectory. If it has an accepted ``output.*``
+    candidate at its root, that file is packaged under the same filename. If it
+    has no candidate, the directory is still preserved so the evaluator can
     record ``status="missing"`` and assign zero credit for that fixture.
     """
     found: list[tuple[str, Path | None]] = []
     for child in sorted(run_dir.iterdir()):
         if not child.is_dir():
             continue
-        output_step: Path | None = None
+        output_candidate: Path | None = None
         for name in _CANDIDATE_NAMES:
-            step = child / name
-            if step.is_file() and step.stat().st_size > 0:
-                output_step = step
+            candidate = child / name
+            if candidate.is_file() and candidate.stat().st_size > 0:
+                output_candidate = candidate
                 break
-        found.append((child.name, output_step))
+        found.append((child.name, output_candidate))
     return found
 
 
@@ -149,19 +158,19 @@ def run(args: argparse.Namespace) -> int:
 
     with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("meta.json", json.dumps(meta, indent=2) + "\n")
-        for fixture_name, step in fixtures:
+        for fixture_name, candidate in fixtures:
             # Explicit directory entry preserves missing-output fixtures after
             # extraction; without it, an empty fixture folder disappears.
             zf.writestr(f"{fixture_name}/", "")
-            if step is not None:
-                zf.write(step, arcname=f"{fixture_name}/output.step")
+            if candidate is not None:
+                zf.write(candidate, arcname=f"{fixture_name}/{candidate.name}")
 
     size_kb = out_path.stat().st_size // 1024
-    n_with_steps = sum(1 for _, step in fixtures if step is not None)
-    n_missing = len(fixtures) - n_with_steps
+    n_with_candidates = sum(1 for _, candidate in fixtures if candidate is not None)
+    n_missing = len(fixtures) - n_with_candidates
     print(
         f"Wrote {out_path} ({len(fixtures)} fixtures, "
-        f"{n_with_steps} with STEP, {n_missing} missing, {size_kb} KB)"
+        f"{n_with_candidates} with candidate, {n_missing} missing, {size_kb} KB)"
     )
     print(f"  submitter_name : {submitter}")
     print(f"  submission_name: {submission_name}")

@@ -726,8 +726,6 @@ def _render_fixture_card(
         p.append('<div class="metrics-bar">')
         p.append(_bool_pill("valid", val.get("is_valid", False)))
         p.append(_bool_pill("watertight", val.get("is_watertight", False)))
-        p.append(f'<span class="val-pill val-info">solids: {val.get("solid_count", "?")}</span>')
-        p.append(f'<span class="val-pill val-info">faces: {val.get("face_count", "?")}</span>')
         bb = val.get("bbox", {})
         if bb:
             p.append(

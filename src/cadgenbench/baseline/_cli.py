@@ -107,6 +107,11 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> None:
                    help=f"Per-LLM-call timeout in seconds (default: {defaults.llm_timeout:.0f})")
     p.add_argument("--parallel", type=int, default=1, metavar="N",
                    help="Run N fixtures in parallel (default: 1)")
+    p.add_argument("--backend", choices=["build123d", "cadquery", "openscad"],
+                   default=defaults.backend,
+                   help=(f"Geometry kernel the agent targets (default: "
+                         f"{defaults.backend}). 'build123d' and 'cadquery' "
+                         "emit STEP; 'openscad' emits a mesh (output.stl)."))
     p.add_argument("--model", default=defaults.model,
                    help="LiteLLM model string")
     p.add_argument("--temperature", type=float, default=defaults.temperature)
@@ -141,7 +146,7 @@ def run(args: argparse.Namespace) -> int:
         data_gt_dir as _data_gt_dir,
     )
     # Inputs are required: the baseline reads each fixture's description to
-    # generate a candidate STEP.
+    # generate a candidate file.
     try:
         data_inputs_dir = _data_inputs_dir()
     except FileNotFoundError as e:
@@ -185,6 +190,7 @@ def run(args: argparse.Namespace) -> int:
     resolved_model = LLMClient(model=args.model).model
 
     config = AgentConfig(
+        backend=args.backend,
         model=resolved_model,
         temperature=args.temperature,
         max_tokens=args.max_tokens_per_call,
@@ -283,11 +289,21 @@ def _discover_fixtures(
 # ---------------------------------------------------------------------------
 
 def _find_candidate_artifact(result: AgentResult) -> Path | None:
-    """Find the agent's STEP output in the work dir, if any."""
+    """Find the agent's output candidate in the work dir, if any.
+
+    A STEP/BREP is preferred; otherwise a triangle-mesh submission
+    (STL/OBJ/OFF/3MF/PLY) is accepted, matching the evaluator's contract.
+    """
     if not result.work_dir:
         return None
+    from cadgenbench.common.mesh import MESH_FILE_SUFFIXES
+
     for name in ("output.step", "output.stp"):
         candidate = result.work_dir / name
+        if candidate.exists():
+            return candidate
+    for suffix in sorted(MESH_FILE_SUFFIXES):
+        candidate = result.work_dir / f"output{suffix}"
         if candidate.exists():
             return candidate
     return None
@@ -394,7 +410,7 @@ def _run_one_task(
     elif candidate is not None:
         evaluate_candidate_only(candidate, out_dir)
     else:
-        logs.append("  Evaluation skipped: no output.step produced")
+        logs.append("  Evaluation skipped: no output.* candidate produced")
 
     return name, result, logs
 

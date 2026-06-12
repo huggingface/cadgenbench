@@ -49,7 +49,7 @@ from cadgenbench.baseline.types import (
     TurnRecord,
     save_conversation,
 )
-from cadgenbench.common.artifacts import StepArtifacts
+from cadgenbench.common.artifacts import MeshArtifacts, StepArtifacts
 from cadgenbench.baseline.llm import LLMClient
 from cadgenbench.common.viewer import render_mesh
 
@@ -67,13 +67,48 @@ def _has_done_signal(text: str) -> bool:
     """True iff ``[DONE]`` appears outside of any fenced code block."""
     return bool(_DONE_RE.search(_FENCE_RE.sub("", text)))
 
-# Hardcoded for the BREP / build123d pipeline (the only kernel supported).
+# Default artifact for the BREP / build123d pipeline. The active backend's
+# artifact filename (see :data:`_BACKENDS`) overrides this at run time.
 ARTIFACT_FILENAME = "output.step"
 
 # Extensions in input_files that should be copied verbatim into the
 # agent's working directory rather than inlined into the prompt
 # (editing tasks: the agent loads the seed STEP with ``import_step``).
 _WORKDIR_SEED_SUFFIXES = {".step", ".stp"}
+
+
+# ---------------------------------------------------------------------------
+# Backends
+# ---------------------------------------------------------------------------
+
+
+class _BackendSpec:
+    """Per-kernel knobs the agent loop varies (everything else is shared)."""
+
+    __slots__ = ("name", "artifact_filename", "code_lang", "is_mesh")
+
+    def __init__(self, name: str, artifact_filename: str, code_lang: str) -> None:
+        self.name = name
+        self.artifact_filename = artifact_filename
+        self.code_lang = code_lang
+        self.is_mesh = not artifact_filename.endswith((".step", ".stp"))
+
+
+_BACKENDS: dict[str, _BackendSpec] = {
+    "build123d": _BackendSpec("build123d", "output.step", "python"),
+    "cadquery": _BackendSpec("cadquery", "output.step", "python"),
+    "openscad": _BackendSpec("openscad", "output.stl", "scad"),
+}
+
+
+def get_backend(name: str) -> _BackendSpec:
+    """Return the :class:`_BackendSpec` for *name* (raises on unknown)."""
+    try:
+        return _BACKENDS[name]
+    except KeyError:
+        raise ValueError(
+            f"Unknown backend {name!r}; expected one of {sorted(_BACKENDS)}",
+        ) from None
 
 
 class AgentTimeoutError(TimeoutError):
@@ -123,14 +158,31 @@ class _WallClockAlarm:
 # Code extraction
 # ---------------------------------------------------------------------------
 
-def extract_code_blocks(text: str) -> list[str]:
-    """Extract all ```python blocks from LLM output."""
-    return [m.group(1).strip() for m in _CODE_BLOCK_RE.finditer(text)]
+_BLOCK_RE_CACHE: dict[str, re.Pattern[str]] = {"python": _CODE_BLOCK_RE}
 
 
-def extract_code(text: str) -> str | None:
-    """Extract the first ```python block from LLM output, or None."""
-    m = _CODE_BLOCK_RE.search(text)
+def _block_re(lang: str) -> re.Pattern[str]:
+    """Compiled fenced-block regex for *lang* (cached).
+
+    ``scad`` also matches an ``openscad`` fence label, since models use both.
+    """
+    if lang not in _BLOCK_RE_CACHE:
+        if lang == "scad":
+            pattern = r"```(?:scad|openscad)\s*\n(.*?)```"
+        else:
+            pattern = r"```" + re.escape(lang) + r"\s*\n(.*?)```"
+        _BLOCK_RE_CACHE[lang] = re.compile(pattern, re.DOTALL)
+    return _BLOCK_RE_CACHE[lang]
+
+
+def extract_code_blocks(text: str, lang: str = "python") -> list[str]:
+    """Extract all fenced ``lang`` blocks from LLM output."""
+    return [m.group(1).strip() for m in _block_re(lang).finditer(text)]
+
+
+def extract_code(text: str, lang: str = "python") -> str | None:
+    """Extract the first fenced ``lang`` block from LLM output, or None."""
+    m = _block_re(lang).search(text)
     return m.group(1).strip() if m else None
 
 
@@ -160,17 +212,48 @@ def execute_code(
     *,
     timeout: int = 120,
     script_index: int = 0,
+    backend: str = "build123d",
+) -> CodeExecution:
+    """Execute one code block in the persistent working directory.
+
+    Dispatches by *backend*: ``build123d`` runs the block as a Python script
+    in the current environment; ``cadquery`` runs a Python script with a
+    CadQuery-capable interpreter; ``openscad`` writes a ``.scad`` model and
+    compiles it to ``output.stl`` with the OpenSCAD CLI.
+    """
+    if backend == "openscad":
+        return _execute_openscad(
+            code, work_dir, timeout=timeout, script_index=script_index,
+        )
+    if backend == "cadquery":
+        return _execute_python(
+            code, work_dir, timeout=timeout, script_index=script_index,
+            python_executable=_resolve_cadquery_python(),
+        )
+    return _execute_python(
+        code, work_dir, timeout=timeout, script_index=script_index,
+    )
+
+
+def _execute_python(
+    code: str,
+    work_dir: Path,
+    *,
+    timeout: int = 120,
+    script_index: int = 0,
+    python_executable: str | None = None,
 ) -> CodeExecution:
     """Execute a Python script in the persistent working directory."""
     script_path = work_dir / f"_script_{script_index}.py"
     script_path.write_text(code)
+    python_executable = python_executable or sys.executable
 
     before = _snapshot_files(work_dir)
 
     t0 = time.monotonic()
     try:
         result = subprocess.run(
-            [sys.executable, str(script_path)],
+            [python_executable, str(script_path)],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -192,6 +275,138 @@ def execute_code(
         partial = stderr.strip()
         if partial:
             error_text += f"\n--- partial stderr before timeout ---\n{partial}"
+
+    script_path.unlink(missing_ok=True)
+
+    after = _snapshot_files(work_dir)
+    new_or_modified = {}
+    for name, (mtime, size) in after.items():
+        prev = before.get(name)
+        if prev is None or mtime > prev[0] or size != prev[1]:
+            new_or_modified[name] = size
+
+    return CodeExecution(
+        code=code,
+        success=success,
+        stdout=stdout,
+        stderr=stderr if success else (error_text or stderr),
+        files_produced=new_or_modified,
+        duration_s=duration,
+    )
+
+
+def _resolve_cadquery_python() -> str:
+    """Locate a Python interpreter with CadQuery installed.
+
+    Honors ``CADGENBENCH_CADQUERY_PYTHON`` first. If the current interpreter
+    already imports CadQuery, use it. Otherwise prefer the local conda env named
+    ``cadquery`` (the common dev setup for CadQuery on macOS), then fall back to
+    PATH's python so the subprocess returns a normal import error.
+    """
+    import os
+
+    env = os.environ.get("CADGENBENCH_CADQUERY_PYTHON")
+    if env:
+        return env
+    try:
+        import cadquery  # noqa: F401
+
+        return sys.executable
+    except Exception:  # noqa: BLE001
+        pass
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix:
+        conda_root = Path(conda_prefix).parent
+        candidate = conda_root / "cadquery" / "bin" / "python"
+        if candidate.exists():
+            return str(candidate)
+    candidate = Path("/opt/homebrew/anaconda3/envs/cadquery/bin/python")
+    if candidate.exists():
+        return str(candidate)
+    return shutil.which("python") or sys.executable
+
+
+def _resolve_openscad_bin() -> str:
+    """Locate the OpenSCAD executable.
+
+    Honors ``CADGENBENCH_OPENSCAD_BIN``, then PATH, then the macOS app bundle.
+    Falls back to the bare name so the caller surfaces a clear
+    ``FileNotFoundError`` if OpenSCAD is not installed.
+    """
+    import os
+
+    env = os.environ.get("CADGENBENCH_OPENSCAD_BIN")
+    if env:
+        return env
+    for cand in ("openscad", "openscad-nightly", "OpenSCAD"):
+        found = shutil.which(cand)
+        if found:
+            return found
+    mac_app = "/Applications/OpenSCAD.app/Contents/MacOS/OpenSCAD"
+    if Path(mac_app).exists():
+        return mac_app
+    return "openscad"
+
+
+def _execute_openscad(
+    code: str,
+    work_dir: Path,
+    *,
+    timeout: int = 120,
+    script_index: int = 0,
+) -> CodeExecution:
+    """Compile an OpenSCAD script to ``output.stl`` in the working directory.
+
+    The model script's top-level geometry is exported by the harness (the
+    agent never writes an export command); equivalent to
+    ``openscad -o output.stl model.scad``. OpenSCAD warnings (which it prints
+    to stderr even on success, e.g. non-manifold notices) are folded into
+    stdout so the agent sees them on a successful compile.
+    """
+    script_path = work_dir / f"_model_{script_index}.scad"
+    script_path.write_text(code)
+    out_path = work_dir / "output.stl"
+    openscad = _resolve_openscad_bin()
+
+    before = _snapshot_files(work_dir)
+
+    t0 = time.monotonic()
+    try:
+        result = subprocess.run(
+            [openscad, "-o", str(out_path), str(script_path)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(work_dir),
+        )
+        duration = time.monotonic() - t0
+        success = result.returncode == 0
+        warnings = result.stderr.strip()
+        stdout = result.stdout
+        if success and warnings:
+            stdout = (stdout + "\n" + warnings).strip()
+        stderr = result.stderr
+        error_text = (
+            None if success else (warnings or f"Exit code {result.returncode}")
+        )
+    except subprocess.TimeoutExpired as exc:
+        duration = time.monotonic() - t0
+        success = False
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        error_text = f"OpenSCAD timed out after {timeout}s"
+        partial = (stderr or "").strip()
+        if partial:
+            error_text += f"\n--- partial stderr before timeout ---\n{partial}"
+    except FileNotFoundError:
+        duration = time.monotonic() - t0
+        success = False
+        stdout = ""
+        stderr = (
+            f"OpenSCAD executable not found ({openscad!r}). Install OpenSCAD or "
+            "set CADGENBENCH_OPENSCAD_BIN to its path."
+        )
+        error_text = stderr
 
     script_path.unlink(missing_ok=True)
 
@@ -355,32 +570,105 @@ def _validate_and_render_step(step_path: Path) -> tuple[str, bytes | None]:
         return _validate_and_render_blob(str(step_path))
 
 
+def _validate_and_render_mesh_blob(mesh_path_str: str) -> tuple[str, bytes | None]:
+    """Validate a submitted mesh file and iso-render it (no tessellation).
+
+    Mesh sibling of :func:`_validate_and_render_blob`: routes the artifact
+    through :class:`MeshArtifacts` (mesh-manifold gate) instead of the BREP
+    gate. Designed to run inside the render pool's worker process.
+    """
+    path = Path(mesh_path_str)
+    name = path.name
+    lines: list[str] = [f"### Auto-validation of {name}"]
+    art = MeshArtifacts(path)
+    valid = False
+    try:
+        a = art.analysis
+        v, m = a.validation, a.measurements
+        bb = m.bounding_box
+        valid = v.is_valid
+        lines += [
+            f"Valid:      {v.is_valid}",
+            f"Watertight: {v.is_watertight}",
+            f"Triangles:  {m.face_count}",
+            f"Volume:     {m.volume:.1f} mm³",
+            f"BBox:       "
+            f"{bb.size_x:.1f} × "
+            f"{bb.size_y:.1f} × "
+            f"{bb.size_z:.1f} mm",
+        ]
+        if v.topology_errors:
+            lines.append(f"Errors:     {v.topology_errors[:3]}")
+    except Exception as exc:
+        lines.append(f"Validation error: {exc}")
+
+    iso_bytes: bytes | None = None
+    lines.append("")
+    lines.append(f"### Iso render of {name}")
+    try:
+        if valid:
+            images = render_mesh(art.mesh(), views=["iso"])
+            if images:
+                iso_bytes = images[0].data
+                lines.append("(see attached image below)")
+            else:
+                lines.append("⚠️ Render returned no images.")
+        else:
+            lines.append("⚠️ Skipped render (mesh failed the validity gate).")
+    except Exception as exc:
+        lines.append(f"⚠️ Render failed: {exc}")
+
+    return "\n".join(lines), iso_bytes
+
+
+def _validate_and_render_mesh(mesh_path: Path) -> tuple[str, bytes | None]:
+    """Validate + iso-render a mesh file. Caller guarantees it exists.
+
+    Mesh sibling of :func:`_validate_and_render_step`; dispatches to the shared
+    render pool with the same timeout / inline fallback.
+    """
+    try:
+        return _get_render_pool().submit(
+            _validate_and_render_mesh_blob, str(mesh_path),
+        ).result(timeout=120)
+    except concurrent.futures.TimeoutError:
+        _shutdown_render_pool()
+        return f"⚠️ Validation/render timed out for `{mesh_path.name}`.", None
+    except Exception:
+        return _validate_and_render_mesh_blob(str(mesh_path))
+
+
 def _auto_validate_and_render(
     work_dir: Path,
     last_exe: CodeExecution | None,
+    *,
+    artifact_filename: str = ARTIFACT_FILENAME,
+    is_mesh: bool = False,
 ) -> tuple[str, bytes | None]:
-    """After a code execution, validate the STEP artifact and render iso if it exists.
+    """After a code execution, validate the artifact and render iso if it exists.
 
     Returns (text_block, iso_png_bytes).  iso_png_bytes is None if no render
     was produced.  Always returns a human-readable explanation of what happened.
     """
-    artifact_path = work_dir / ARTIFACT_FILENAME
+    artifact_path = work_dir / artifact_filename
 
     if not artifact_path.exists():
         if last_exe is None:
             return "", None
         if not last_exe.success:
             return (
-                f"⚠️ No `{ARTIFACT_FILENAME}` found (script failed, see error above).",
+                f"⚠️ No `{artifact_filename}` found (script failed, see error above).",
                 None,
             )
         return (
-            f"⚠️ No `{ARTIFACT_FILENAME}` found, your script ran without errors but "
-            f"did not export the expected file.  Make sure your script writes "
-            f"`{ARTIFACT_FILENAME}` at the end.",
+            f"⚠️ No `{artifact_filename}` found, your script ran without errors but "
+            f"did not produce the expected file.  Make sure your script writes "
+            f"`{artifact_filename}`.",
             None,
         )
 
+    if is_mesh:
+        return _validate_and_render_mesh(artifact_path)
     return _validate_and_render_step(artifact_path)
 
 
@@ -560,6 +848,9 @@ def run_agent(
     if client is None:
         client = LLMClient(model=config.model, timeout=config.llm_timeout)
 
+    backend = get_backend(config.backend)
+    artifact_filename = backend.artifact_filename
+
     if work_dir is None:
         work_dir = Path(tempfile.mkdtemp(prefix="cadgenbench_agent_"))
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -567,9 +858,10 @@ def run_agent(
     # Editing tasks ship a starting STEP in input_files; copy it into
     # the work dir so the agent can load it with ``import_step``. Keep
     # the filename verbatim (e.g. ``input.step``) since the assembled
-    # message references it by name.
+    # message references it by name. STEP seeds are meaningful for Python
+    # BREP backends; OpenSCAD cannot import a STEP.
     seeded_step_paths: list[Path] = []
-    if input_files:
+    if input_files and backend.name in {"build123d", "cadquery"}:
         for src in input_files:
             if src.suffix.lower() in _WORKDIR_SEED_SUFFIXES:
                 dest = work_dir / src.name
@@ -577,7 +869,9 @@ def run_agent(
                     shutil.copy2(src, dest)
                 seeded_step_paths.append(dest)
 
-    messages = assemble_messages(task_description, input_files=input_files)
+    messages = assemble_messages(
+        task_description, input_files=input_files, backend=backend.name,
+    )
 
     # Editing tasks: auto-validate + iso-render every seeded STEP and
     # attach the result to the initial user message, parallel to the
@@ -668,32 +962,38 @@ def run_agent(
 
         assistant_text = completion.content
 
-        code_blocks = extract_code_blocks(assistant_text)
+        code_blocks = extract_code_blocks(assistant_text, lang=backend.code_lang)
         code = code_blocks[0] if code_blocks else None
-        # Single-block contract: we execute only the first ```python block.
-        # If the model emitted more, run the first and tell it so the dropped
-        # blocks aren't silently lost (the prompt asks for one self-contained
-        # block per turn).
+        # Single-block contract: we execute only the first code block. If the
+        # model emitted more, run the first and tell it so the dropped blocks
+        # aren't silently lost (the prompt asks for one self-contained block
+        # per turn).
         multi_block_note = ""
         if len(code_blocks) > 1:
             multi_block_note = (
-                f"⚠️ Note: your response contained {len(code_blocks)} ```python "
-                "blocks, but only the first was executed.  Send exactly one "
-                "self-contained code block per turn."
+                f"⚠️ Note: your response contained {len(code_blocks)} "
+                f"```{backend.code_lang} blocks, but only the first was "
+                "executed.  Send exactly one self-contained code block per turn."
             )
             print(f"  {tag} {len(code_blocks)} code blocks; ran first only", flush=True)
         executions: list[CodeExecution] = []
 
         if code is not None:
             print(f"  {tag} Running code...", end="", flush=True)
-            exe = execute_code(code, work_dir, timeout=config.runner_timeout)
+            exe = execute_code(
+                code, work_dir,
+                timeout=config.runner_timeout, backend=backend.name,
+            )
             status = "ok" if exe.success else "FAILED"
             print(f" {status} ({exe.duration_s:.1f}s)", flush=True)
             executions.append(exe)
 
             # Auto validate + render iso whenever the artifact exists after a run
             t_render = time.monotonic()
-            auto_text, auto_iso = _auto_validate_and_render(work_dir, exe)
+            auto_text, auto_iso = _auto_validate_and_render(
+                work_dir, exe,
+                artifact_filename=artifact_filename, is_mesh=backend.is_mesh,
+            )
             render_s = time.monotonic() - t_render
             if auto_iso is not None:
                 print(f"  {tag} Auto-rendered iso ({render_s:.1f}s)", flush=True)
@@ -720,7 +1020,7 @@ def run_agent(
         ))
         messages.append({"role": "assistant", "content": assistant_text})
 
-        artifact_exists = (work_dir / ARTIFACT_FILENAME).exists()
+        artifact_exists = (work_dir / artifact_filename).exists()
         last_exe_failed = bool(executions) and not executions[-1].success
 
         def _send_feedback(note: str | None = None) -> None:
@@ -739,13 +1039,13 @@ def run_agent(
             messages.append({"role": "user", "content": content})
 
         if done_signaled:
-            # Hard gate: require output.step before accepting [DONE].
+            # Hard gate: require the artifact before accepting [DONE].
             if not artifact_exists:
-                print(f"  {tag} [DONE] rejected (no {ARTIFACT_FILENAME})", flush=True)
+                print(f"  {tag} [DONE] rejected (no {artifact_filename})", flush=True)
                 messages.append({"role": "user", "content": (
-                    f"⚠️ `[DONE]` rejected, `{ARTIFACT_FILENAME}` was not found in the "
-                    "working directory.  Make sure your script writes "
-                    f"`{ARTIFACT_FILENAME}` before signaling done.\n\n"
+                    f"⚠️ `[DONE]` rejected, `{artifact_filename}` was not found in the "
+                    "working directory.  Make sure your script produces "
+                    f"`{artifact_filename}` before signaling done.\n\n"
                     + _file_listing(work_dir)
                 )})
                 _save_incremental()
@@ -758,8 +1058,8 @@ def run_agent(
                 print(f"  {tag} [DONE] deferred, last script failed", flush=True)
                 _send_feedback(
                     "Your `[DONE]` signal was received, but the script above failed, "
-                    f"so `{ARTIFACT_FILENAME}` may be stale.  Fix the error and "
-                    "re-export, then signal `[DONE]` again.\n\n"
+                    f"so `{artifact_filename}` may be stale.  Fix the error and "
+                    "re-run, then signal `[DONE]` again.\n\n"
                 )
                 _save_incremental()
                 continue
@@ -802,8 +1102,8 @@ def run_agent(
             messages.append({
                 "role": "user",
                 "content": (
-                    "Your response contained no ```python code blocks. "
-                    "Please write Python code to make progress on the task.\n\n"
+                    f"Your response contained no ```{backend.code_lang} code "
+                    "blocks. Please write code to make progress on the task.\n\n"
                     + _file_listing(work_dir)
                 ),
             })

@@ -110,6 +110,67 @@ DEFLECTION_MIN_MM = 0.005
 DEFLECTION_MAX_MM = 0.5
 
 
+# Triangle-mesh file formats accepted as a submission candidate (in place of
+# a STEP/BREP). Loaded + welded by :func:`mesh_from_file` and routed through the
+# mesh validity gate (:func:`validate_mesh`) rather than the BREP gate.
+MESH_FILE_SUFFIXES = frozenset({".stl", ".obj", ".off", ".3mf", ".ply"})
+
+
+def mesh_from_file(path: str | Path) -> "Mesh":
+    """Load a triangle-mesh file into a welded :class:`Mesh`.
+
+    Reads any format trimesh understands (see :data:`MESH_FILE_SUFFIXES`),
+    concatenating a multi-part scene into one mesh, then welds coincident
+    vertices so a per-face triangle soup (e.g. STL, which stores no shared
+    vertices) becomes a topologically connected mesh that the validity gate
+    can reason about. Winding is left untouched: an inconsistently wound
+    submission is a genuine defect the gate should catch, not silently fix.
+
+    The ``linear_deflection_mm`` is set to a nominal value derived from the
+    bbox (informational only -- a loaded mesh is never re-tessellated).
+
+    Raises:
+        FileNotFoundError: the file does not exist.
+        RuntimeError: the file is not a loadable mesh / produced no geometry.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Mesh file not found: {path}")
+
+    import trimesh
+
+    try:
+        loaded = trimesh.load(str(path), process=True, force="mesh")
+    except Exception as exc:  # noqa: BLE001 - normalize any loader failure
+        raise RuntimeError(f"Failed to load mesh file: {path}") from exc
+
+    vertices = np.asarray(getattr(loaded, "vertices", []), dtype=np.float64)
+    triangles = np.asarray(getattr(loaded, "faces", []), dtype=np.int64)
+    if vertices.size == 0 or triangles.size == 0:
+        raise RuntimeError(f"Mesh file produced no geometry: {path}")
+
+    diagonal = float(np.linalg.norm(vertices.max(axis=0) - vertices.min(axis=0)))
+    return Mesh(
+        vertices=vertices,
+        triangles=triangles,
+        linear_deflection_mm=deflection_for_bbox(diagonal),
+    )
+
+
+def write_mesh_stl(path: str | Path, mesh: "Mesh") -> None:
+    """Write *mesh* to a binary STL at *path* (parent dirs created)."""
+    import trimesh
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tm = trimesh.Trimesh(
+        vertices=np.asarray(mesh.vertices, dtype=np.float64),
+        faces=np.asarray(mesh.triangles, dtype=np.int64),
+        process=False,
+    )
+    tm.export(str(path))
+
+
 def deflection_for_bbox(bbox_diagonal_mm: float) -> float:
     """Choose a tessellation deflection from a bounding-box diagonal.
 

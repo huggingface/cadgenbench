@@ -15,9 +15,11 @@ mechanical parts. It covers two tasks:
 
 The benchmark is tool-agnostic. It makes no assumption about how you
 build the model (`build123d`, Autodesk Fusion, Onshape): a submission
-is one STEP file per sample. Each sample declares its task type
-(`generation` or `editing`) in `description.yaml`, and the same metrics
-and `output.step` contract apply to both.
+is one candidate file per sample. Accepted candidates are STEP/BREP
+(`output.step` or `output.stp`) and triangle meshes (`output.stl`,
+`output.obj`, `output.off`, `output.3mf`, or `output.ply`). Each sample
+declares its task type (`generation` or `editing`) in `description.yaml`,
+and the same metrics and `output.*` contract apply to both.
 
 **Submit and view the leaderboard:**
 [`HuggingAI4Engineering/CADGenBench`](https://huggingface.co/spaces/HuggingAI4Engineering/CADGenBench).
@@ -28,13 +30,14 @@ This GitHub repo is the **source code behind the benchmark**. You do
 *not* need to install it to participate. It contains three parts:
 
 - **Scoring engine** (`src/cadgenbench/eval/`): the CAD Score pipeline
-  the leaderboard Space runs server-side against your submitted STEP
-  files.
+  the leaderboard Space runs server-side against your submitted STEP/BREP
+  or mesh files.
 - **Docs** (`docs/`): metric definitions and the submission contract.
 - **Reference baseline** (`src/cadgenbench/baseline/`): an optional
   example generator that turns a sample's description into a submission
-  (iteratively writes [`build123d`](https://github.com/gumyr/build123d)
-  Python, validates the STEP, and repeats until valid).
+  (iteratively writes CAD code, validates the artifact, and repeats until
+  valid). It supports `build123d` and CadQuery (STEP/BREP) plus OpenSCAD
+  (mesh/STL).
 
 Evaluation runs on the Space, scoring submissions against the privately
 held ground truth in
@@ -49,7 +52,9 @@ short:
 
 1. For each sample in
    [`cadgenbench-data`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data),
-   produce an `output.step`. Any tool works.
+   produce one `output.*` candidate. Accepted names are `output.step`,
+   `output.stp`, `output.stl`, `output.obj`, `output.off`, `output.3mf`,
+   and `output.ply`. Any tool works.
 2. Zip them as `submission.zip` with one folder per sample plus a
    small `meta.json` at the root.
 3. Upload via the **Submit** tab on the
@@ -70,12 +75,12 @@ before uploading; see
 
 ## Metrics
 
-The Space scores each candidate STEP against ground truth on four
+The Space scores each candidate against ground truth on four
 axes:
 
 | Metric | What it captures |
 |---|---|
-| **Validity** | Is the BREP well-formed, watertight, tessellable? Gate: failure zeroes the rest. |
+| **Validity** | Is the BREP well-formed/watertight, or is the submitted mesh watertight/manifold/orientable? Gate: failure zeroes the rest. |
 | **Shape similarity** | Geometry distance (surface distance F1, volume IoU). |
 | **Interface match** | Mating-feature correctness via authored keep-in / keep-out sub-volumes. |
 | **Topology match** | Betti numbers (b0, b1, b2) of the tessellated boundary. |
@@ -145,12 +150,13 @@ cadgenbench baseline run 101 --model openai/gpt-5.5             # OPENAI_API_KEY
 
 See `cadgenbench baseline run --help` for the full flag set.
 
-Output lands at `results/<timestamp>_<model_slug>/<sample>/output.step`.
+Output lands at `results/<timestamp>_<model_slug>/<sample>/output.step`
+for STEP backends or `output.stl` for the OpenSCAD mesh backend.
 The baseline only *generates* candidates; scoring against ground truth
 happens on the leaderboard Space after you submit.
 
 Bundle a run directory into a submission zip (top-level `meta.json` +
-one `output.step` per sample, per the submission contract):
+one `output.*` candidate per sample, per the submission contract):
 
 ```bash
 cadgenbench baseline package results/20260602_120000_gpt-5.5 \
