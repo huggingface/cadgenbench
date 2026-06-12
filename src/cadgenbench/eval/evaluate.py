@@ -285,14 +285,13 @@ def evaluate_result(
             candidate_artifacts=aligned_artifacts,
             gt_artifacts=gt_artifacts,
         )
-    if interface_metrics and not is_mesh:
-        # The overlay renderer loads the aligned candidate as a BREP; skip it
-        # for mesh submissions (the interface *score* above is mesh-native).
+    if interface_metrics:
         _maybe_render_interface_overlay(
             aligned_step,
             gt_dir,
             gt_step,
             result_dir / "interface_overlay.png",
+            candidate_artifacts=aligned_artifacts,
         )
 
     # --- Topology match (Betti b0/b1/b2 on the tessellated boundary) --------
@@ -612,6 +611,8 @@ def _maybe_render_interface_overlay(
     fixture_dir: Path,
     gt_step: Path,
     output_png: Path,
+    *,
+    candidate_artifacts=None,
 ) -> None:
     """Render an overlay PNG of the candidate vs each mating region.
 
@@ -642,6 +643,7 @@ def _maybe_render_interface_overlay(
             aligned_candidate_step,
             sub_volumes,
             gt_step=gt_step,
+            candidate_artifacts=candidate_artifacts,
             views=("iso", "top", "front", "right"),
             width=512,
             height=384,

@@ -92,11 +92,12 @@ def render_part_with_subvolumes(
     sub_volumes: list[SubVolume],
     *,
     gt_step: str | Path,
+    candidate_artifacts=None,
     views: tuple[str, ...] = ("iso",),
     width: int = 1024,
     height: int = 768,
 ) -> list[RenderedImage]:
-    """Render *part_step* as a ghost with each region's matched / too-much /
+    """Render a candidate as a ghost with each region's matched / too-much /
     too-little split.
 
     Uses the scorer's region geometry (see module docstring): per
@@ -110,6 +111,9 @@ def render_part_with_subvolumes(
     Tessellation/Booleans reuse the metric's
     :class:`~cadgenbench.eval.interface_match.InterfaceMatchArtifacts`
     caches, so candidate and GT share one scale and no work is duplicated.
+    ``candidate_artifacts`` may be a :class:`StepArtifacts` or mesh-backed
+    artifact object; when omitted, ``part_step`` is loaded as a STEP for
+    backwards compatibility.
     """
     from cadgenbench.common.artifacts import StepArtifacts
     from cadgenbench.eval.booleans import (
@@ -120,7 +124,7 @@ def render_part_with_subvolumes(
     )
 
     part_step = Path(part_step).resolve()
-    part_artifacts = StepArtifacts(part_step)
+    part_artifacts = candidate_artifacts or StepArtifacts(part_step)
     part_manifold = part_artifacts.manifold()
 
     interface_artifacts = InterfaceMatchArtifacts(
