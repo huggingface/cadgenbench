@@ -178,7 +178,15 @@ automatically receive:
    - An iso render of the current model
 3. **Iterate**, fix issues based on the feedback; re-emit the script each \
 time you make changes
-4. **Signal done**, when the model looks correct, write `[DONE]`"""
+4. **Signal done**, when the model looks correct, write `[DONE]`
+
+### Editing an existing STEP
+
+If an editing task provides a starting STEP (`input.step`), OpenSCAD cannot \
+import or modify that BREP directly. The harness will attach measurements and \
+reference renders of the starting geometry (typically iso/front/top/right). \
+Use those as visual context for what already exists and recreate the requested \
+final edited part in OpenSCAD as `output.stl`."""
 
 _OPENSCAD_CODE_GUIDELINES = """\
 ## Code
@@ -383,16 +391,31 @@ def assemble_messages(
     user_text = task_description
     if step_files:
         names = ", ".join(f"`{p.name}`" for p in step_files)
-        if backend == "cadquery":
+        if backend == "openscad":
+            user_text = (
+                f"{task_description}\n\n"
+                f"The starting STEP file(s) {names} are reference geometry for "
+                "this editing task. OpenSCAD cannot import STEP directly. Use "
+                "the attached measurements and renders as context, then model "
+                "the edited final part in OpenSCAD and let the harness compile "
+                "`output.stl`."
+            )
+        elif backend == "cadquery":
             load_hint = "`cadquery.importers.importStep(...)`"
+            user_text = (
+                f"{task_description}\n\n"
+                f"The starting STEP file(s) {names} have been copied into your "
+                f"working directory. Load with {load_hint}, apply the requested "
+                f"edit, then export the result as `output.step`."
+            )
         else:
             load_hint = "`import_step(...)`"
-        user_text = (
-            f"{task_description}\n\n"
-            f"The starting STEP file(s) {names} have been copied into your "
-            f"working directory. Load with {load_hint}, apply the requested "
-            f"edit, then export the result as `output.step`."
-        )
+            user_text = (
+                f"{task_description}\n\n"
+                f"The starting STEP file(s) {names} have been copied into your "
+                f"working directory. Load with {load_hint}, apply the requested "
+                f"edit, then export the result as `output.step`."
+            )
 
     if not image_files:
         return [system, {"role": "user", "content": user_text}]

@@ -672,21 +672,64 @@ def _auto_validate_and_render(
     return _validate_and_render_step(artifact_path)
 
 
-def _seed_step_feedback_blocks(step_paths: list[Path]) -> list[dict[str, Any]]:
+def _seed_step_feedback_blocks(
+    step_paths: list[Path],
+    *,
+    views: list[str] | None = None,
+    reference_only: bool = False,
+) -> list[dict[str, Any]]:
     """Build initial-message content blocks describing each seeded STEP.
 
     Parallel to the per-turn auto-feedback for ``output.step``: a
-    validation summary plus an iso render. Used on agent startup for
+    validation summary plus one or more renders. Used on agent startup for
     editing tasks so the agent sees a structured summary and a render
     of the starting geometry on turn 0 without having to render it
     itself.
     """
+    views = views or ["iso"]
     blocks: list[dict[str, Any]] = []
     for path in step_paths:
-        text, iso_png = _validate_and_render_step(path)
+        artifacts = StepArtifacts(path)
+        lines: list[str] = []
+        if reference_only:
+            lines += [
+                f"### Reference geometry from `{path.name}`",
+                "This is the starting STEP for the editing task. OpenSCAD cannot "
+                "import it directly; use the measurements and attached renders "
+                "as visual reference, then recreate the edited final model as "
+                "`output.stl`.",
+                "",
+            ]
+        else:
+            lines.append(f"### Auto-validation of {path.name}")
+        render_images = []
+        try:
+            a = artifacts.analysis
+            v, m = a.validation, a.measurements
+            bb = m.bounding_box
+            lines += [
+                f"Valid:      {v.is_valid}",
+                f"Watertight: {v.is_watertight}",
+                f"Solids:     {m.solid_count}",
+                f"Faces:      {m.face_count}",
+                f"Volume:     {m.volume:.1f} mm³",
+                f"BBox:       "
+                f"{bb.size_x:.1f} × "
+                f"{bb.size_y:.1f} × "
+                f"{bb.size_z:.1f} mm",
+                "",
+                f"### Renders of {path.name}: {', '.join(views)}",
+            ]
+            if v.topology_errors:
+                lines.append(f"Errors:     {v.topology_errors[:3]}")
+            render_images = render_mesh(artifacts.mesh(), views=views)
+        except Exception as exc:
+            lines.append(f"Validation/render error: {exc}")
+
+        text = "\n".join(lines)
         blocks.append({"type": "text", "text": text})
-        if iso_png is not None:
-            b64 = base64.b64encode(iso_png).decode()
+        for img in render_images:
+            b64 = base64.b64encode(img.data).decode()
             blocks.append({
                 "type": "image_url",
                 "image_url": {"url": f"data:image/png;base64,{b64}"},
@@ -855,32 +898,35 @@ def run_agent(
         work_dir = Path(tempfile.mkdtemp(prefix="cadgenbench_agent_"))
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    # Editing tasks ship a starting STEP in input_files; copy it into
-    # the work dir so the agent can load it with ``import_step``. Keep
-    # the filename verbatim (e.g. ``input.step``) since the assembled
-    # message references it by name. STEP seeds are meaningful for Python
-    # BREP backends; OpenSCAD cannot import a STEP.
+    # Editing tasks ship a starting STEP in input_files. For Python BREP
+    # backends, copy it into the work dir so the agent can load it. For
+    # OpenSCAD, the STEP is reference-only: the backend cannot import it, but
+    # we still render/measure it and attach those views to the initial prompt.
     seeded_step_paths: list[Path] = []
-    if input_files and backend.name in {"build123d", "cadquery"}:
+    if input_files:
         for src in input_files:
             if src.suffix.lower() in _WORKDIR_SEED_SUFFIXES:
-                dest = work_dir / src.name
-                if dest.resolve() != src.resolve():
-                    shutil.copy2(src, dest)
-                seeded_step_paths.append(dest)
+                if backend.name in {"build123d", "cadquery"}:
+                    dest = work_dir / src.name
+                    if dest.resolve() != src.resolve():
+                        shutil.copy2(src, dest)
+                    seeded_step_paths.append(dest)
+                else:
+                    seeded_step_paths.append(src)
 
     messages = assemble_messages(
         task_description, input_files=input_files, backend=backend.name,
     )
 
-    # Editing tasks: auto-validate + iso-render every seeded STEP and
-    # attach the result to the initial user message, parallel to the
-    # per-turn feedback the agent gets on ``output.step``. Gives the
-    # agent a structured summary (bbox, faces, volume) plus a render
-    # of the starting geometry on turn 0 without it having to render
-    # ``input.step`` itself.
+    # Editing tasks: auto-validate + render every seeded STEP and attach the
+    # result to the initial user message. OpenSCAD gets several reference views
+    # because it cannot import/edit the STEP directly.
     if seeded_step_paths:
-        seed_blocks = _seed_step_feedback_blocks(seeded_step_paths)
+        seed_blocks = _seed_step_feedback_blocks(
+            seeded_step_paths,
+            views=(["iso", "front", "top", "right"] if backend.name == "openscad" else ["iso"]),
+            reference_only=backend.name == "openscad",
+        )
         user_msg = messages[-1]
         content = user_msg["content"]
         if isinstance(content, str):
