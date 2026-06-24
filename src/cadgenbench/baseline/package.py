@@ -49,16 +49,10 @@ logger = logging.getLogger(__name__)
 
 # Mirror of cadgenbench-leaderboard/submit.py REQUIRED_META_KEYS. Kept inline
 # (not imported) because the leaderboard is a separate repo; the contract is
-# documented in docs/benchmark/submission.md. STEP/BREP wins when both are
-# present, matching evaluator and leaderboard-submit candidate discovery.
+# documented in docs/benchmark/submission.md.
 _CANDIDATE_NAMES = (
     "output.step",
     "output.stp",
-    "output.3mf",
-    "output.obj",
-    "output.off",
-    "output.ply",
-    "output.stl",
 )
 
 

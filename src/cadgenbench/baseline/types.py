@@ -58,24 +58,17 @@ _DEFAULTS: dict[str, Any] = yaml.safe_load(
 _CANDIDATE_NAMES: tuple[str, ...] = (
     "output.step",
     "output.stp",
-    "output.3mf",
-    "output.obj",
-    "output.off",
-    "output.ply",
-    "output.stl",
 )
 
 
 def _find_latest_turn_candidate(fixture_dir: Path) -> Path | None:
-    """Return the highest-numbered ``turn_<N>/output.*`` candidate.
+    """Return the highest-numbered ``turn_<N>/output.step`` candidate.
 
     Mirrors the selection logic the evaluator used before becoming
     turn-unaware (see :func:`cadgenbench.eval.evaluate._find_candidate_step`
     pre-refactor): of all per-iteration candidate snapshots the baseline kept,
-    the latest-turn one wins. STEP/BREP wins within a turn if both STEP and
-    mesh exist, matching evaluator discovery. Used to materialise the canonical
-    candidate at the fixture root so historical scoring is preserved across the
-    refactor and mesh backends package cleanly.
+    the latest-turn one wins. Used to materialise the canonical candidate at
+    the fixture root so historical scoring is preserved across the refactor.
     """
     found: list[tuple[int, Path]] = []
     for td in fixture_dir.iterdir():
@@ -223,7 +216,7 @@ class AgentResult:
         if self.work_dir and self.work_dir.exists() and self.turns:
             last_turn_dir = out / f"turn_{self.turns[-1].turn}"
             # Candidate artifact + any PNG renders the agent saved.
-            preserve_suffixes = {".step", ".stp", ".stl", ".obj", ".off", ".3mf", ".ply", ".png"}
+            preserve_suffixes = {".step", ".stp", ".png"}
             for f in self.work_dir.iterdir():
                 if f.suffix.lower() in preserve_suffixes:
                     dest = last_turn_dir / f.name

@@ -15,11 +15,10 @@ mechanical parts. It covers two tasks:
 
 The benchmark is tool-agnostic. It makes no assumption about how you
 build the model (`build123d`, Autodesk Fusion, Onshape): a submission
-is one candidate file per sample. Accepted candidates are STEP/BREP
-(`output.step` or `output.stp`) and triangle meshes (`output.stl`,
-`output.obj`, `output.off`, `output.3mf`, or `output.ply`). Each sample
-declares its task type (`generation` or `editing`) in `description.yaml`,
-and the same metrics and `output.*` contract apply to both.
+is one candidate file per sample, a STEP/BREP (`output.step` or
+`output.stp`). Each sample declares its task type (`generation` or
+`editing`) in `description.yaml`, and the same metrics and `output.step`
+contract apply to both.
 
 **Submit and view the leaderboard:**
 [`HuggingAI4Engineering/CADGenBench`](https://huggingface.co/spaces/HuggingAI4Engineering/CADGenBench).
@@ -31,13 +30,12 @@ This GitHub repo is the **source code behind the benchmark**. You do
 
 - **Scoring engine** (`src/cadgenbench/eval/`): the CAD Score pipeline
   the leaderboard Space runs server-side against your submitted STEP/BREP
-  or mesh files.
+  files.
 - **Docs** (`docs/`): metric definitions and the submission contract.
 - **Reference baseline** (`src/cadgenbench/baseline/`): an optional
   example generator that turns a sample's description into a submission
   (iteratively writes CAD code, validates the artifact, and repeats until
-  valid). It supports `build123d` and CadQuery (STEP/BREP) plus OpenSCAD
-  (mesh/STL).
+  valid). It supports the `build123d` and CadQuery (STEP/BREP) backends.
 
 Evaluation runs on the Space, scoring submissions against the privately
 held ground truth in
@@ -52,9 +50,7 @@ short:
 
 1. For each sample in
    [`cadgenbench-data`](https://huggingface.co/datasets/HuggingAI4Engineering/cadgenbench-data),
-   produce one `output.*` candidate. Accepted names are `output.step`,
-   `output.stp`, `output.stl`, `output.obj`, `output.off`, `output.3mf`,
-   and `output.ply`. Any tool works.
+   produce one `output.step` (or `output.stp`) candidate. Any tool works.
 2. Zip them as `submission.zip` with one folder per sample plus a
    small `meta.json` at the root.
 3. Upload via the **Submit** tab on the
@@ -80,7 +76,7 @@ axes:
 
 | Metric | What it captures |
 |---|---|
-| **Validity** | Is the BREP well-formed/watertight, or is the submitted mesh watertight/manifold/orientable? Gate: failure zeroes the rest. |
+| **Validity** | Is the BREP well-formed and watertight (meshes into a closed manifold)? Gate: failure zeroes the rest. |
 | **Shape similarity** | Geometry distance (surface distance F1, volume IoU). |
 | **Interface match** | Mating-feature correctness via authored keep-in / keep-out sub-volumes. |
 | **Topology match** | Betti numbers (b0, b1, b2) of the tessellated boundary. |
@@ -139,12 +135,10 @@ cadgenbench baseline run --all --parallel 4 --model openai/gpt-5.5
 ```
 
 By default the baseline writes `build123d` Python and exports `output.step`
-(`--backend build123d`). You can also target CadQuery (STEP/BREP) or OpenSCAD
-(mesh/STL):
+(`--backend build123d`). You can also target CadQuery (also STEP/BREP):
 
 ```bash
 cadgenbench baseline run 101 --backend cadquery --model openai/gpt-5.5
-cadgenbench baseline run 101 --backend openscad --model openai/gpt-5.5
 ```
 
 **Using a different LLM.** `--model` takes any
@@ -159,13 +153,12 @@ cadgenbench baseline run 101 --model openai/gpt-5.5             # OPENAI_API_KEY
 
 See `cadgenbench baseline run --help` for the full flag set.
 
-Output lands at `results/<timestamp>_<model_slug>/<sample>/output.step`
-for STEP backends or `output.stl` for the OpenSCAD mesh backend.
+Output lands at `results/<timestamp>_<model_slug>/<sample>/output.step`.
 The baseline only *generates* candidates; scoring against ground truth
 happens on the leaderboard Space after you submit.
 
 Bundle a run directory into a submission zip (top-level `meta.json` +
-one `output.*` candidate per sample, per the submission contract):
+one `output.step` candidate per sample, per the submission contract):
 
 ```bash
 cadgenbench baseline package results/20260602_120000_gpt-5.5 \

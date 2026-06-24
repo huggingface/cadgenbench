@@ -49,7 +49,7 @@ from cadgenbench.baseline.types import (
     TurnRecord,
     save_conversation,
 )
-from cadgenbench.common.artifacts import MeshArtifacts, StepArtifacts
+from cadgenbench.common.artifacts import StepArtifacts
 from cadgenbench.baseline.llm import LLMClient
 from cadgenbench.common.viewer import render_mesh
 
@@ -85,19 +85,17 @@ _WORKDIR_SEED_SUFFIXES = {".step", ".stp"}
 class _BackendSpec:
     """Per-kernel knobs the agent loop varies (everything else is shared)."""
 
-    __slots__ = ("name", "artifact_filename", "code_lang", "is_mesh")
+    __slots__ = ("name", "artifact_filename", "code_lang")
 
     def __init__(self, name: str, artifact_filename: str, code_lang: str) -> None:
         self.name = name
         self.artifact_filename = artifact_filename
         self.code_lang = code_lang
-        self.is_mesh = not artifact_filename.endswith((".step", ".stp"))
 
 
 _BACKENDS: dict[str, _BackendSpec] = {
     "build123d": _BackendSpec("build123d", "output.step", "python"),
     "cadquery": _BackendSpec("cadquery", "output.step", "python"),
-    "openscad": _BackendSpec("openscad", "output.stl", "scad"),
 }
 
 
@@ -162,15 +160,9 @@ _BLOCK_RE_CACHE: dict[str, re.Pattern[str]] = {"python": _CODE_BLOCK_RE}
 
 
 def _block_re(lang: str) -> re.Pattern[str]:
-    """Compiled fenced-block regex for *lang* (cached).
-
-    ``scad`` also matches an ``openscad`` fence label, since models use both.
-    """
+    """Compiled fenced-block regex for *lang* (cached)."""
     if lang not in _BLOCK_RE_CACHE:
-        if lang == "scad":
-            pattern = r"```(?:scad|openscad)\s*\n(.*?)```"
-        else:
-            pattern = r"```" + re.escape(lang) + r"\s*\n(.*?)```"
+        pattern = r"```" + re.escape(lang) + r"\s*\n(.*?)```"
         _BLOCK_RE_CACHE[lang] = re.compile(pattern, re.DOTALL)
     return _BLOCK_RE_CACHE[lang]
 
@@ -218,13 +210,8 @@ def execute_code(
 
     Dispatches by *backend*: ``build123d`` runs the block as a Python script
     in the current environment; ``cadquery`` runs a Python script with a
-    CadQuery-capable interpreter; ``openscad`` writes a ``.scad`` model and
-    compiles it to ``output.stl`` with the OpenSCAD CLI.
+    CadQuery-capable interpreter.
     """
-    if backend == "openscad":
-        return _execute_openscad(
-            code, work_dir, timeout=timeout, script_index=script_index,
-        )
     if backend == "cadquery":
         return _execute_python(
             code, work_dir, timeout=timeout, script_index=script_index,
@@ -324,107 +311,6 @@ def _resolve_cadquery_python() -> str:
     if candidate.exists():
         return str(candidate)
     return shutil.which("python") or sys.executable
-
-
-def _resolve_openscad_bin() -> str:
-    """Locate the OpenSCAD executable.
-
-    Honors ``CADGENBENCH_OPENSCAD_BIN``, then PATH, then the macOS app bundle.
-    Falls back to the bare name so the caller surfaces a clear
-    ``FileNotFoundError`` if OpenSCAD is not installed.
-    """
-    import os
-
-    env = os.environ.get("CADGENBENCH_OPENSCAD_BIN")
-    if env:
-        return env
-    for cand in ("openscad", "openscad-nightly", "OpenSCAD"):
-        found = shutil.which(cand)
-        if found:
-            return found
-    mac_app = "/Applications/OpenSCAD.app/Contents/MacOS/OpenSCAD"
-    if Path(mac_app).exists():
-        return mac_app
-    return "openscad"
-
-
-def _execute_openscad(
-    code: str,
-    work_dir: Path,
-    *,
-    timeout: int = 120,
-    script_index: int = 0,
-) -> CodeExecution:
-    """Compile an OpenSCAD script to ``output.stl`` in the working directory.
-
-    The model script's top-level geometry is exported by the harness (the
-    agent never writes an export command); equivalent to
-    ``openscad -o output.stl model.scad``. OpenSCAD warnings (which it prints
-    to stderr even on success, e.g. non-manifold notices) are folded into
-    stdout so the agent sees them on a successful compile.
-    """
-    script_path = work_dir / f"_model_{script_index}.scad"
-    script_path.write_text(code)
-    out_path = work_dir / "output.stl"
-    openscad = _resolve_openscad_bin()
-
-    before = _snapshot_files(work_dir)
-
-    t0 = time.monotonic()
-    try:
-        result = subprocess.run(
-            [openscad, "-o", str(out_path), str(script_path)],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=str(work_dir),
-        )
-        duration = time.monotonic() - t0
-        success = result.returncode == 0
-        warnings = result.stderr.strip()
-        stdout = result.stdout
-        if success and warnings:
-            stdout = (stdout + "\n" + warnings).strip()
-        stderr = result.stderr
-        error_text = (
-            None if success else (warnings or f"Exit code {result.returncode}")
-        )
-    except subprocess.TimeoutExpired as exc:
-        duration = time.monotonic() - t0
-        success = False
-        stdout = exc.stdout or ""
-        stderr = exc.stderr or ""
-        error_text = f"OpenSCAD timed out after {timeout}s"
-        partial = (stderr or "").strip()
-        if partial:
-            error_text += f"\n--- partial stderr before timeout ---\n{partial}"
-    except FileNotFoundError:
-        duration = time.monotonic() - t0
-        success = False
-        stdout = ""
-        stderr = (
-            f"OpenSCAD executable not found ({openscad!r}). Install OpenSCAD or "
-            "set CADGENBENCH_OPENSCAD_BIN to its path."
-        )
-        error_text = stderr
-
-    script_path.unlink(missing_ok=True)
-
-    after = _snapshot_files(work_dir)
-    new_or_modified = {}
-    for name, (mtime, size) in after.items():
-        prev = before.get(name)
-        if prev is None or mtime > prev[0] or size != prev[1]:
-            new_or_modified[name] = size
-
-    return CodeExecution(
-        code=code,
-        success=success,
-        stdout=stdout,
-        stderr=stderr if success else (error_text or stderr),
-        files_produced=new_or_modified,
-        duration_s=duration,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -570,80 +456,11 @@ def _validate_and_render_step(step_path: Path) -> tuple[str, bytes | None]:
         return _validate_and_render_blob(str(step_path))
 
 
-def _validate_and_render_mesh_blob(mesh_path_str: str) -> tuple[str, bytes | None]:
-    """Validate a submitted mesh file and iso-render it (no tessellation).
-
-    Mesh sibling of :func:`_validate_and_render_blob`: routes the artifact
-    through :class:`MeshArtifacts` (mesh-manifold gate) instead of the BREP
-    gate. Designed to run inside the render pool's worker process.
-    """
-    path = Path(mesh_path_str)
-    name = path.name
-    lines: list[str] = [f"### Auto-validation of {name}"]
-    art = MeshArtifacts(path)
-    valid = False
-    try:
-        a = art.analysis
-        v, m = a.validation, a.measurements
-        bb = m.bounding_box
-        valid = v.is_valid
-        lines += [
-            f"Valid:      {v.is_valid}",
-            f"Watertight: {v.is_watertight}",
-            f"Triangles:  {m.face_count}",
-            f"Volume:     {m.volume:.1f} mm³",
-            f"BBox:       "
-            f"{bb.size_x:.1f} × "
-            f"{bb.size_y:.1f} × "
-            f"{bb.size_z:.1f} mm",
-        ]
-        if v.topology_errors:
-            lines.append(f"Errors:     {v.topology_errors[:3]}")
-    except Exception as exc:
-        lines.append(f"Validation error: {exc}")
-
-    iso_bytes: bytes | None = None
-    lines.append("")
-    lines.append(f"### Iso render of {name}")
-    try:
-        if valid:
-            images = render_mesh(art.mesh(), views=["iso"])
-            if images:
-                iso_bytes = images[0].data
-                lines.append("(see attached image below)")
-            else:
-                lines.append("⚠️ Render returned no images.")
-        else:
-            lines.append("⚠️ Skipped render (mesh failed the validity gate).")
-    except Exception as exc:
-        lines.append(f"⚠️ Render failed: {exc}")
-
-    return "\n".join(lines), iso_bytes
-
-
-def _validate_and_render_mesh(mesh_path: Path) -> tuple[str, bytes | None]:
-    """Validate + iso-render a mesh file. Caller guarantees it exists.
-
-    Mesh sibling of :func:`_validate_and_render_step`; dispatches to the shared
-    render pool with the same timeout / inline fallback.
-    """
-    try:
-        return _get_render_pool().submit(
-            _validate_and_render_mesh_blob, str(mesh_path),
-        ).result(timeout=120)
-    except concurrent.futures.TimeoutError:
-        _shutdown_render_pool()
-        return f"⚠️ Validation/render timed out for `{mesh_path.name}`.", None
-    except Exception:
-        return _validate_and_render_mesh_blob(str(mesh_path))
-
-
 def _auto_validate_and_render(
     work_dir: Path,
     last_exe: CodeExecution | None,
     *,
     artifact_filename: str = ARTIFACT_FILENAME,
-    is_mesh: bool = False,
 ) -> tuple[str, bytes | None]:
     """After a code execution, validate the artifact and render iso if it exists.
 
@@ -667,8 +484,6 @@ def _auto_validate_and_render(
             None,
         )
 
-    if is_mesh:
-        return _validate_and_render_mesh(artifact_path)
     return _validate_and_render_step(artifact_path)
 
 
@@ -676,7 +491,6 @@ def _seed_step_feedback_blocks(
     step_paths: list[Path],
     *,
     views: list[str] | None = None,
-    reference_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Build initial-message content blocks describing each seeded STEP.
 
@@ -691,17 +505,7 @@ def _seed_step_feedback_blocks(
     for path in step_paths:
         artifacts = StepArtifacts(path)
         lines: list[str] = []
-        if reference_only:
-            lines += [
-                f"### Reference geometry from `{path.name}`",
-                "This is the starting STEP for the editing task. OpenSCAD cannot "
-                "import it directly; use the measurements and attached renders "
-                "as visual reference, then recreate the edited final model as "
-                "`output.stl`.",
-                "",
-            ]
-        else:
-            lines.append(f"### Auto-validation of {path.name}")
+        lines.append(f"### Auto-validation of {path.name}")
         render_images = []
         try:
             a = artifacts.analysis
@@ -898,35 +702,25 @@ def run_agent(
         work_dir = Path(tempfile.mkdtemp(prefix="cadgenbench_agent_"))
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    # Editing tasks ship a starting STEP in input_files. For Python BREP
-    # backends, copy it into the work dir so the agent can load it. For
-    # OpenSCAD, the STEP is reference-only: the backend cannot import it, but
-    # we still render/measure it and attach those views to the initial prompt.
+    # Editing tasks ship a starting STEP in input_files; copy it into the work
+    # dir so the agent can load it with import_step.
     seeded_step_paths: list[Path] = []
     if input_files:
         for src in input_files:
             if src.suffix.lower() in _WORKDIR_SEED_SUFFIXES:
-                if backend.name in {"build123d", "cadquery"}:
-                    dest = work_dir / src.name
-                    if dest.resolve() != src.resolve():
-                        shutil.copy2(src, dest)
-                    seeded_step_paths.append(dest)
-                else:
-                    seeded_step_paths.append(src)
+                dest = work_dir / src.name
+                if dest.resolve() != src.resolve():
+                    shutil.copy2(src, dest)
+                seeded_step_paths.append(dest)
 
     messages = assemble_messages(
         task_description, input_files=input_files, backend=backend.name,
     )
 
     # Editing tasks: auto-validate + render every seeded STEP and attach the
-    # result to the initial user message. OpenSCAD gets several reference views
-    # because it cannot import/edit the STEP directly.
+    # result to the initial user message.
     if seeded_step_paths:
-        seed_blocks = _seed_step_feedback_blocks(
-            seeded_step_paths,
-            views=(["iso", "front", "top", "right"] if backend.name == "openscad" else ["iso"]),
-            reference_only=backend.name == "openscad",
-        )
+        seed_blocks = _seed_step_feedback_blocks(seeded_step_paths)
         user_msg = messages[-1]
         content = user_msg["content"]
         if isinstance(content, str):
@@ -1038,7 +832,7 @@ def run_agent(
             t_render = time.monotonic()
             auto_text, auto_iso = _auto_validate_and_render(
                 work_dir, exe,
-                artifact_filename=artifact_filename, is_mesh=backend.is_mesh,
+                artifact_filename=artifact_filename,
             )
             render_s = time.monotonic() - t_render
             if auto_iso is not None:

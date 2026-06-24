@@ -107,11 +107,11 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> None:
                    help=f"Per-LLM-call timeout in seconds (default: {defaults.llm_timeout:.0f})")
     p.add_argument("--parallel", type=int, default=1, metavar="N",
                    help="Run N fixtures in parallel (default: 1)")
-    p.add_argument("--backend", choices=["build123d", "cadquery", "openscad"],
+    p.add_argument("--backend", choices=["build123d", "cadquery"],
                    default=defaults.backend,
                    help=(f"Geometry kernel the agent targets (default: "
-                         f"{defaults.backend}). 'build123d' and 'cadquery' "
-                         "emit STEP; 'openscad' emits a mesh (output.stl)."))
+                         f"{defaults.backend}). Both 'build123d' and 'cadquery' "
+                         "emit STEP."))
     p.add_argument("--model", default=defaults.model,
                    help="LiteLLM model string")
     p.add_argument("--temperature", type=float, default=defaults.temperature)
@@ -289,21 +289,11 @@ def _discover_fixtures(
 # ---------------------------------------------------------------------------
 
 def _find_candidate_artifact(result: AgentResult) -> Path | None:
-    """Find the agent's output candidate in the work dir, if any.
-
-    A STEP/BREP is preferred; otherwise a triangle-mesh submission
-    (STL/OBJ/OFF/3MF/PLY) is accepted, matching the evaluator's contract.
-    """
+    """Find the agent's output STEP candidate in the work dir, if any."""
     if not result.work_dir:
         return None
-    from cadgenbench.common.mesh import MESH_FILE_SUFFIXES
-
     for name in ("output.step", "output.stp"):
         candidate = result.work_dir / name
-        if candidate.exists():
-            return candidate
-    for suffix in sorted(MESH_FILE_SUFFIXES):
-        candidate = result.work_dir / f"output{suffix}"
         if candidate.exists():
             return candidate
     return None

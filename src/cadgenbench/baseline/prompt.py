@@ -32,9 +32,6 @@ from typing import Any
 _CHEAT_SHEET = (
     (Path(__file__).parent / "build123d_cheat_sheet.md").read_text().strip()
 )
-_OPENSCAD_CHEAT_SHEET = (
-    (Path(__file__).parent / "openscad_cheat_sheet.md").read_text().strip()
-)
 _CADQUERY_CHEAT_SHEET = (
     (Path(__file__).parent / "cadquery_cheat_sheet.md").read_text().strip()
 )
@@ -152,83 +149,6 @@ _LIBRARIES_HEADER = """\
 
 
 # ---------------------------------------------------------------------------
-# OpenSCAD backend prompt sections
-# ---------------------------------------------------------------------------
-
-_OPENSCAD_ROLE = """\
-You are an expert CAD engineer.  You create precise, parametric 3D models \
-using OpenSCAD, a script-based constructive-solid-geometry (CSG) modeller.
-
-You have a **persistent working directory**, every file you create is \
-available in subsequent turns.  Your only tool is OpenSCAD code execution: \
-write ```scad blocks describing the model and they will be compiled to \
-`output.stl` for you.  You see the compiler output and an automatic render.
-
-The OpenSCAD API reference is included below."""
-
-_OPENSCAD_WORKFLOW = """\
-## Workflow
-
-1. **Build geometry**, write an OpenSCAD script whose top-level geometry is \
-the final model.  The harness compiles it to `output.stl` (you do **not** \
-write any export command yourself)
-2. **Review auto-feedback**, after every successful compile you will \
-automatically receive:
-   - Validation results (watertight, manifold, volume, bounding box)
-   - An iso render of the current model
-3. **Iterate**, fix issues based on the feedback; re-emit the script each \
-time you make changes
-4. **Signal done**, when the model looks correct, write `[DONE]`
-
-### Editing an existing STEP
-
-If an editing task provides a starting STEP (`input.step`), OpenSCAD cannot \
-import or modify that BREP directly. The harness will attach measurements and \
-reference renders of the starting geometry (typically iso/front/top/right). \
-Use those as visual context for what already exists and recreate the requested \
-final edited part in OpenSCAD as `output.stl`."""
-
-_OPENSCAD_CODE_GUIDELINES = """\
-## Code
-
-Provide a single, self-contained ```scad code block per response.
-
-The code MUST:
-- Describe the final model as top-level geometry (top-level objects are \
-unioned automatically)
-- NOT contain any export/render command, the harness writes `output.stl` \
-for you
-- Use `echo(...)` for any diagnostics you want to see
-
-The result must be a single watertight, manifold solid or it will fail the \
-validity gate.  Set a sensible `$fn` on curved primitives; when subtracting a \
-through-hole, make the cutting tool poke out past both faces so no \
-zero-thickness wall remains.
-
-Code quality:
-- Define key dimensions as named variables / parameters at the top \
-(parametric style)
-- Use clear names and `module`s for repeated features
-- No stubs, no `// TODO`, write every line"""
-
-_OPENSCAD_DONE_SIGNAL = """\
-## Signaling completion
-
-When you are satisfied with the model, include the text `[DONE]` in your \
-response (outside of code blocks).
-
-Requirements before signaling done:
-- `output.stl` must exist in the working directory (required, `[DONE]` \
-will be rejected otherwise)
-- The model compiles without errors
-- Validation passes (watertight, manifold)
-- The iso render looks correct"""
-
-_OPENSCAD_LIBRARIES_HEADER = """\
-## OpenSCAD reference"""
-
-
-# ---------------------------------------------------------------------------
 # CadQuery backend prompt sections
 # ---------------------------------------------------------------------------
 
@@ -317,18 +237,9 @@ def assemble_system_prompt(backend: str = "build123d") -> str:
     """Build the full system prompt for the baseline agent.
 
     ``backend`` selects the kernel-specific role / workflow / cheat sheet:
-    ``"build123d"`` (the default BREP pipeline; output unchanged) or
-    ``"openscad"`` (mesh pipeline) or ``"cadquery"`` (BREP pipeline).
+    ``"build123d"`` (the default BREP pipeline) or ``"cadquery"`` (BREP
+    pipeline). Both emit STEP.
     """
-    if backend == "openscad":
-        return "\n\n".join([
-            _OPENSCAD_ROLE,
-            _OPENSCAD_WORKFLOW,
-            _OPENSCAD_CODE_GUIDELINES,
-            _OPENSCAD_DONE_SIGNAL,
-            _OPENSCAD_LIBRARIES_HEADER,
-            _OPENSCAD_CHEAT_SHEET,
-        ])
     if backend == "cadquery":
         return "\n\n".join([
             _CADQUERY_ROLE,
@@ -391,16 +302,7 @@ def assemble_messages(
     user_text = task_description
     if step_files:
         names = ", ".join(f"`{p.name}`" for p in step_files)
-        if backend == "openscad":
-            user_text = (
-                f"{task_description}\n\n"
-                f"The starting STEP file(s) {names} are reference geometry for "
-                "this editing task. OpenSCAD cannot import STEP directly. Use "
-                "the attached measurements and renders as context, then model "
-                "the edited final part in OpenSCAD and let the harness compile "
-                "`output.stl`."
-            )
-        elif backend == "cadquery":
+        if backend == "cadquery":
             load_hint = "`cadquery.importers.importStep(...)`"
             user_text = (
                 f"{task_description}\n\n"

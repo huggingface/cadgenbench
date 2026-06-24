@@ -70,12 +70,10 @@ import shutil
 from pathlib import Path
 
 from cadgenbench.common.artifacts import (
-    MeshArtifacts,
     StepArtifacts,
     sidecar_path_for,
     write_mesh_sidecar,
 )
-from cadgenbench.common.mesh import MESH_FILE_SUFFIXES
 from cadgenbench.common.profiling import note, phase
 from cadgenbench.common.validity import analyze_step
 from cadgenbench.eval.edit_baseline import (
@@ -107,10 +105,6 @@ from cadgenbench.common.mesh import MeshSanityError
 logger = logging.getLogger(__name__)
 
 ALIGNED_STEP = "aligned/output_aligned.step"
-# Aligned mesh candidate: written as STL (debuggable) with a trusted float64
-# .mesh.npz sidecar beside it so the exact aligned geometry survives the
-# align -> score handoff without an STL round-trip.
-ALIGNED_MESH = "aligned/output_aligned.stl"
 RENDERS_DIR = "renders"
 GT_STEP_NAME = "ground_truth.step"
 EDIT_DIFF_WEBP = "edit_diff.webp"
@@ -210,14 +204,9 @@ def evaluate_result(
         gt_artifacts.analysis.measurements.bounding_box.diagonal,
     )
 
-    is_mesh = _is_mesh_candidate(raw_candidate)
-    if is_mesh:
-        # Mesh submission: validated against the mesh gate, never re-tessellated.
-        raw_artifacts = MeshArtifacts(raw_candidate)
-    else:
-        raw_artifacts = StepArtifacts(
-            raw_candidate, deflection_override=shared_deflection,
-        )
+    raw_artifacts = StepArtifacts(
+        raw_candidate, deflection_override=shared_deflection,
+    )
     with phase("validity", tag=name):
         validation_dict = _validation_dict(raw_candidate, artifacts=raw_artifacts)
     if not validation_dict.get("is_valid"):
@@ -239,7 +228,7 @@ def evaluate_result(
     if "alignment" in prior:
         data["alignment"] = prior["alignment"]
 
-    aligned_step = result_dir / (ALIGNED_MESH if is_mesh else ALIGNED_STEP)
+    aligned_step = result_dir / ALIGNED_STEP
     renders_dir = result_dir / RENDERS_DIR
 
     # Mesh sizes drive the align cost (selector/sampling scale with vertices);
@@ -258,11 +247,9 @@ def evaluate_result(
             raw_candidate, aligned_step, renders_dir,
             raw_artifacts=raw_artifacts,
             gt_artifacts=gt_artifacts,
-            data=data, force=force_align, is_mesh=is_mesh,
+            data=data, force=force_align,
         )
-    aligned_artifacts = (
-        MeshArtifacts(aligned_step) if is_mesh else StepArtifacts(aligned_step)
-    )
+    aligned_artifacts = StepArtifacts(aligned_step)
 
     # --- Shape similarity (also fills the candidate renders) ----------------
     with phase("shape", tag=name):
@@ -441,36 +428,21 @@ def evaluate_candidate_only(candidate_step: Path, result_dir: Path) -> None:
     result_dir = Path(result_dir)
     renders_dir = result_dir / RENDERS_DIR
     renders_dir.mkdir(parents=True, exist_ok=True)
-    is_mesh = _is_mesh_candidate(candidate_step)
-    artifacts = MeshArtifacts(candidate_step) if is_mesh else None
     try:
-        if is_mesh:
-            from cadgenbench.common.viewer import (
-                render_mesh,
-                render_mesh_turntable_webp,
-            )
+        from cadgenbench.common.viewer import (
+            render_step,
+            render_step_turntable_webp,
+        )
 
-            mesh = artifacts.mesh()
-            for img in render_mesh(mesh):
-                (renders_dir / f"{img.name}.png").write_bytes(img.data)
-            (renders_dir / "rotating.webp").write_bytes(
-                render_mesh_turntable_webp(mesh)
-            )
-        else:
-            from cadgenbench.common.viewer import (
-                render_step,
-                render_step_turntable_webp,
-            )
-
-            for img in render_step(str(candidate_step)):
-                (renders_dir / f"{img.name}.png").write_bytes(img.data)
-            (renders_dir / "rotating.webp").write_bytes(
-                render_step_turntable_webp(str(candidate_step))
-            )
+        for img in render_step(str(candidate_step)):
+            (renders_dir / f"{img.name}.png").write_bytes(img.data)
+        (renders_dir / "rotating.webp").write_bytes(
+            render_step_turntable_webp(str(candidate_step))
+        )
     except Exception:
         logger.warning("Render of %s failed", candidate_step, exc_info=True)
 
-    validation_dict = _validation_dict(candidate_step, artifacts=artifacts)
+    validation_dict = _validation_dict(candidate_step)
     data: dict = {
         "status": (
             STATUS_VALID if validation_dict.get("is_valid") else STATUS_INVALID
@@ -494,19 +466,14 @@ def _align_or_reuse(
     gt_artifacts: StepArtifacts,
     data: dict,
     force: bool,
-    is_mesh: bool = False,
 ) -> float:
     """Rigidly align the candidate to the GT, reusing a cached result when fresh.
 
     Operates on the candidate's *already-computed* mesh (and the GT's) via
     :func:`align_cached_mesh` — no re-tessellation. The recovered transform's
     aligned mesh is written as a trusted ``.mesh.npz`` sidecar so every
-    downstream consumer reuses the one mesh.
-
-    For a STEP candidate the transform is also applied to the BREP to persist
-    ``output_aligned.step`` (a cheap geometric export). For a mesh candidate
-    there is no BREP: the aligned mesh itself is written as ``output_aligned.stl``
-    (the sidecar carries the exact float64 geometry).
+    downstream consumer reuses the one mesh. The transform is also applied to
+    the BREP to persist ``output_aligned.step`` (a cheap geometric export).
     """
     cached_rmse = (data.get("alignment") or {}).get("rmse")
     sidecar = sidecar_path_for(aligned_step)
@@ -524,16 +491,11 @@ def _align_or_reuse(
 
     car = align_cached_mesh(raw_artifacts, gt_artifacts)
     aligned_step.parent.mkdir(parents=True, exist_ok=True)
-    if is_mesh:
-        from cadgenbench.common.mesh import write_mesh_stl
+    from cadgenbench.eval.alignment import export_aligned_shape
 
-        write_mesh_stl(aligned_step, car.mesh)
-    else:
-        from cadgenbench.eval.alignment import export_aligned_shape
-
-        export_aligned_shape(
-            raw_artifacts.wrapped, car.rotation, car.translation, aligned_step,
-        )
+    export_aligned_shape(
+        raw_artifacts.wrapped, car.rotation, car.translation, aligned_step,
+    )
     write_mesh_sidecar(aligned_step, car.mesh)
 
     # The cached candidate renders are stale once the aligned geometry moves.
@@ -551,10 +513,8 @@ def _find_candidate_step(result_dir: Path) -> Path | None:
 
     The evaluator is generator-agnostic: it has no concept of turns,
     baselines, or any other internal layout the generator may use. The
-    canonical candidate is ``<result_dir>/output.<ext>`` and nothing else
-    (see ``docs/benchmark/submission.md``). A STEP/BREP is preferred when
-    present; otherwise a triangle-mesh submission (STL/OBJ/OFF/3MF/PLY) is
-    accepted and routed through the mesh validity gate. Generators that keep
+    canonical candidate is ``<result_dir>/output.step`` (or ``.stp``) and
+    nothing else (see ``docs/benchmark/submission.md``). Generators that keep
     their own debug artefacts in sibling directories are free to do so; the
     evaluator ignores them.
     """
@@ -562,16 +522,7 @@ def _find_candidate_step(result_dir: Path) -> Path | None:
         p = result_dir / name
         if p.exists():
             return p
-    for suffix in sorted(MESH_FILE_SUFFIXES):
-        p = result_dir / f"output{suffix}"
-        if p.exists():
-            return p
     return None
-
-
-def _is_mesh_candidate(candidate: Path) -> bool:
-    """True iff *candidate* is a triangle-mesh submission (not a STEP/BREP)."""
-    return candidate.suffix.lower() in MESH_FILE_SUFFIXES
 
 
 def _validation_dict(
