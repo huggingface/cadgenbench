@@ -23,8 +23,8 @@ cad_score =
 ```
 
 (This is the **generation** composition. **Editing** tasks renormalize
-the shape axis against the no-op input and reweight differently. See
-[§ Editing tasks](#editing-tasks-no-op-renormalization) below.)
+each axis against the no-op input so submitting the input unchanged scores
+`0`. See [§ Editing tasks](#editing-tasks-no-op-renormalization) below.)
 
 | Component | Range | What it asks | Deep dive |
 | --- | --- | --- | --- |
@@ -128,38 +128,57 @@ Would it bolt up to the same fixture? Each mating feature is specified as a keep
 edit request, and the GT is a small local change to that input. Since all
 three axes measure global similarity, submitting the input unchanged (the
 "no-op") already scores high, so scoring an edit with the raw composition
-would reward doing nothing.
+would reward doing nothing. The editing score is built so the **no-op
+scores exactly `0`** while a perfect edit scores `1`.
 
-The fix renormalizes the **shape** axis against the no-op baseline
-`b_shape = shape_similarity(input.step, GT)`:
+Each axis is anchored on its own no-op baseline
+`b_axis = metric(input.step, GT)`, and assigned a **role** from how much
+the edit moves it (its headroom `1 - b_axis`):
 
-```
-s_renorm = max(0, (shape_similarity - b_shape) / (1 - b_shape))
-```
-
-This maps the no-op to `0` and a perfect candidate to `1`. Topology and
-interface stay raw: most edits leave them unchanged, and a candidate that
-breaks them should still be penalized.
-
-Editing samples then use shape-dominant weights:
+- **target** — the edit changes this axis. The raw score is renormalized
+  against the no-op, so the no-op maps to `0` and a perfect candidate to `1`:
 
 ```
-cad_score = 0.6·s_renorm + 0.3·interface + 0.1·topo_match     (0 if not valid)
+renorm = max(0, (raw - b_axis) / (1 - b_axis))
 ```
 
-A no-op therefore caps at `0.3 + 0.1 = 0.4`, and any real shape
-improvement clears it.
+- **preserve** — the edit leaves this axis unchanged (`b_axis ≈ 1`). It
+  earns no positive credit (that would re-float the no-op); instead it is a
+  one-sided **gate** `min(1, raw / b_axis)` that only pulls the score down
+  when the candidate *breaks* what should have stayed put.
+- **absent** — the metric does not apply (e.g. no jig sub-volumes); dropped.
 
-`b_shape` is a per-sample constant: it depends only on `input.step`,
-`ground_truth.step`, and the shape/alignment code, so it is precomputed at
-authoring time and committed to the GT dataset as
-`<sample>/edit_baseline.json`. The grader reads it back instead of
-recomputing it, and the presence of that file is how the grader knows a
-sample is an editing task.
+Shape is the anchor and is always a target. Topology and interface are
+targets only when the edit moved them past a small headroom floor
+(`PRESERVE_HEADROOM_FLOOR`, `1e-2`); below it they are preserve gates. (A
+scan of the v1 fixtures showed both axes are cleanly bimodal — headroom is
+either ~0 or well clear of the floor — so the split is stable.)
 
-Implementation: [`edit_baseline.py`](../src/cadgenbench/eval/edit_baseline.py),
-wired into `_cad_score` in [`evaluate.py`](../src/cadgenbench/eval/evaluate.py);
-the raw and renormalized shape values are saved under
+The score is the weighted mean over the **target** axes
+(`EDITING_AXIS_WEIGHTS`: shape `0.6`, interface `0.3`, topology `0.1`,
+renormalized over the targets present) times the product of the
+**preserve** gates:
+
+```
+cad_score = mean_target(renorm) · ∏ preserve(gate)     (0 if not valid)
+```
+
+The no-op floors every target at `0` and passes every gate at `1`, so it
+scores `0`. An edit that only changes the shape (topology and interface
+preserved) scores its renormalized shape alone; one that nails the shape
+but cracks a preserved axis is multiplied down by that axis's gate.
+
+Each `b_axis` is a per-sample constant — it depends only on `input.step`,
+`ground_truth.step`, and the metric/alignment code — so the full set of
+baselines and roles is precomputed at authoring time and committed to the
+GT dataset as `<sample>/edit_baseline.json`. The grader reads it back
+instead of recomputing it, and the presence of that file is how the grader
+knows a sample is an editing task.
+
+Implementation: [`edit_baseline.py`](../src/cadgenbench/eval/edit_baseline.py)
+(`compute_noop_axes` + roles) wired into `_edit_cad_score` in
+[`evaluate.py`](../src/cadgenbench/eval/evaluate.py); the per-axis raw,
+baseline, renormalized, and gate values are saved under
 `result.json["edit_metrics"]`.
 
 In the per-sample report an editing candidate is shown as a ghost-diff

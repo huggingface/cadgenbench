@@ -12,43 +12,44 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Editing-task no-op baseline + shape-axis renormalization.
+"""Editing-task no-op baseline + per-axis renormalization.
 
-For an editing fixture the unedited ``input.step`` is a valid,
-near-GT solid, so the global shape-similarity metric scores it high.
-The "no-op" strategy (return the input unchanged) can therefore beat a
-real edit attempt that perturbs the unchanged bulk. To stop rewarding
-that, the **shape-similarity axis is renormalized against the no-op
-baseline**::
+For an editing fixture the unedited ``input.step`` is a valid, near-GT
+solid, so every global similarity metric scores it high. The "no-op"
+strategy (return the input unchanged) must therefore score **0**, not
+partial credit. To get that, each axis is anchored on its own no-op
+baseline ``b_axis = metric(input.step, GT)`` and assigned a *role*:
 
-    b_shape   = shape_similarity(input.step, GT)        # the no-op's score
-    s_renorm  = max(0, (s_raw - b_shape) / (1 - b_shape))
+- ``target``  -- the edit moves this axis. The raw score is renormalized,
+  ``renorm = max(0, (raw - b)/(1 - b))``, so the no-op maps to ``0`` and a
+  perfect candidate to ``1``. Targets combine as a weighted mean
+  (:data:`EDITING_AXIS_WEIGHTS`, renormalized over the targets present).
+- ``preserve`` -- the edit leaves this axis unchanged (``b`` ~ 1). It earns
+  no positive credit (that would re-float the no-op); it is a one-sided
+  *gate* ``min(1, raw/b)`` that only pulls the score down when the candidate
+  breaks what should have stayed put.
+- ``absent`` -- metric not applicable (e.g. no jig sub-volumes); dropped.
 
-The no-op maps to ``0``, a perfect candidate stays at ``1``, and
-anything at or below the no-op floors at ``0``. Topology and interface
-match stay **raw** (most edits leave them unchanged, and where they do
-not they already discriminate). For editing fixtures the per-fixture
-``cad_score`` reweights the three axes :data:`EDITING_AXIS_WEIGHTS`
-(shape ``0.6``, interface ``0.3``, topology ``0.1``); generation uses
-``GENERATION_AXIS_WEIGHTS`` (shape ``0.4``, interface ``0.4``, topology
-``0.2``). The validity gate still hard-zeros.
+``cad_score = mean_target(renorm) * prod_preserve(gate)``. Shape is the
+anchor and is always ``target``; topology / interface are ``target`` only
+when the edit moved them past :data:`PRESERVE_HEADROOM_FLOOR`. The validity
+gate still hard-zeros. Generation fixtures are unchanged
+(``GENERATION_AXIS_WEIGHTS``, raw axes).
 
-``b_shape`` depends only on ``input.step`` + ``ground_truth.step`` +
-the shape / alignment implementation, so it is a **fixture constant**.
-It is precomputed once at authoring time (``sanity_check_gt.py
---write-baselines``) and committed to the GT dataset as
-``<fixture>/edit_baseline.json``. The grader reads it back at eval
-time (the GT-side files are exactly what HF Jobs downloads); it never
-recomputes it per submission. The **presence** of ``edit_baseline.json``
-in a fixture's GT dir is also the single source of truth that tells the
-grader "this is an editing fixture, renormalize + reweight" — the
-scorer never has to read the inputs-side ``description.yaml``.
+Each ``b_axis`` depends only on ``input.step`` + the GT + the metric /
+alignment implementation, so the baseline is a **fixture constant**. It is
+precomputed once at authoring time (``sanity_check_gt.py --write-baselines``)
+and committed to the GT dataset as ``<fixture>/edit_baseline.json``. The
+grader reads it back at eval time (the GT-side files are exactly what HF Jobs
+downloads); it never recomputes it per submission. The **presence** of
+``edit_baseline.json`` in a fixture's GT dir is also the single source of
+truth that tells the grader "this is an editing fixture" — the scorer never
+reads the inputs-side ``description.yaml``.
 
 Staleness: the baseline is stamped with ``cadgenbench_version``. If the
-shape-similarity or alignment math changes (bump ``cadgenbench``'s
-version), the committed baseline must be regenerated; the grader
-hard-errors on a version mismatch rather than scoring against a stale
-number.
+metric or alignment math changes (bump ``cadgenbench``'s version), the
+committed baseline must be regenerated; the grader hard-errors on a version
+mismatch rather than scoring against a stale number.
 """
 from __future__ import annotations
 
@@ -57,7 +58,6 @@ import logging
 from pathlib import Path
 
 from cadgenbench import __version__
-from cadgenbench.eval.shape_similarity import compare_step_files
 
 logger = logging.getLogger(__name__)
 
@@ -65,71 +65,97 @@ logger = logging.getLogger(__name__)
 # is also the editing-fixture flag the grader keys off.
 EDIT_BASELINE_NAME = "edit_baseline.json"
 
-# Per-axis weights applied to ``cad_score`` for editing fixtures. Shape
-# is the axis that actually resolves most edits, so it dominates; topology
-# and interface are frequently non-discriminating on a given edit (the edit
-# rarely changes Betti numbers or mating-interface fit) and are therefore
-# nearly "free" for the no-op (submit the input unchanged), which only the
-# shape axis is renormalized against. They are kept deliberately small so
-# the no-op caps low: with shape renormalized to 0, the no-op score is at
-# most ``interface + topology = 0.4``. See ``GENERATION_AXIS_WEIGHTS`` for
-# the generation-task counterpart.
+# Per-axis roles, decided once at authoring time from the no-op headroom and
+# committed in ``edit_baseline.json``. The grader reads them back.
+ROLE_TARGET = "target"      # the edit moves this axis -> renormalize to the no-op
+ROLE_PRESERVE = "preserve"  # edit leaves it unchanged -> one-sided break gate
+ROLE_ABSENT = "absent"      # metric N/A for this fixture (e.g. no jig) -> dropped
+
+# Relative weights among the **target** axes of an editing fixture (the no-op
+# is now structurally 0 regardless of weights, so these express importance
+# only, not a no-op cap). Shape is the axis that resolves most edits, so it
+# dominates; weights renormalize over whichever axes are actually targets on a
+# given fixture, and preserve / absent axes never enter the mean. See
+# ``GENERATION_AXIS_WEIGHTS`` for the generation-task counterpart.
 EDITING_AXIS_WEIGHTS: dict[str, float] = {
     "shape": 0.6,
     "interface": 0.3,
     "topology": 0.1,
 }
 
-# Authoring gate: the edit must leave the shape metric at least this
+# Authoring gate: the edit must leave the **shape** metric at least this
 # much headroom (``1 - b_shape``). Below this the no-op already scores
 # essentially perfectly, so the renormalized axis cannot resolve the
 # edit — the fixture is rejected at authoring time, not special-cased in
 # the scorer. Alignment is deterministic, so the only noise in ``b_shape``
 # is F1 point-sampling (~2e-4); the floor sits ~10x above it so the
-# renormalized shape axis carries signal rather than noise.
+# renormalized shape axis carries signal rather than noise. Shape is the
+# anchor axis and is always a ``target``.
 EDIT_HEADROOM_FLOOR = 2e-3
 
+# Target-vs-preserve threshold for topology and interface. A headroom at or
+# above this means the edit genuinely moves the axis, so it is renormalized
+# against the no-op (``target``); below it the edit didn't touch the axis and
+# it becomes a one-sided break gate (``preserve``). A scan of the v1 editing
+# fixtures showed both axes are cleanly bimodal — headroom is either ~0 or
+# well above 1e-2 — so this split is robust and needs no per-fixture tuning.
+PRESERVE_HEADROOM_FLOOR = 1e-2
 
-def compute_edit_baseline(input_step: str | Path, gt_step: str | Path) -> dict:
-    """Score the no-op (``input.step`` against the GT) and return the baseline dict.
 
-    The input is aligned to the GT through the **exact same path** a
-    candidate goes through in :func:`cadgenbench.eval.evaluate.evaluate_result`:
-    rigid alignment with the production candidate selector, then shape scoring.
-    This keeps ``b_shape`` apples-to-apples with the score any submission's
-    ``output.step`` receives.
+def classify_axis(axis: str, baseline: float | None) -> str:
+    """Assign an axis its grading role from the no-op baseline.
 
-    Returns a JSON-serializable dict with the headline
-    ``shape_similarity_score`` (``b_shape``), its two sub-metrics, the
-    alignment ``rmse``, the derived ``headroom`` (``1 - b_shape``), and a
+    Shape is always a ``target`` (the authoring gate guarantees it has
+    headroom). Topology / interface are ``target`` when the edit moved them
+    past :data:`PRESERVE_HEADROOM_FLOOR`, else ``preserve``. A ``None``
+    baseline (metric not applicable) is ``absent``.
+    """
+    if baseline is None:
+        return ROLE_ABSENT
+    if axis == "shape":
+        return ROLE_TARGET
+    return ROLE_TARGET if (1.0 - baseline) >= PRESERVE_HEADROOM_FLOOR else ROLE_PRESERVE
+
+
+def compute_edit_baseline(input_step: str | Path, gt_dir: str | Path) -> dict:
+    """Score the no-op (``input.step`` vs GT) on all axes and return the baseline.
+
+    The input is aligned and scored through the **exact grader path**
+    (:func:`cadgenbench.eval.evaluate.compute_noop_axes`): the production
+    aligner on the trusted mesh sidecar, then shape / topology / interface.
+    This keeps each per-axis baseline apples-to-apples with the score any
+    submission's ``output.step`` receives.
+
+    Returns a JSON-serializable dict whose ``axes`` maps each of ``shape``,
+    ``topology``, ``interface`` to ``{baseline, headroom, role}`` (role per
+    :func:`classify_axis`; ``interface``/``topology`` baseline is ``None``
+    when the metric does not apply). Also carries the alignment ``rmse`` and a
     ``cadgenbench_version`` stamp for staleness detection.
     """
+    from cadgenbench.eval.evaluate import compute_noop_axes  # noqa: PLC0415
+
     input_step = Path(input_step)
-    gt_step = Path(gt_step)
+    gt_dir = Path(gt_dir)
 
-    # Align + score in one call. When the input carries a trusted mesh sidecar
-    # (the benchmark case), compare_step_files aligns the *cached* mesh and
-    # never re-tessellates the STEP — so an input our mesher can't cleanly
-    # tessellate no longer derails the no-op baseline. For an untrusted input
-    # it falls back to the STEP-export alignment path.
-    comparison = compare_step_files(input_step, gt_step, align=True)
-    ar_rmse = comparison.alignment_rmse
-
-    scores = comparison.scores
-    b_shape = scores.get("shape_similarity_score")
-    if b_shape is None:
+    raw = compute_noop_axes(input_step, gt_dir)
+    if raw.get("shape") is None:
         raise RuntimeError(
             f"could not compute shape_similarity for the no-op baseline "
-            f"(input={input_step.name} vs gt={gt_step.name}); shape "
-            f"sub-metrics were all unavailable",
+            f"(input={input_step.name} vs gt_dir={gt_dir.name}); the anchor "
+            f"shape axis is unavailable",
         )
-    b_shape = float(b_shape)
+
+    axes: dict[str, dict] = {}
+    for axis in ("shape", "topology", "interface"):
+        b = raw.get(axis)
+        axes[axis] = {
+            "baseline": None if b is None else round(float(b), 6),
+            "headroom": None if b is None else round(1.0 - float(b), 6),
+            "role": classify_axis(axis, b),
+        }
     return {
-        "shape_similarity_score": b_shape,
-        "shape_surface_distance_f1": scores.get("shape_surface_distance_f1"),
-        "shape_volume_iou": scores.get("shape_volume_iou"),
-        "alignment_rmse": round(float(ar_rmse), 4) if ar_rmse is not None else None,
-        "headroom": round(1.0 - b_shape, 6),
+        "axes": axes,
+        "alignment_rmse": raw.get("alignment_rmse"),
         "cadgenbench_version": __version__,
     }
 
@@ -173,16 +199,29 @@ def check_baseline_fresh(baseline: dict, fixture_name: str) -> None:
         )
 
 
-def renormalize_shape(raw_shape: float, b_shape: float) -> float:
-    """Map the raw shape-similarity score onto the no-op-anchored ``[0, 1]`` scale.
+def renormalize(raw: float, baseline: float) -> float:
+    """Map a raw axis score onto the no-op-anchored ``[0, 1]`` scale (target axes).
 
-    ``b_shape`` (the no-op) maps to ``0``; a perfect candidate maps to
+    ``baseline`` (the no-op) maps to ``0``; a perfect candidate maps to
     ``1``; anything at or below the no-op floors at ``0``. The degenerate
-    zero-headroom case (``b_shape >= 1``) should never reach scoring
-    because the authoring gate (:data:`EDIT_HEADROOM_FLOOR`) rejects such
-    fixtures, but it is handled defensively.
+    zero-headroom case (``baseline >= 1``) should not reach a target axis —
+    such an axis is classified ``preserve`` — but it is handled defensively.
     """
-    headroom = 1.0 - b_shape
+    headroom = 1.0 - baseline
     if headroom <= 0.0:
-        return 1.0 if raw_shape > b_shape else 0.0
-    return max(0.0, min(1.0, (raw_shape - b_shape) / headroom))
+        return 1.0 if raw > baseline else 0.0
+    return max(0.0, min(1.0, (raw - baseline) / headroom))
+
+
+def preserve_gate(raw: float, baseline: float) -> float:
+    """One-sided break gate for a ``preserve`` axis, in ``[0, 1]``.
+
+    The edit left this axis unchanged (``baseline`` is ~1), so the axis earns
+    no positive credit — that would re-float the no-op. Instead it only pulls
+    the score down when the candidate *breaks* what should have stayed put:
+    at or above the baseline the gate is ``1`` (no penalty); below it the
+    gate falls off as ``raw / baseline``.
+    """
+    if baseline <= 0.0:
+        return 1.0
+    return max(0.0, min(1.0, raw / baseline))

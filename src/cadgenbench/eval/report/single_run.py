@@ -544,7 +544,7 @@ def _render_fixture_card(
     is_editing_fixture = is_editing or (
         gt_dir is not None and (gt_dir / EDIT_BASELINE_NAME).exists()
     )
-    shape_renorm = edit_m.get("shape_similarity_renormalized")
+    shape_renorm = ((edit_m.get("axes") or {}).get("shape") or {}).get("renormalized")
     # Shape sub-metrics (Surface Distance F1 / Volume IoU). Rendered as the Shape
     # Similarity pill's own sub-line (like Topo's "cand vs gt"), so the
     # breakdown sits with the metric it explains rather than on a separate row.
@@ -563,8 +563,10 @@ def _render_fixture_card(
         )
         p.append('<div class="headline-metrics">')
         if cad_score is not None:
-            weights = "0.5 / 0.3 / 0.2" if is_editing else "0.4 / 0.4 / 0.2"
-            cad_sub = f"weighted {weights} over {n_components} components"
+            if is_editing:
+                cad_sub = "no-op-anchored, shape-weighted edit score"
+            else:
+                cad_sub = f"weighted 0.4 / 0.4 / 0.2 over {n_components} components"
             p.append(
                 f'<div class="headline-pill headline-cad">'
                 f'{_headline_label("CAD Score", "cad", metrics_base_url)}'
