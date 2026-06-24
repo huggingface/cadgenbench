@@ -117,14 +117,24 @@ MESH_FILE_SUFFIXES = frozenset({".stl", ".obj", ".off", ".3mf", ".ply"})
 
 
 def mesh_from_file(path: str | Path) -> "Mesh":
-    """Load a triangle-mesh file into a welded :class:`Mesh`.
+    """Load a triangle-mesh file into a :class:`Mesh`, honoring its topology.
 
     Reads any format trimesh understands (see :data:`MESH_FILE_SUFFIXES`),
-    concatenating a multi-part scene into one mesh, then welds coincident
-    vertices so a per-face triangle soup (e.g. STL, which stores no shared
-    vertices) becomes a topologically connected mesh that the validity gate
-    can reason about. Winding is left untouched: an inconsistently wound
-    submission is a genuine defect the gate should catch, not silently fix.
+    concatenating a multi-part scene into one mesh.
+
+    Vertex welding is **format-dependent** and deliberately minimal:
+
+    - ``.stl`` is a per-face triangle soup that stores no shared vertices, so
+      it carries no topology of its own. It is welded (coincident corners
+      merged) so the validity gate has a connected surface to reason about.
+    - Every other supported format (``.obj``, ``.off``, ``.ply``, ``.3mf``)
+      stores explicit indexed connectivity. That author-provided topology is
+      trusted verbatim: **no welding or other preprocessing** is applied, so
+      two surface sheets that merely touch are not silently fused into a
+      false non-manifold defect.
+
+    Winding is always left untouched: an inconsistently wound submission is a
+    genuine defect the gate should catch, not silently fix.
 
     The ``linear_deflection_mm`` is set to a nominal value derived from the
     bbox (informational only -- a loaded mesh is never re-tessellated).
@@ -139,8 +149,13 @@ def mesh_from_file(path: str | Path) -> "Mesh":
 
     import trimesh
 
+    # Only triangle-soup formats (STL) are welded. Indexed formats keep their
+    # author-provided connectivity, so trimesh's processing (which merges
+    # coincident vertices) must stay off for them.
+    weld = path.suffix.lower() == ".stl"
+
     try:
-        loaded = trimesh.load(str(path), process=True, force="mesh")
+        loaded = trimesh.load(str(path), process=weld, force="mesh")
     except Exception as exc:  # noqa: BLE001 - normalize any loader failure
         raise RuntimeError(f"Failed to load mesh file: {path}") from exc
 
