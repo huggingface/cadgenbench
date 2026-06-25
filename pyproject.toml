@@ -15,9 +15,6 @@ dependencies = [
     # build123d 0.10 / cadquery-ocp 7.9, so the entire stack installs via
     # pip with no conda-forge detour.
     "build123d>=0.10.0",
-    # Alternative Python/OpenCascade authoring backend for the baseline agent.
-    # The evaluator still scores the exported STEP through the same BREP path.
-    "cadquery",
     # CAD geometry + mesh utilities (shared by the benchmark and the baseline)
     "trimesh",
     "manifold3d",
@@ -47,6 +44,17 @@ baseline = [
     # candidate submissions produced by some other generator.
     "litellm",
     "python-dotenv",
+]
+cadquery = [
+    # Optional alternative Python/OpenCascade authoring backend for the
+    # baseline agent. Kept OUT of core deps on purpose: `cadquery` pulls
+    # `cadquery-ocp` (the VTK-variant OCP, pins vtk==9.5.2) whose libTKIVtk
+    # needs VTK 9.5, which is incompatible with the headless vtk-osmesa /
+    # vtk-egl wheels (cp312 only ships 9.3) used by the eval + leaderboard
+    # images. build123d uses cadquery-ocp-novtk, so a default install stays
+    # VTK-clean. The CadQuery backend runs the agent's code in a separate
+    # interpreter, so cadquery is only required where that backend runs.
+    "cadquery",
 ]
 dev = [
     "pytest",
