@@ -67,7 +67,6 @@ from __future__ import annotations
 import json
 import logging
 import shutil
-import tempfile
 from pathlib import Path
 
 from cadgenbench.common.artifacts import (
@@ -79,13 +78,9 @@ from cadgenbench.common.profiling import note, phase
 from cadgenbench.common.validity import analyze_step
 from cadgenbench.eval.edit_baseline import (
     EDITING_AXIS_WEIGHTS,
-    ROLE_ABSENT,
-    ROLE_PRESERVE,
-    ROLE_TARGET,
     check_baseline_fresh,
-    preserve_gate,
     read_edit_baseline,
-    renormalize,
+    renormalize_shape,
 )
 
 # Per-axis weights applied to ``cad_score`` for generation fixtures.
@@ -326,16 +321,36 @@ def evaluate_result(
         )
     else:
         check_baseline_fresh(edit_baseline, gt_dir.name)
-        raw_axis = {
-            "shape": scores.get("shape_similarity_score"),
-            "topology": (topology_metrics or {}).get("score"),
-            "interface": (interface_metrics or {}).get("score"),
-        }
-        cad_score, edit_metrics = _edit_cad_score(
-            raw_axis, edit_baseline.get("axes", {}), validation_dict,
+        b_shape = edit_baseline.get("shape_similarity_score")
+        raw_shape = scores.get("shape_similarity_score")
+        shape_renorm = (
+            renormalize_shape(float(raw_shape), float(b_shape))
+            if raw_shape is not None and b_shape is not None
+            else None
         )
-        data["cad_score"] = cad_score
-        data["edit_metrics"] = edit_metrics
+        data["edit_metrics"] = {
+            "baseline_shape_similarity": (
+                round(float(b_shape), 4) if b_shape is not None else None
+            ),
+            "shape_similarity_raw": (
+                round(float(raw_shape), 4) if raw_shape is not None else None
+            ),
+            "shape_similarity_renormalized": (
+                round(shape_renorm, 4) if shape_renorm is not None else None
+            ),
+            "headroom": (
+                round(1.0 - float(b_shape), 4) if b_shape is not None else None
+            ),
+            "axis_weights": EDITING_AXIS_WEIGHTS,
+        }
+        data["cad_score"] = _cad_score(
+            scores=scores,
+            interface_metrics=interface_metrics,
+            topology_metrics=topology_metrics,
+            validation=validation_dict,
+            shape_score=shape_renorm,
+            weights=EDITING_AXIS_WEIGHTS,
+        )
         # Editing fixtures get the ghost/diff turntable alongside the
         # candidate's own renders so the (often tiny or internal) edit is
         # visible in the gallery.
@@ -401,127 +416,6 @@ def _cad_score(
     if den == 0:
         return 0.0
     return num / den
-
-
-def _edit_cad_score(
-    raw_axis: dict[str, float | None],
-    axes_meta: dict[str, dict],
-    validation: dict,
-) -> tuple[float, dict]:
-    """CAD Score for an editing fixture, anchored so the no-op scores 0.
-
-    Each axis carries a committed *role* (see
-    :mod:`cadgenbench.eval.edit_baseline`):
-
-    - ``target`` -- the edit moves this axis. The raw score is renormalized
-      against the no-op baseline, so the unedited input maps to ``0`` and a
-      perfect candidate to ``1``. Target axes are combined as a
-      ``EDITING_AXIS_WEIGHTS`` weighted mean (weights renormalize over the
-      targets actually present).
-    - ``preserve`` -- the edit leaves this axis unchanged (input already
-      matches the GT). It earns no positive credit (that would re-float the
-      no-op); instead it is a one-sided multiplicative *gate* that only
-      pulls the score down when the candidate *breaks* what should have
-      stayed put.
-    - ``absent`` -- not computable for this fixture (e.g. no jig
-      sub-volumes); dropped entirely.
-
-    ``cad_score = mean_target(renorm) * prod_preserve(gate)``. The no-op
-    floors every target at 0 and passes every gate at 1, so it scores 0.
-    An invalid candidate hard-zeros as elsewhere.
-    """
-    per_axis: dict[str, dict] = {}
-    if not validation.get("is_valid"):
-        return 0.0, {"axes": per_axis, "axis_weights": EDITING_AXIS_WEIGHTS}
-
-    target_renorm: dict[str, float] = {}
-    gate = 1.0
-    for axis, meta in axes_meta.items():
-        role = meta.get("role")
-        baseline = meta.get("baseline")
-        raw = raw_axis.get(axis)
-        entry: dict = {"role": role, "baseline": baseline}
-        if raw is not None:
-            entry["raw"] = round(float(raw), 4)
-        if role == ROLE_ABSENT or raw is None or baseline is None:
-            entry["contribution"] = None
-        elif role == ROLE_TARGET:
-            r = renormalize(float(raw), float(baseline))
-            target_renorm[axis] = r
-            entry["renormalized"] = round(r, 4)
-        elif role == ROLE_PRESERVE:
-            g = preserve_gate(float(raw), float(baseline))
-            gate *= g
-            entry["gate"] = round(g, 4)
-        per_axis[axis] = entry
-
-    num = sum(EDITING_AXIS_WEIGHTS.get(a, 0.0) * r for a, r in target_renorm.items())
-    den = sum(EDITING_AXIS_WEIGHTS.get(a, 0.0) for a in target_renorm)
-    target_mean = num / den if den else 0.0
-    cad_score = target_mean * gate
-    edit_metrics = {
-        "axes": per_axis,
-        "target_mean": round(target_mean, 4),
-        "preserve_gate": round(gate, 4),
-        "axis_weights": EDITING_AXIS_WEIGHTS,
-    }
-    return cad_score, edit_metrics
-
-
-def compute_noop_axes(input_step: Path, gt_dir: Path) -> dict:
-    """Score the no-op (unedited ``input.step`` vs GT) on all three axes.
-
-    Aligns the input to the GT through the **exact grader path** -- the
-    production aligner on the trusted mesh sidecar (no STEP re-tessellation)
-    -- then scores shape similarity, topology match, and interface match off
-    the aligned candidate. Returns the *raw* per-axis scores the grader would
-    award the unedited input (``interface``/``topology`` are ``None`` when the
-    metric does not apply, e.g. a fixture with no jig sub-volumes).
-
-    These are the per-axis no-op baselines the editing renormalization anchors
-    on; see :func:`cadgenbench.eval.edit_baseline.compute_edit_baseline`.
-    """
-    from cadgenbench.common.mesh import deflection_for_bbox  # noqa: PLC0415
-
-    input_step = Path(input_step)
-    gt_dir = Path(gt_dir)
-    gt_step = gt_dir / GT_STEP_NAME
-    gt_artifacts = StepArtifacts(gt_step, is_ground_truth=True)
-    shared_deflection = deflection_for_bbox(
-        gt_artifacts.analysis.measurements.bounding_box.diagonal,
-    )
-
-    raw_artifacts = StepArtifacts(input_step, deflection_override=shared_deflection)
-
-    with tempfile.TemporaryDirectory() as td:
-        work = Path(td)
-        aligned_step = work / ALIGNED_STEP
-        renders_dir = work / RENDERS_DIR
-        rmse = _align_or_reuse(
-            input_step, aligned_step, renders_dir,
-            raw_artifacts=raw_artifacts, gt_artifacts=gt_artifacts,
-            data={}, force=True,
-        )
-        aligned_artifacts = StepArtifacts(aligned_step)
-        shape = compare_step_files(
-            aligned_step, gt_step, align=False,
-            candidate_artifacts=aligned_artifacts, gt_artifacts=gt_artifacts,
-        ).scores.get("shape_similarity_score")
-        interface = _interface_metrics_dict(
-            aligned_step, gt_dir, gt_step,
-            candidate_artifacts=aligned_artifacts, gt_artifacts=gt_artifacts,
-        ).get("score")
-        topology = _topology_metrics_dict(
-            input_step, gt_step, {"is_valid": True},
-            candidate_artifacts=raw_artifacts, gt_artifacts=gt_artifacts,
-        ).get("score")
-
-    return {
-        "shape": None if shape is None else float(shape),
-        "topology": None if topology is None else float(topology),
-        "interface": None if interface is None else float(interface),
-        "alignment_rmse": round(float(rmse), 4) if rmse is not None else None,
-    }
 
 
 def evaluate_candidate_only(candidate_step: Path, result_dir: Path) -> None:

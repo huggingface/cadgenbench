@@ -24,4 +24,4 @@ Three top-level subpackages:
 - :mod:`cadgenbench.baseline`, the reference LLM agent (build123d).
 """
 
-__version__ = "0.2.0"
+__version__ = "0.1.0"
