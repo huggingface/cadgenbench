@@ -29,6 +29,7 @@ from __future__ import annotations
 import base64
 import concurrent.futures
 import logging
+import os
 import re
 import shutil
 import signal
@@ -75,6 +76,35 @@ ARTIFACT_FILENAME = "output.step"
 # agent's working directory rather than inlined into the prompt
 # (editing tasks: the agent loads the seed STEP with ``import_step``).
 _WORKDIR_SEED_SUFFIXES = {".step", ".stp"}
+
+# Agent-authored Python does not need API credentials or a route to the
+# benchmark dataset. In particular, inheriting ``CADGENBENCH_DATA_DIR`` lets
+# an agent derive a local ``gt/<fixture>/ground_truth.step`` path during a
+# locally scored run. Keep these out of every execution subprocess.
+_AGENT_ENV_EXACT_DENYLIST = frozenset({
+    "CADGENBENCH_DATA_DIR",
+    "CADGENBENCH_DATA_REPO",
+    "CADGENBENCH_DATA_GT_REPO",
+    "CADGENBENCH_OPENAI_COMPATIBLE",
+    "INFERENCE_BASE_URL",
+    "OPENAI_API_BASE",
+    "OPENAI_BASE_URL",
+})
+
+
+def _agent_subprocess_env() -> dict[str, str]:
+    """Return a minimal inherited environment for untrusted agent code.
+
+    This is defense in depth, not a filesystem sandbox: run agent code in a
+    container or VM when the host also holds private benchmark artifacts.
+    """
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key not in _AGENT_ENV_EXACT_DENYLIST
+        and not key.endswith("_API_KEY")
+        and not key.endswith("_TOKEN")
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +260,12 @@ def _execute_python(
     script_index: int = 0,
     python_executable: str | None = None,
 ) -> CodeExecution:
-    """Execute a Python script in the persistent working directory."""
+    """Execute a Python script in the persistent working directory.
+
+    The subprocess receives no API credentials or CADGenBench dataset-routing
+    variables. See :func:`_agent_subprocess_env` for the remaining isolation
+    boundary.
+    """
     script_path = work_dir / f"_script_{script_index}.py"
     script_path.write_text(code)
     python_executable = python_executable or sys.executable
@@ -245,6 +280,8 @@ def _execute_python(
             text=True,
             timeout=timeout,
             cwd=str(work_dir),
+            env=_agent_subprocess_env(),
+            check=False,
         )
         duration = time.monotonic() - t0
         success = result.returncode == 0

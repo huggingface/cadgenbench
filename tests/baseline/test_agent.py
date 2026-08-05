@@ -199,6 +199,30 @@ class TestExecuteCode:
         execute_code("print(1)", tmp_path, script_index=0)
         assert not (tmp_path / "_script_0.py").exists()
 
+    def test_hides_dataset_routing_and_credentials(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("CADGENBENCH_DATA_DIR", "/private/benchmark")
+        monkeypatch.setenv("INFERENCE_API_KEY", "secret")
+        monkeypatch.setenv("OPENAI_API_KEY", "secret")
+        monkeypatch.setenv("CUSTOM_SERVICE_TOKEN", "secret")
+        exe = execute_code(
+            "import os\n"
+            "for name in (\n"
+            "    'CADGENBENCH_DATA_DIR', 'INFERENCE_API_KEY', "
+            "'OPENAI_API_KEY', 'CUSTOM_SERVICE_TOKEN',\n"
+            "):\n"
+            "    print(f'{name}={os.environ.get(name)}')\n",
+            tmp_path,
+        )
+        assert exe.success
+        assert exe.stdout.splitlines() == [
+            "CADGENBENCH_DATA_DIR=None",
+            "INFERENCE_API_KEY=None",
+            "OPENAI_API_KEY=None",
+            "CUSTOM_SERVICE_TOKEN=None",
+        ]
+
 
 # ---------------------------------------------------------------------------
 # format_execution_feedback

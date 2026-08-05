@@ -44,6 +44,20 @@ def _fake_response(
 SIMPLE_MESSAGES = [{"role": "user", "content": "Say hi"}]
 
 
+@pytest.fixture(autouse=True)
+def _clear_openai_compatible_gateway_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep mocked unit tests independent of a developer's local ``.env``."""
+    for name in (
+        "INFERENCE_BASE_URL",
+        "INFERENCE_API_KEY",
+        "CADGENBENCH_OPENAI_COMPATIBLE",
+        "CADGENBENCH_INFERENCE_METADATA",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 def _make_client(**kwargs) -> LLMClient:
     """Build an ``LLMClient`` for tests.
 
@@ -139,6 +153,54 @@ class TestTemperatureLockedModels:
         client.complete(SIMPLE_MESSAGES, temperature=0.0, max_tokens=100)
         kwargs = mock_llm.completion.call_args.kwargs
         assert kwargs.get("temperature") == 0.0
+
+
+class TestOpenAICompatibleGateway:
+    """A gateway owns provider routing and accepts its own request envelope."""
+
+    @patch("cadgenbench.baseline.llm.litellm")
+    def test_routes_provider_slug_and_forwards_gateway_settings(
+        self, mock_llm: MagicMock, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        mock_llm.completion.return_value = _fake_response()
+        monkeypatch.setenv("INFERENCE_BASE_URL", "https://gateway.example.com")
+        monkeypatch.setenv("INFERENCE_API_KEY", "test-key")
+        monkeypatch.setenv(
+            "CADGENBENCH_INFERENCE_METADATA", '{"project":"cad-eval"}',
+        )
+        client = _make_client(model="anthropic/claude-opus-4-8")
+        client.complete(SIMPLE_MESSAGES, reasoning_effort="xhigh")
+
+        call = mock_llm.completion.call_args
+        assert call.kwargs["model"] == "openai/anthropic/claude-opus-4-8"
+        assert call.kwargs["api_base"] == "https://gateway.example.com/v1"
+        assert call.kwargs["api_key"] == "test-key"
+        assert call.kwargs["extra_body"] == {
+            "reasoning": {"effort": "xhigh"},
+            "metadata": {"project": "cad-eval"},
+        }
+        assert "thinking" not in call.kwargs
+        assert "output_config" not in call.kwargs
+
+    @patch("cadgenbench.baseline.llm.litellm")
+    def test_does_not_apply_anthropic_cache_control(
+        self, mock_llm: MagicMock, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        mock_llm.completion.return_value = _fake_response()
+        monkeypatch.setenv("INFERENCE_BASE_URL", "https://gateway.example.com/v1")
+        client = _make_client(model="anthropic/claude-opus-4-8")
+        messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "draw a part"},
+        ]
+        client.complete(messages, max_tokens=100)
+        sent = mock_llm.completion.call_args.kwargs["messages"]
+        assert not any(_cache_blocks(message["content"]) for message in sent)
+
+    def test_rejects_non_object_metadata(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CADGENBENCH_INFERENCE_METADATA", "[]")
+        with pytest.raises(TypeError, match="must be a JSON object"):
+            LLMClient._inference_metadata()
 
 
 class TestRetryOnTransientError:

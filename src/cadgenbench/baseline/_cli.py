@@ -116,11 +116,12 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> None:
                    help="LiteLLM model string")
     p.add_argument("--temperature", type=float, default=defaults.temperature)
     p.add_argument(
-        "--reasoning-effort", choices=["minimal", "low", "medium", "high"],
+        "--reasoning-effort", choices=["minimal", "low", "medium", "high", "xhigh"],
         default=defaults.reasoning_effort,
         help=("Cross-provider reasoning/thinking budget. Maps to OpenAI "
               "reasoning_effort, Anthropic extended-thinking budget_tokens, "
-              "and Gemini thinking_budget via LiteLLM. 'high' = max effort."),
+              "and Gemini thinking_budget via LiteLLM. OpenAI-compatible "
+              "gateways may also support 'xhigh'."),
     )
     p.add_argument("--timeout", type=int, default=defaults.runner_timeout,
                    help=f"Per-script execution timeout (default: {defaults.runner_timeout}s)")

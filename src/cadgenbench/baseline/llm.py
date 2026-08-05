@@ -22,19 +22,17 @@ Wraps ``litellm.completion`` with:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import random
 import re
 import time
-
-from dotenv import load_dotenv
-
-load_dotenv()
 from dataclasses import dataclass, field
 from typing import Any
 
 import litellm
+from dotenv import load_dotenv
 from litellm import (
     APIConnectionError,
     BadGatewayError,
@@ -44,6 +42,18 @@ from litellm import (
     Timeout,
     UnsupportedParamsError,
 )
+
+load_dotenv()
+
+
+# ``INFERENCE_*`` is a deliberately provider-neutral convention used by
+# OpenAI-compatible gateways.  When it is configured, provider-qualified
+# model names (for example ``anthropic/claude-*``) still go to that single
+# endpoint instead of making LiteLLM select the named provider directly.
+_INFERENCE_BASE_URL_ENV = "INFERENCE_BASE_URL"
+_INFERENCE_API_KEY_ENV = "INFERENCE_API_KEY"
+_OPENAI_COMPATIBLE_ENV = "CADGENBENCH_OPENAI_COMPATIBLE"
+_INFERENCE_METADATA_ENV = "CADGENBENCH_INFERENCE_METADATA"
 
 # Silence LiteLLM's unconditional ``print()`` banners ("Give Feedback / Get
 # Help", "Provider List: ...") and its full-body dumps of upstream HTML
@@ -439,7 +449,17 @@ class LLMClient:
         # and pass the native adaptive + effort params directly.
         effort = kwargs.pop("reasoning_effort", None)
         if effort is not None:
-            if self._is_anthropic_adaptive_model():
+            if self._uses_openai_compatible_gateway():
+                extra_body = dict(kwargs.get("extra_body") or {})
+                extra_body["reasoning"] = {"effort": effort}
+                metadata = self._inference_metadata()
+                if metadata:
+                    extra_body["metadata"] = {
+                        **dict(extra_body.get("metadata") or {}),
+                        **metadata,
+                    }
+                kwargs["extra_body"] = extra_body
+            elif self._is_anthropic_adaptive_model():
                 # Opus 4.7 only accepts the adaptive thinking API:
                 #   thinking={"type":"adaptive"} + output_config={"effort": ...}
                 # LiteLLM's unified reasoning_effort still emits the legacy
@@ -466,6 +486,8 @@ class LLMClient:
             # LiteLLM instead of overloading HF_TOKEN.
             kwargs["api_key"] = os.environ["CADGENBENCH_HF_INFERENCE_TOKEN"]
 
+        self._configure_openai_compatible_request(kwargs)
+
         # Only the task input image + the last few renders ride along; older
         # per-turn renders are dropped (text kept). Bounds request size and
         # avoids provider many-image limits. Caller's list stays intact.
@@ -490,7 +512,7 @@ class LLMClient:
                     response = self._stream_completion(payload, **kwargs)
                 else:
                     response = litellm.completion(
-                        model=self.model,
+                        model=self._request_model(),
                         messages=payload,
                         timeout=self.timeout,
                         **kwargs,
@@ -566,7 +588,7 @@ class LLMClient:
         """
         stream_options = kwargs.pop("stream_options", {"include_usage": True})
         stream = litellm.completion(
-            model=self.model,
+            model=self._request_model(),
             messages=messages,
             timeout=self.timeout,
             stream=True,
@@ -600,13 +622,60 @@ class LLMClient:
     def _is_anthropic_model(self) -> bool:
         """True for Anthropic/Claude models, which need explicit prompt-cache
         breakpoints (OpenAI and Gemini cache prefixes automatically)."""
+        if self._uses_openai_compatible_gateway():
+            return False
         model = self.model.lower()
         return "anthropic" in model or "claude" in model
 
     def _is_anthropic_adaptive_model(self) -> bool:
+        if self._uses_openai_compatible_gateway():
+            return False
         if "anthropic" not in self.model and "claude" not in self.model:
             return False
         return any(p in self.model for p in self._ANTHROPIC_ADAPTIVE_PATTERNS)
+
+    def _request_model(self) -> str:
+        """Route model IDs through an explicitly configured OpenAI-compatible API."""
+        if self._uses_openai_compatible_gateway():
+            return f"openai/{self.model}"
+        return self.model
+
+    @staticmethod
+    def _uses_openai_compatible_gateway() -> bool:
+        """Whether all model slugs should use one OpenAI-compatible endpoint."""
+        return bool(
+            os.environ.get(_OPENAI_COMPATIBLE_ENV)
+            or os.environ.get(_INFERENCE_BASE_URL_ENV)
+        )
+
+    @staticmethod
+    def _inference_metadata() -> dict[str, Any]:
+        """Read optional JSON metadata forwarded to a compatible gateway."""
+        raw = os.environ.get(_INFERENCE_METADATA_ENV)
+        if not raw:
+            return {}
+        try:
+            metadata = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"{_INFERENCE_METADATA_ENV} must be a JSON object"
+            ) from exc
+        if not isinstance(metadata, dict):
+            raise TypeError(f"{_INFERENCE_METADATA_ENV} must be a JSON object")
+        return metadata
+
+    @staticmethod
+    def _configure_openai_compatible_request(kwargs: dict[str, Any]) -> None:
+        """Map ``INFERENCE_*`` credentials to LiteLLM's OpenAI transport."""
+        base_url = os.environ.get(_INFERENCE_BASE_URL_ENV)
+        if base_url:
+            base_url = base_url.rstrip("/")
+            if not base_url.endswith("/v1"):
+                base_url = f"{base_url}/v1"
+            kwargs.setdefault("api_base", base_url)
+        api_key = os.environ.get(_INFERENCE_API_KEY_ENV)
+        if api_key:
+            kwargs.setdefault("api_key", api_key)
 
     def count_tokens(self, messages: list[dict[str, Any]]) -> int:
         """Count tokens for a message list without making an API call."""

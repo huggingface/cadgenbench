@@ -153,6 +153,23 @@ cadgenbench baseline run 101 --model openai/gpt-5.5             # OPENAI_API_KEY
 
 See `cadgenbench baseline run --help` for the full flag set.
 
+**Using an OpenAI-compatible gateway.** Set `INFERENCE_BASE_URL` and
+`INFERENCE_API_KEY`; the baseline will route every `--model` slug through that
+gateway, including provider-qualified names such as `anthropic/claude-*`. The
+base URL may be either the service root or its `/v1` endpoint. You can instead
+set `CADGENBENCH_OPENAI_COMPATIBLE=1` when the endpoint is already configured
+with LiteLLM's `OPENAI_API_BASE` / `OPENAI_API_KEY` variables. Optional
+`CADGENBENCH_INFERENCE_METADATA` is a JSON object forwarded as request
+metadata.
+
+```bash
+INFERENCE_BASE_URL=https://gateway.example.com
+INFERENCE_API_KEY=...  # keep this out of version control
+CADGENBENCH_INFERENCE_METADATA='{"project":"cad-eval"}'
+cadgenbench baseline run 101 --model anthropic/claude-opus-4-8 \
+    --reasoning-effort xhigh
+```
+
 Output lands at `results/<timestamp>_<model_slug>/<sample>/output.step`.
 The baseline only *generates* candidates; scoring against ground truth
 happens on the leaderboard Space after you submit.
