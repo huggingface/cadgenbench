@@ -42,7 +42,7 @@ baseline = [
     # The reference baseline agent talks to LLM providers via LiteLLM and
     # loads API keys from .env via python-dotenv. Not needed for evaluating
     # candidate submissions produced by some other generator.
-    "litellm",
+    "litellm!=1.107.0",
     "python-dotenv",
 ]
 cadquery = [
